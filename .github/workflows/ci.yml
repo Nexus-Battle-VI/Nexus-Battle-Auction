@@ -169,15 +169,19 @@ jobs:
       - name: Verificar que la readiness falla cuando el motor cae
         run: |
           docker stop auction-ci-db > /dev/null
-          status="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3008/api/health/ready)"
-          docker rm -f auction-ci auction-ci-db > /dev/null
-          docker network rm auction-ci > /dev/null
+          # `|| true`: si el servicio murio con el motor, curl no conecta y sale
+          # con 7. Eso tambien es un fallo, pero debe verse como tal y con los
+          # registros del contenedor, no como un error opaco del paso.
+          status="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3008/api/health/ready || true)"
           if [ "$status" = "503" ]; then
             echo "Correcto: readiness 503 sin base de datos."
           else
-            echo "FALLO: readiness respondio ${status} sin base de datos."
-            exit 1
+            echo "FALLO: readiness respondio '${status}' sin base de datos."
+            docker logs auction-ci || true
           fi
+          docker rm -f auction-ci auction-ci-db > /dev/null
+          docker network rm auction-ci > /dev/null
+          [ "$status" = "503" ]
 
   publish:
     name: Publicar imagen en GHCR

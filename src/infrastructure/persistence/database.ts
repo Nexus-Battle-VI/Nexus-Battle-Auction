@@ -21,22 +21,41 @@ export interface DatabaseOptions {
    * agotaria `max_connections` antes de que ningun servicio notara presion.
    */
   readonly maxConnections?: number
+  /**
+   * Recibe los errores de las conexiones OCIOSAS del pool.
+   *
+   * Una conexion que espera en el pool sigue unida a un proceso del motor. Si
+   * el motor se reinicia o la red se corta, esa conexion emite `error` en el
+   * pool, y sin ningun oyente Node trata el evento como no controlado y
+   * TERMINA EL PROCESO. El servicio entero caeria por un reinicio de la base,
+   * en lugar de responder 503 en la readiness y recuperarse solo.
+   *
+   * Se descubrio con la prueba de control de la CI: al parar PostgreSQL, el
+   * contenedor dejaba de responder en vez de devolver 503.
+   */
+  readonly onIdleError?: (error: Error) => void
 }
 
-export const createDatabase = (options: DatabaseOptions): Kysely<Database> =>
-  new Kysely<Database>({
-    dialect: new PostgresDialect({
-      pool: new Pool({
-        connectionString: options.connectionString,
-        max: options.maxConnections ?? 5,
-        // Cerrar conexiones ociosas devuelve capacidad al motor compartido.
-        idleTimeoutMillis: 30_000,
-        // Sin este limite, un motor caido deja las peticiones colgadas hasta el
-        // tiempo de espera de la peticion HTTP, que es mucho mas largo.
-        connectionTimeoutMillis: 5_000,
-      }),
-    }),
+export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
+  const pool = new Pool({
+    connectionString: options.connectionString,
+    max: options.maxConnections ?? 5,
+    // Cerrar conexiones ociosas devuelve capacidad al motor compartido.
+    idleTimeoutMillis: 30_000,
+    // Sin este limite, un motor caido deja las peticiones colgadas hasta el
+    // tiempo de espera de la peticion HTTP, que es mucho mas largo.
+    connectionTimeoutMillis: 5_000,
   })
+
+  // El oyente se registra SIEMPRE, aunque nadie pase `onIdleError`: su mera
+  // presencia es lo que impide que el proceso termine. El pool ya descarta la
+  // conexion rota y abre otra en la siguiente consulta.
+  pool.on('error', (error: Error) => {
+    options.onIdleError?.(error)
+  })
+
+  return new Kysely<Database>({ dialect: new PostgresDialect({ pool }) })
+}
 
 /**
  * Migraciones declaradas en codigo, no descubiertas del sistema de ficheros.

@@ -15,6 +15,7 @@ import { CLOCK, type ClockPort } from '../../application/ports/ClockPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
+import { describeError } from '../observability/describe-error'
 import { createLogger, type Logger } from '../observability/logger'
 import { createDatabase, pingDatabase } from '../persistence/database'
 
@@ -78,7 +79,12 @@ export const INTERNAL_CALLERS: readonly string[] = []
         }
 
         // El esquema NO se migra aqui: es un paso explicito, `npm run migrate`.
-        return createDatabase({ connectionString: config.databaseUrl })
+        return createDatabase({
+          connectionString: config.databaseUrl,
+          onIdleError: (error) => {
+            logger.warn('postgres_idle_connection_error', { detail: describeError(error) })
+          },
+        })
       },
       inject: [APP_CONFIG, LOGGER],
     },

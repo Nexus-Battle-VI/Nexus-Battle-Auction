@@ -68,6 +68,39 @@ describe('Persistencia PostgreSQL', () => {
   })
 
   /**
+   * Reproduce lo que tumbaba el servicio: el motor corta una conexion que
+   * espera ociosa en el pool. Sin oyente de `error`, Jest veria el proceso
+   * terminar; con el, el error llega a `onIdleError` y la siguiente consulta
+   * abre una conexion nueva.
+   */
+  it('sobrevive a que el motor corte una conexion ociosa del pool', async () => {
+    const errores: Error[] = []
+    const aplicacion = 'prueba-conexion-ociosa'
+    const propia = createDatabase({
+      connectionString: `${container.getConnectionUri()}?application_name=${aplicacion}`,
+      onIdleError: (error) => errores.push(error),
+    })
+
+    try {
+      await expect(pingDatabase(propia)).resolves.toBe(true)
+
+      await sql`
+        select pg_terminate_backend(pid) from pg_stat_activity
+        where application_name = ${aplicacion} and state = 'idle'
+      `.execute(db)
+
+      for (let intento = 0; intento < 50 && errores.length === 0; intento += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+
+      expect(errores.length).toBeGreaterThan(0)
+      await expect(pingDatabase(propia)).resolves.toBe(true)
+    } finally {
+      await propia.destroy()
+    }
+  })
+
+  /**
    * El control de la primera prueba: con el motor inalcanzable la sonda dice
    * `false`. Sin este caso, una sonda que devolviera siempre `true` pasaria.
    */
