@@ -1,0 +1,16 @@
+.git
+.github
+node_modules
+dist
+coverage
+tests
+docs
+*.md
+!README.md
+.env
+.env.*
+.editorconfig
+.nvmrc
+.eslintcache
+Dockerfile
+.dockerignore

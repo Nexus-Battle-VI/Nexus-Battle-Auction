@@ -1,0 +1,13 @@
+# Normalizacion de fin de linea.
+# El repositorio almacena LF. Prettier verifica LF en CI, por lo que el final
+# de linea debe ser deterministico independientemente del sistema operativo
+# de quien contribuye.
+
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

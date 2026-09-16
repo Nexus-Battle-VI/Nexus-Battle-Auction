@@ -1,0 +1,95 @@
+name: Flujo de ramas
+
+# Nada llega a `main` sin haber pasado por `develop`.
+#
+# POR QUE EXISTE ESTO. Varios repositorios llevaron semanas con `main` y
+# `develop` divergidas y con trabajo REAL en los dos lados, sin que nada lo
+# delatara: cada mitad pasaba su propia CI en verde. Cuando eso ocurre, la
+# promocion `develop -> main` deja de ser un tramite y pasa a poder BORRAR
+# trabajo, porque aplica el estado de una rama sobre el de la otra.
+#
+# CONTAR COMMITS NO RESPONDE A ESA PREGUNTA. `main` solo admite *squash*, asi
+# que dos cambios con el mismo contenido tienen SHA y ancestry distintos. La
+# comprobacion exige que el arbol propuesto sea exactamente el de `develop`:
+# ni mas, ni menos, independientemente de como se construyo el historial.
+#
+# Esto convierte la norma en un limite: la comprobacion falla. Esa es la
+# diferencia entre una convencion escrita en un fichero de reglas y algo que
+# nadie puede saltarse por descuido.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  develop-primero:
+    name: develop antes que main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio con historial completo
+        uses: actions/checkout@v4
+        with:
+          # La punta REAL del pull request, no el commit de fusion que GitHub
+          # sintetiza. Ese commit tiene a `main` por padre, asi que usarlo
+          # falsearia justo la pregunta que se esta haciendo.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Comprobar que todo lo que va a main paso por develop
+        run: |
+          set -euo pipefail
+
+          if ! git fetch --no-tags --quiet origin develop; then
+            echo "::error::No existe la rama develop en este repositorio. El flujo que exige esta comprobacion no se puede aplicar."
+            exit 1
+          fi
+
+          if ! git diff --quiet origin/develop HEAD; then
+            echo "::error::El arbol propuesto para main no coincide exactamente con develop. Integra primero cualquier diferencia en develop y promociona ese arbol completo."
+            {
+              echo "## Diferencias frente a develop"
+              echo
+              echo '```'
+              git diff --name-status origin/develop HEAD
+              echo '```'
+              echo
+              echo "Que hacer: abre el pull request contra \`develop\`. Cuando este integrado alli, promociona \`develop\` a \`main\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "El arbol propuesto coincide exactamente con develop."
+
+      - name: Avisar si esta promocion borraria algo que solo esta en main
+        # Se ejecuta aunque el paso anterior falle: si las dos cosas van mal,
+        # conviene verlas juntas y no una por ejecucion.
+        if: always()
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags --quiet origin main
+
+          # Ficheros que main tiene y esta rama NO. No es necesariamente un
+          # error -borrar es a veces lo que se quiere-, pero es la forma que
+          # tiene de manifestarse el caso peligroso: main avanzo por su cuenta
+          # y nadie lo trajo a develop.
+          borrados="$(git diff --name-status origin/main HEAD | grep '^D' || true)"
+
+          if [ -n "$borrados" ]; then
+            echo "::warning::Esta promocion eliminaria ficheros que hoy existen en main. Comprueba que es deliberado."
+            {
+              echo "## Ficheros que main tiene y esta rama no"
+              echo
+              echo '```'
+              echo "$borrados"
+              echo '```'
+              echo
+              echo "Si no es deliberado, integra \`main\` en \`develop\` antes de promover."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "La promocion no elimina ningun fichero presente en main."
+          fi

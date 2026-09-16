@@ -1,0 +1,19 @@
+# Propiedad del código — Nexus-Battle-Auction
+#
+# Bounded context: Auction
+# Team propietario: POR ASIGNAR (ADR-019 pendiente de aprobación)
+#
+# Mientras Scrum Masters y Product Owners no asignen el Team, la revisión
+# recae en Scrum Master. Al asignarlo, se sustituye la primera línea por el
+# equipo propietario y se conserva el resto.
+# Management permanece como fuente única de Issues; aquí solo se gobierna el código.
+
+*                       @Nexus-Battle-VI/scrum-master
+
+# Gobierno del repositorio y automatización
+/.github/               @Nexus-Battle-VI/scrum-master
+/.github/workflows/     @Nexus-Battle-VI/scrum-master
+/.github/CODEOWNERS     @Nexus-Battle-VI/scrum-master
+
+# Documentación técnica y contratos
+/docs/                  @Nexus-Battle-VI/scrum-master

@@ -1,0 +1,40 @@
+# Dependencias
+node_modules/
+.npm/
+
+# Compilación
+dist/
+build/
+*.tsbuildinfo
+
+# Pruebas y cobertura
+coverage/
+.nyc_output/
+junit.xml
+
+# Entorno y secretos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials
+.aws/
+
+# Herramientas
+.eslintcache
+.cache/
+.tmp/
+.DS_Store
+Thumbs.db
+
+# Editores
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+logs/
+*.log
+npm-debug.log*

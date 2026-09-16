@@ -1,0 +1,63 @@
+{
+  "name": "@nexus-battle-vi/auction",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servicio de creditos de Nexus Battles VI (bounded context Auction).",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11"
+  },
+  "packageManager": "npm@11.17.0",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "nest start --watch",
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "start:prod": "NODE_ENV=production node dist/main.js",
+    "typecheck": "tsc --noEmit --project tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "jest",
+    "test:unit": "jest --selectProjects unit",
+    "test:integration": "jest --selectProjects integration",
+    "test:coverage": "jest --coverage",
+    "migrate": "node dist/infrastructure/persistence/migrate.js",
+    "test:db": "jest --config jest.db.config.ts --coverage"
+  },
+  "dependencies": {
+    "@nestjs/common": "11.2.1",
+    "@nestjs/core": "11.2.1",
+    "@nestjs/platform-express": "11.2.1",
+    "@nestjs/swagger": "11.4.7",
+    "aws-jwt-verify": "5.2.1",
+    "class-transformer": "0.5.1",
+    "class-validator": "0.15.1",
+    "kysely": "0.28.17",
+    "pg": "8.23.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@nestjs/cli": "11.0.24",
+    "@nestjs/schematics": "11.1.0",
+    "@nestjs/testing": "11.2.1",
+    "@testcontainers/postgresql": "12.1.0",
+    "@types/express": "5.0.6",
+    "@types/jest": "30.0.0",
+    "@types/node": "24.13.3",
+    "@types/pg": "8.23.1",
+    "@types/supertest": "7.2.1",
+    "eslint": "10.9.0",
+    "eslint-config-prettier": "10.1.8",
+    "jest": "30.4.2",
+    "prettier": "3.9.6",
+    "supertest": "7.2.2",
+    "ts-jest": "29.4.12",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.67.0"
+  }
+}

@@ -1,0 +1,255 @@
+name: CI
+
+on:
+  # Sin filtro de rama destino: se valida TODO pull request, tambien los que
+  # apuntan a `develop` o a otra rama de trabajo.
+  #
+  # Con el filtro anterior, un PR hacia `develop` no ejecutaba NINGUNA
+  # comprobacion. Y `develop` esta protegida exigiendo `Calidad y pruebas`:
+  # comprobaciones que nunca se reportaban, de modo que el PR no podia
+  # satisfacer su propia proteccion y quedaba bloqueado sin explicacion.
+  #
+  # El `push` si se limita a `main`, que es la unica rama que publica imagen.
+  pull_request:
+  push:
+    branches: [main]
+
+# El token del workflow solo necesita leer el repositorio. El unico job que
+# necesita mas es `publish`, y lo pide para si mismo. Ninguna etapa despliega
+# infraestructura desde CI.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24.19.0'
+
+jobs:
+  quality:
+    name: Calidad y pruebas
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Verificar formato
+        run: npm run format:check
+
+      # Este servicio usa TypeScript 5.9 porque el Nest CLI 11 depende de esa
+      # version de forma directa. Vease ADR-002.
+      - name: Verificacion de tipos
+        run: npm run typecheck
+
+      - name: Pruebas unitarias
+        run: npm run test:unit
+
+      - name: Pruebas de integracion
+        run: npm run test:integration
+
+      # Estas pruebas levantan PostgreSQL en un contenedor con Testcontainers y
+      # ejercitan el adaptador contra el motor REAL. Estan fuera de `npm test`
+      # para que quien trabaja en el dominio no necesite Docker, pero el CI las
+      # ejecuta siempre: un esquema equivocado solo se detecta aqui.
+      - name: Pruebas contra PostgreSQL real
+        run: npm run test:db
+
+      - name: Cobertura
+        run: npm run test:coverage
+
+      - name: Publicar reporte de cobertura
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-auction
+          path: coverage/
+          retention-days: 7
+
+      - name: Compilar el servicio
+        run: npm run build
+
+  docker:
+    name: Imagen del servicio
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quality
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Este job solo construye y verifica. Publicar es trabajo de `publish`, que
+      # solo se ejecuta desde `main` y depende de que este termine en verde.
+      - name: Construir imagen
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: nexus-battle-auction:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # La imagen corre con NODE_ENV=production, y en produccion el servicio se
+      # NIEGA a arrancar sin verificacion de identidad (ADR-004). La prueba de
+      # humo aporta configuracion de autenticacion en lugar de rebajar la regla.
+      - name: Verificar que la imagen se NIEGA a arrancar sin autenticacion
+        run: |
+          if docker run --rm nexus-battle-auction:ci 2>&1 | grep -q 'AUTH_MODE'; then
+            echo "Correcto: la imagen de produccion no arranca sin AUTH_MODE."
+          else
+            echo "FALLO: la imagen arranco sin verificacion de identidad."
+            exit 1
+          fi
+
+      # La imagen de produccion se niega a arrancar con persistencia en memoria
+      # (ADR-019): el estado del contexto no puede perderse al reiniciar. Por eso
+      # la prueba de arranque levanta un PostgreSQL real, y la readiness
+      # comprueba de verdad que el servicio llega al motor.
+      - name: Verificar que la imagen se NIEGA a arrancar sin persistencia duradera
+        run: |
+          if docker run --rm -e AUTH_MODE=jwt -e COGNITO_USER_POOL_ID=us-east-1_ci -e COGNITO_CLIENT_ID=cliente-ci nexus-battle-auction:ci 2>&1 | grep -q 'PERSISTENCE_DRIVER'; then
+            echo "Correcto: la imagen de produccion no arranca con persistencia en memoria."
+          else
+            echo "FALLO: la imagen arranco sin persistencia duradera."
+            exit 1
+          fi
+
+      - name: Verificar arranque del contenedor contra PostgreSQL real
+        run: |
+          docker network create auction-ci > /dev/null
+          docker run -d --name auction-ci-db --network auction-ci -e POSTGRES_USER=auction -e POSTGRES_PASSWORD=auction-ci -e POSTGRES_DB=auction postgres:17-alpine > /dev/null
+          for attempt in $(seq 1 30); do
+            if docker exec auction-ci-db pg_isready -U auction -d auction > /dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          url='postgres://auction:auction-ci@auction-ci-db:5432/auction'
+          docker run --rm --network auction-ci -e AUTH_MODE=jwt -e COGNITO_USER_POOL_ID=us-east-1_ci -e COGNITO_CLIENT_ID=cliente-ci -e PERSISTENCE_DRIVER=postgres -e DATABASE_URL="$url" nexus-battle-auction:ci node dist/infrastructure/persistence/migrate.js
+          docker run -d --name auction-ci --network auction-ci -p 3008:3008 -e AUTH_MODE=jwt -e COGNITO_USER_POOL_ID=us-east-1_ci -e COGNITO_CLIENT_ID=cliente-ci -e PERSISTENCE_DRIVER=postgres -e DATABASE_URL="$url" nexus-battle-auction:ci
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3008/api/health/ready > /dev/null; then
+              echo "readiness correcta en el intento ${attempt}"
+              curl -fsS http://127.0.0.1:3008/api/health/ready
+              curl -fsS http://127.0.0.1:3008/api/version
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "El contenedor no alcanzo el estado ready"
+          docker logs auction-ci
+          exit 1
+
+      # Control de la anterior: sin motor, la readiness DEBE responder 503. Si
+      # respondiera 200, la prueba de arriba pasaria por construccion.
+      - name: Verificar que la readiness falla cuando el motor cae
+        run: |
+          docker stop auction-ci-db > /dev/null
+          status="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3008/api/health/ready)"
+          docker rm -f auction-ci auction-ci-db > /dev/null
+          docker network rm auction-ci > /dev/null
+          if [ "$status" = "503" ]; then
+            echo "Correcto: readiness 503 sin base de datos."
+          else
+            echo "FALLO: readiness respondio ${status} sin base de datos."
+            exit 1
+          fi
+
+  publish:
+    name: Publicar imagen en GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: docker
+    # Solo desde `main`, nunca desde un pull request. Si un PR pudiera publicar,
+    # cualquiera capaz de abrir uno escribiria en el registro de la organizacion.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # `packages: write` se concede AQUI y no en la cabecera del fichero. Los
+    # demas jobs no lo necesitan, y un permiso que abarca todo el workflow deja
+    # de estar asociado al paso que lo usa.
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Iniciar sesion en GHCR
+        env:
+          REGISTRO_USUARIO: ${{ github.actor }}
+          REGISTRO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$REGISTRO_TOKEN" | docker login ghcr.io -u "$REGISTRO_USUARIO" --password-stdin
+
+      # Tres etiquetas, cada una responde a una pregunta distinta:
+      #
+      #   latest       lo que la composicion de referencia trae por defecto;
+      #   sha-<corto>  de que commit exacto salio la imagen, sin ambiguedad;
+      #   <semver>     que version declara el paquete, la misma que sirve /version.
+      #
+      # El propietario se pasa a minusculas a proposito: GHCR no admite
+      # `Nexus-Battle-VI` como ruta de registro y el push fallaria.
+      - name: Calcular etiquetas
+        id: etiquetas
+        env:
+          PROPIETARIO: ${{ github.repository_owner }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          imagen="ghcr.io/$(echo "$PROPIETARIO" | tr '[:upper:]' '[:lower:]')/nexus-battle-auction"
+          version="$(node -p "require('./package.json').version")"
+          {
+            echo 'lista<<FIN'
+            echo "${imagen}:latest"
+            echo "${imagen}:sha-${COMMIT:0:12}"
+            echo "${imagen}:${version}"
+            echo 'FIN'
+          } >> "$GITHUB_OUTPUT"
+
+      # Se reconstruye desde el mismo commit y con la misma cache que el job
+      # anterior, asi que el trabajo real es un acierto de cache. Lo que
+      # garantiza que se publica algo comprobado no es la cache, sino
+      # `needs: docker`: sin ese job en verde, este no llega a ejecutarse.
+      - name: Construir y publicar
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          # Los nodos de la demo son Graviton: `t4g.small` es arm64. Sin esta
+          # linea la imagen sale solo para amd64 y el nodo la rechaza con
+          # "no matching manifest for linux/arm64/v8".
+          #
+          # Se construyen las DOS: los portatiles del equipo son amd64 y la
+          # composicion de referencia tiene que seguir levantando en ellos.
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.etiquetas.outputs.lista }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
