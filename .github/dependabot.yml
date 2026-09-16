@@ -3,6 +3,9 @@ version: 2
 updates:
   - package-ecosystem: npm
     directory: /
+    # `main` solo recibe la promocion completa de `develop` (workflow Flujo de
+    # ramas): una actualizacion abierta contra `main` nunca podria integrarse.
+    target-branch: develop
     schedule:
       interval: weekly
       day: monday
@@ -39,6 +42,9 @@ updates:
 
   - package-ecosystem: github-actions
     directory: /
+    # `main` solo recibe la promocion completa de `develop` (workflow Flujo de
+    # ramas): una actualizacion abierta contra `main` nunca podria integrarse.
+    target-branch: develop
     schedule:
       interval: weekly
       day: monday
@@ -57,6 +63,9 @@ updates:
 
   - package-ecosystem: docker
     directory: /
+    # `main` solo recibe la promocion completa de `develop` (workflow Flujo de
+    # ramas): una actualizacion abierta contra `main` nunca podria integrarse.
+    target-branch: develop
     schedule:
       interval: weekly
       day: monday
