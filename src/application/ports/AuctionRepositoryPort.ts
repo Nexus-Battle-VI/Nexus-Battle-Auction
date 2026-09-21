@@ -1,4 +1,5 @@
 import type { Auction, AuctionSnapshot } from '../../domain/entities/Auction'
+import type { Bid, BidSnapshot } from '../../domain/entities/Bid'
 
 export interface PersistAuctionPublicationCommand {
   readonly operationId: string
@@ -25,11 +26,25 @@ export interface RecordPublicationFailureCommand {
   readonly occurredAt: Date
 }
 
+export interface PersistBidResult {
+  readonly bid: BidSnapshot
+  readonly previousLeader: BidSnapshot | null
+}
+
 export interface AuctionRepositoryPort {
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult>
+
   recordFailure(command: RecordPublicationFailureCommand): Promise<void>
+
   findById(auctionId: string): Promise<AuctionSnapshot | null>
+
   countActiveBySeller(sellerId: string): Promise<number>
+
+  persistBid(bid: Bid): Promise<PersistBidResult>
+
+  findLeadingBid(auctionId: string): Promise<BidSnapshot | null>
+
+  findBidHistory(auctionId: string): Promise<readonly BidSnapshot[]>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')

@@ -9,8 +9,9 @@ import {
 } from 'kysely'
 import { Pool } from 'pg'
 
-import type { Database } from '../../adapters/outbound/persistence/schema'
+import * as createAuctionBids from '../../adapters/outbound/persistence/migrations/002-create-auction-bids'
 import * as createAuctionPublication from '../../adapters/outbound/persistence/migrations/001-create-auction-publication'
+import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
   readonly connectionString: string
@@ -55,7 +56,9 @@ export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
     options.onIdleError?.(error)
   })
 
-  return new Kysely<Database>({ dialect: new PostgresDialect({ pool }) })
+  return new Kysely<Database>({
+    dialect: new PostgresDialect({ pool }),
+  })
 }
 
 /**
@@ -66,11 +69,12 @@ export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
  * ruta. Importarlas explicitamente hace que el compilador las verifique y que
  * el empaquetado no pueda dejarse ninguna fuera en silencio.
  *
- * Esta vacio a proposito: el andamiaje no inventa tablas. Cada Historia de
- * Usuario anade aqui su migracion, con prefijo numerico que fija el orden.
+ * Cada Historia de Usuario anade aqui su migracion, con prefijo numerico que
+ * fija el orden.
  */
 export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '001-create-auction-publication': createAuctionPublication,
+  '002-create-auction-bids': createAuctionBids,
 }
 
 export interface MigrationOutcome {
@@ -97,7 +101,12 @@ export const migrateToLatest = async (
   const provider: MigrationProvider = {
     getMigrations: () => Promise.resolve({ ...migrations }),
   }
-  const migrator = new Migrator({ db, provider })
+
+  const migrator = new Migrator({
+    db,
+    provider,
+  })
+
   const { error, results } = await migrator.migrateToLatest()
 
   return {

@@ -31,6 +31,15 @@ export interface AuctionTable {
   created_at: GeneratedTimestamp
 }
 
+export interface AuctionBidTable {
+  id: string
+  auction_id: string
+  bidder_id: string
+  amount_credits: number
+  placed_at: Timestamp
+  is_leader: boolean
+}
+
 export interface AuctionPublicationOperationTable {
   operation_id: string
   request_hash: string
@@ -72,6 +81,7 @@ export interface OutboxEventTable {
 
 export interface Database {
   auctions: AuctionTable
+  auction_bids: AuctionBidTable
   auction_publication_operations: AuctionPublicationOperationTable
   auction_publication_failures: AuctionPublicationFailureTable
   auction_audit_log: AuctionAuditLogTable

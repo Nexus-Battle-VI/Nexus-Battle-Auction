@@ -4,6 +4,8 @@ import { sql, type Kysely, type Selectable, type Transaction } from 'kysely'
 
 import {
   ActiveAuctionLimitExceededError,
+  BidAlreadyExistsError,
+  ConcurrentBidConflictError,
   IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
@@ -11,6 +13,7 @@ import type {
   AuctionRepositoryPort,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
+  PersistBidResult,
   RecordPublicationFailureCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
 import {
@@ -18,13 +21,18 @@ import {
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
+import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 import type { Database } from './schema'
 
 type AuctionRow = Selectable<Database['auctions']>
+
+type AuctionBidRow = Selectable<Database['auction_bids']>
+
 type AuctionDatabase = Kysely<Database> | Transaction<Database>
 
 const requestHash = (command: PersistAuctionPublicationCommand): string => {
   const auction = command.auction.snapshot()
+
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -54,6 +62,14 @@ const toSnapshot = (row: AuctionRow): AuctionSnapshot => ({
   closesAt: new Date(row.closes_at),
 })
 
+const toBidSnapshot = (row: AuctionBidRow): BidSnapshot => ({
+  id: row.id,
+  auctionId: row.auction_id,
+  bidderId: row.bidder_id,
+  amountCredits: row.amount_credits,
+  placedAt: new Date(row.placed_at),
+})
+
 const findAuction = async (
   db: AuctionDatabase,
   auctionId: string,
@@ -63,7 +79,22 @@ const findAuction = async (
     .selectAll()
     .where('id', '=', auctionId)
     .executeTakeFirst()
+
   return row === undefined ? null : toSnapshot(row)
+}
+
+const findLeadingBid = async (
+  db: AuctionDatabase,
+  auctionId: string,
+): Promise<BidSnapshot | null> => {
+  const row = await db
+    .selectFrom('auction_bids')
+    .selectAll()
+    .where('auction_id', '=', auctionId)
+    .where('is_leader', '=', true)
+    .executeTakeFirst()
+
+  return row === undefined ? null : toBidSnapshot(row)
 }
 
 export class PostgresAuctionRepository implements AuctionRepositoryPort {
@@ -72,11 +103,16 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     return this.db.transaction().execute(async (transaction) => {
       const snapshot = command.auction.snapshot()
+
       const hash = requestHash(command)
 
-      // El bloqueo por operacion serializa reintentos simultaneos. El bloqueo
-      // por vendedor convierte el conteo 9 -> 10 en una decision atomica.
-      await sql`select pg_advisory_xact_lock(hashtext(${command.operationId}))`.execute(transaction)
+      // Serializa reintentos de la misma operacion.
+      await sql`
+          select pg_advisory_xact_lock(
+            hashtext(${command.operationId})
+          )
+        `.execute(transaction)
+
       const previous = await transaction
         .selectFrom('auction_publication_operations')
         .select(['request_hash', 'auction_id'])
@@ -84,19 +120,41 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
         .executeTakeFirst()
 
       if (previous !== undefined) {
-        if (previous.request_hash !== hash) throw new IdempotencyConflictError()
+        if (previous.request_hash !== hash) {
+          throw new IdempotencyConflictError()
+        }
+
         const auction = await findAuction(transaction, previous.auction_id)
-        if (auction === null) throw new PersistedAuctionNotFoundError(previous.auction_id)
-        return { auction, replayed: true }
+
+        if (auction === null) {
+          throw new PersistedAuctionNotFoundError(previous.auction_id)
+        }
+
+        return {
+          auction,
+          replayed: true,
+        }
       }
 
-      await sql`select pg_advisory_xact_lock(hashtext(${snapshot.sellerId}))`.execute(transaction)
+      // Serializa el limite de subastas
+      // activas por vendedor.
+      await sql`
+          select pg_advisory_xact_lock(
+            hashtext(${snapshot.sellerId})
+          )
+        `.execute(transaction)
+
       const active = await transaction
         .selectFrom('auctions')
-        .select(sql<number>`count(*)::integer`.as('amount'))
+        .select(
+          sql<number>`
+              count(*)::integer
+            `.as('amount'),
+        )
         .where('seller_id', '=', snapshot.sellerId)
         .where('status', '=', AuctionStatus.Active)
         .executeTakeFirstOrThrow()
+
       if (active.amount >= MAX_ACTIVE_AUCTIONS_PER_SELLER) {
         throw new ActiveAuctionLimitExceededError()
       }
@@ -128,6 +186,7 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
           completed_at: snapshot.publishedAt,
         })
         .execute()
+
       await transaction
         .insertInto('auction_audit_log')
         .values({
@@ -142,6 +201,7 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
           },
         })
         .execute()
+
       await transaction
         .insertInto('outbox_events')
         .values({
@@ -154,8 +214,116 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
         })
         .execute()
 
-      return { auction: snapshot, replayed: false }
+      return {
+        auction: snapshot,
+        replayed: false,
+      }
     })
+  }
+
+  persistBid(bid: Bid): Promise<PersistBidResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const snapshot = bid.snapshot()
+
+      // Todas las pujas de una misma subasta
+      // pasan de una en una por esta seccion.
+      await sql`
+          select pg_advisory_xact_lock(
+            hashtext(${snapshot.auctionId})
+          )
+        `.execute(transaction)
+
+      const auction = await transaction
+        .selectFrom('auctions')
+        .select(['id', 'minimum_bid_credits'])
+        .where('id', '=', snapshot.auctionId)
+        .executeTakeFirst()
+
+      if (auction === undefined) {
+        throw new PersistedAuctionNotFoundError(snapshot.auctionId)
+      }
+
+      const duplicated = await transaction
+        .selectFrom('auction_bids')
+        .select('id')
+        .where('id', '=', snapshot.id)
+        .executeTakeFirst()
+
+      if (duplicated !== undefined) {
+        throw new BidAlreadyExistsError(snapshot.id)
+      }
+
+      const previousLeaderRow = await transaction
+        .selectFrom('auction_bids')
+        .selectAll()
+        .where('auction_id', '=', snapshot.auctionId)
+        .where('is_leader', '=', true)
+        .executeTakeFirst()
+
+      const previousLeader =
+        previousLeaderRow === undefined ? null : toBidSnapshot(previousLeaderRow)
+
+      /*
+       * La validacion de dominio ocurre antes de
+       * llegar al repositorio, pero mientras una
+       * solicitud esperaba el lock otra puja pudo
+       * convertirse en lider.
+       *
+       * Por eso se vuelve a comprobar contra el
+       * lider REAL dentro de la transaccion.
+       */
+      if (previousLeaderRow !== undefined) {
+        const minimumAllowed = previousLeaderRow.amount_credits + auction.minimum_bid_credits
+
+        if (snapshot.amountCredits < minimumAllowed) {
+          throw new ConcurrentBidConflictError()
+        }
+
+        await transaction
+          .updateTable('auction_bids')
+          .set({
+            is_leader: false,
+          })
+          .where('id', '=', previousLeaderRow.id)
+          .execute()
+      }
+
+      await transaction
+        .insertInto('auction_bids')
+        .values({
+          id: snapshot.id,
+          auction_id: snapshot.auctionId,
+          bidder_id: snapshot.bidderId,
+          amount_credits: snapshot.amountCredits,
+          placed_at: snapshot.placedAt,
+          is_leader: true,
+        })
+        .execute()
+
+      return {
+        bid: {
+          ...snapshot,
+          placedAt: new Date(snapshot.placedAt),
+        },
+        previousLeader,
+      }
+    })
+  }
+
+  findLeadingBid(auctionId: string): Promise<BidSnapshot | null> {
+    return findLeadingBid(this.db, auctionId)
+  }
+
+  async findBidHistory(auctionId: string): Promise<readonly BidSnapshot[]> {
+    const rows = await this.db
+      .selectFrom('auction_bids')
+      .selectAll()
+      .where('auction_id', '=', auctionId)
+      .orderBy('placed_at', 'asc')
+      .orderBy('id', 'asc')
+      .execute()
+
+    return rows.map(toBidSnapshot)
   }
 
   findById(auctionId: string): Promise<AuctionSnapshot | null> {
@@ -194,10 +362,15 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
   async countActiveBySeller(sellerId: string): Promise<number> {
     const row = await this.db
       .selectFrom('auctions')
-      .select(sql<number>`count(*)::integer`.as('amount'))
+      .select(
+        sql<number>`
+          count(*)::integer
+        `.as('amount'),
+      )
       .where('seller_id', '=', sellerId)
       .where('status', '=', AuctionStatus.Active)
       .executeTakeFirstOrThrow()
+
     return row.amount
   }
 }
