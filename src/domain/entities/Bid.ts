@@ -46,34 +46,20 @@ export class Bid {
 
     Bid.assertAuctionActive(input.eligibility.auctionStatus)
 
-    Bid.assertBidderIsNotSeller(
-      input.bidderId,
-      input.eligibility.sellerId,
-    )
+    Bid.assertBidderIsNotSeller(input.bidderId, input.eligibility.sellerId)
 
-    Bid.assertActiveBidLimit(
-      input.eligibility.activeBidCount,
-    )
+    Bid.assertActiveBidLimit(input.eligibility.activeBidCount)
 
-    Bid.assertCooldown(
-      input.placedAt,
-      input.eligibility.lastBidAtByBidder,
-    )
+    Bid.assertCooldown(input.placedAt, input.eligibility.lastBidAtByBidder)
 
-    const amount = BidAmount.positive(
-      input.amountCredits,
-    )
+    const amount = BidAmount.positive(input.amountCredits)
 
     const minimumIncrement = BidAmount.positive(
       input.eligibility.minimumIncrementCredits,
       'incremento minimo',
     )
 
-    Bid.assertAmount(
-      amount,
-      input.eligibility.currentBidCredits,
-      minimumIncrement,
-    )
+    Bid.assertAmount(amount, input.eligibility.currentBidCredits, minimumIncrement)
 
     return new Bid(
       BidId.create(input.bidId),
@@ -94,20 +80,13 @@ export class Bid {
     }
   }
 
-  private static assertValidDate(
-    placedAt: Date,
-  ): void {
+  private static assertValidDate(placedAt: Date): void {
     if (Number.isNaN(placedAt.getTime())) {
-      throw new BidRuleViolation(
-        BidRuleCode.InvalidBidDate,
-        'La fecha de la puja debe ser valida.',
-      )
+      throw new BidRuleViolation(BidRuleCode.InvalidBidDate, 'La fecha de la puja debe ser valida.')
     }
   }
 
-  private static assertAuctionActive(
-    status: string,
-  ): void {
+  private static assertAuctionActive(status: string): void {
     if (status !== 'ACTIVE') {
       throw new BidRuleViolation(
         BidRuleCode.AuctionNotActive,
@@ -116,10 +95,7 @@ export class Bid {
     }
   }
 
-  private static assertBidderIsNotSeller(
-    bidderId: string,
-    sellerId: string,
-  ): void {
+  private static assertBidderIsNotSeller(bidderId: string, sellerId: string): void {
     if (bidderId.trim() === sellerId.trim()) {
       throw new BidRuleViolation(
         BidRuleCode.SellerCannotBid,
@@ -128,9 +104,7 @@ export class Bid {
     }
   }
 
-  private static assertActiveBidLimit(
-    activeBidCount: number,
-  ): void {
+  private static assertActiveBidLimit(activeBidCount: number): void {
     if (
       !Number.isSafeInteger(activeBidCount) ||
       activeBidCount < 0 ||
@@ -143,10 +117,7 @@ export class Bid {
     }
   }
 
-  private static assertCooldown(
-    placedAt: Date,
-    lastBidAtByBidder: Date | null,
-  ): void {
+  private static assertCooldown(placedAt: Date, lastBidAtByBidder: Date | null): void {
     if (lastBidAtByBidder === null) {
       return
     }
@@ -158,9 +129,7 @@ export class Bid {
       )
     }
 
-    const elapsedMs =
-      placedAt.getTime() -
-      lastBidAtByBidder.getTime()
+    const elapsedMs = placedAt.getTime() - lastBidAtByBidder.getTime()
 
     if (elapsedMs < BID_COOLDOWN_SECONDS * 1000) {
       throw new BidRuleViolation(
@@ -179,24 +148,15 @@ export class Bid {
       return
     }
 
-    const currentBid = BidAmount.positive(
-      currentBidCredits,
-      'oferta actual',
-    )
+    const currentBid = BidAmount.positive(currentBidCredits, 'oferta actual')
 
     if (!amount.isGreaterThan(currentBid)) {
-      throw new BidRuleViolation(
-        BidRuleCode.BidTooLow,
-        'La puja debe superar la oferta actual.',
-      )
+      throw new BidRuleViolation(BidRuleCode.BidTooLow, 'La puja debe superar la oferta actual.')
     }
 
-    const minimumAllowed =
-      currentBid.add(minimumIncrement)
+    const minimumAllowed = currentBid.add(minimumIncrement)
 
-    if (
-      !amount.isGreaterThanOrEqual(minimumAllowed)
-    ) {
+    if (!amount.isGreaterThanOrEqual(minimumAllowed)) {
       throw new BidRuleViolation(
         BidRuleCode.MinimumIncrementNotMet,
         'La puja no cumple el incremento minimo configurado.',

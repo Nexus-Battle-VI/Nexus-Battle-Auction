@@ -63,16 +63,16 @@ describe('Dominio de registro de puja HU-63', () => {
   })
 
   it('rechaza una subasta no activa', () => {
-  expectRule(BidRuleCode.AuctionNotActive, () =>
-    Bid.register({
-      ...validInput(),
-      eligibility: {
-        ...validInput().eligibility,
-        auctionStatus: 'CLOSED',
-      },
-    }),
-  )
-})
+    expectRule(BidRuleCode.AuctionNotActive, () =>
+      Bid.register({
+        ...validInput(),
+        eligibility: {
+          ...validInput().eligibility,
+          auctionStatus: 'CLOSED',
+        },
+      }),
+    )
+  })
 
   it('rechaza puja del vendedor de la subasta', () => {
     expectRule(BidRuleCode.SellerCannotBid, () =>
@@ -137,9 +137,7 @@ describe('Dominio de registro de puja HU-63', () => {
         ...validInput(),
         eligibility: {
           ...validInput().eligibility,
-          lastBidAtByBidder: new Date(
-            placedAt.getTime() - (BID_COOLDOWN_SECONDS * 1000 - 1),
-          ),
+          lastBidAtByBidder: new Date(placedAt.getTime() - (BID_COOLDOWN_SECONDS * 1000 - 1)),
         },
       }),
     )
@@ -150,9 +148,7 @@ describe('Dominio de registro de puja HU-63', () => {
       ...validInput(),
       eligibility: {
         ...validInput().eligibility,
-        lastBidAtByBidder: new Date(
-          placedAt.getTime() - BID_COOLDOWN_SECONDS * 1000,
-        ),
+        lastBidAtByBidder: new Date(placedAt.getTime() - BID_COOLDOWN_SECONDS * 1000),
       },
     })
 
@@ -195,20 +191,17 @@ describe('Dominio de registro de puja HU-63', () => {
     )
   })
 
-  it.each([-1, 1.5])(
-    'rechaza conteo invalido de pujas activas %s',
-    (activeBidCount) => {
-      expectRule(BidRuleCode.ActiveBidLimitReached, () =>
-        Bid.register({
-          ...validInput(),
-          eligibility: {
-            ...validInput().eligibility,
-            activeBidCount,
-          },
-        }),
-      )
-    },
-  )
+  it.each([-1, 1.5])('rechaza conteo invalido de pujas activas %s', (activeBidCount) => {
+    expectRule(BidRuleCode.ActiveBidLimitReached, () =>
+      Bid.register({
+        ...validInput(),
+        eligibility: {
+          ...validInput().eligibility,
+          activeBidCount,
+        },
+      }),
+    )
+  })
 
   it('rechaza fecha de puja invalida', () => {
     expectRule(BidRuleCode.InvalidBidDate, () =>
