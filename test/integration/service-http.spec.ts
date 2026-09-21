@@ -1,7 +1,8 @@
 import 'reflect-metadata'
 
-import { Body, Controller, Get, Post, ValidationPipe, type INestApplication } from '@nestjs/common'
+import { Body, Controller, Get, Post, type INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger'
 import request from 'supertest'
 
 import {
@@ -12,6 +13,11 @@ import {
 } from '../../src/adapters/inbound/http/auth/decorators'
 import { signInternalRequest } from '../../src/adapters/outbound/identity/internal-signature'
 import {
+  ActiveAuctionLimitExceededError,
+  InsufficientPublicationFundsError,
+} from '../../src/application/errors/AuctionPersistenceError'
+import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
+import {
   Role,
   TOKEN_VERIFIER,
   TokenVerificationError,
@@ -19,6 +25,9 @@ import {
   type VerifiedIdentity,
 } from '../../src/application/ports/TokenVerifierPort'
 import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
+import { PublishAuction } from '../../src/application/use-cases/PublishAuction'
+import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
+import { createValidationPipe } from '../../src/adapters/inbound/http/validation.pipe'
 
 /**
  * Controlador SOLO de prueba. El andamiaje no tiene todavia rutas de negocio, y
@@ -59,6 +68,52 @@ const IDENTITIES: Readonly<Record<string, VerifiedIdentity>> = {
     email: null,
     roles: new Set([Role.Player, Role.SuperAdministrator]),
   },
+  'token-admin': {
+    subject: 'sujeto-admin',
+    email: null,
+    roles: new Set([Role.Administrator]),
+  },
+}
+
+const publishedAuction = {
+  id: 'auction-created',
+  sellerId: 'sujeto-jugador',
+  productId: 'product-ok',
+  durationHours: 24 as const,
+  publicationFeeCredits: 1,
+  minimumBidCredits: 10,
+  buyNowCredits: 20,
+  status: 'ACTIVE' as const,
+  publishedAt: new Date('2026-09-21T12:00:00.000Z'),
+  closesAt: new Date('2026-09-22T12:00:00.000Z'),
+}
+
+const publishAuctionStub = {
+  execute: jest.fn((command: { productId: string }) => {
+    if (command.productId === 'product-sanction') {
+      return Promise.reject(
+        new AuctionRuleViolation(AuctionRuleCode.SellerSanctioned, 'Vendedor sancionado.'),
+      )
+    }
+    if (command.productId === 'product-limit') {
+      return Promise.reject(new ActiveAuctionLimitExceededError())
+    }
+    if (command.productId === 'product-price') {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.InvalidBuyNowPrice,
+          'El precio de compra inmediata debe superar la puja minima.',
+        ),
+      )
+    }
+    if (command.productId === 'product-unavailable') {
+      return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
+    }
+    if (command.productId === 'product-insufficient-funds') {
+      return Promise.reject(new InsufficientPublicationFundsError())
+    }
+    return Promise.resolve({ ...publishedAuction, productId: command.productId })
+  }),
 }
 
 const stubVerifier: TokenVerifierPort = {
@@ -95,13 +150,13 @@ const buildApp = async (): Promise<INestApplication> => {
   })
     .overrideProvider(TOKEN_VERIFIER)
     .useValue(stubVerifier)
+    .overrideProvider(PublishAuction)
+    .useValue(publishAuctionStub)
     .compile()
 
   const app = moduleRef.createNestApplication()
   app.setGlobalPrefix('api')
-  app.useGlobalPipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
-  )
+  app.useGlobalPipes(createValidationPipe())
   await app.init()
 
   return app
@@ -184,6 +239,100 @@ describe('Servicio con autenticacion activa', () => {
         .set('Authorization', 'Bearer token-super')
 
       expect(response.status).toBe(200)
+    })
+  })
+
+  describe('Publicacion de subastas', () => {
+    const validBody = {
+      productId: 'product-ok',
+      durationHours: 24,
+      minimumBidCredits: 10,
+      buyNowCredits: 20,
+    }
+
+    const publish = (token = 'token-jugador', body: Record<string, unknown> = validBody) =>
+      request(app.getHttpServer())
+        .post('/api/v1/auctions')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', 'operation-1')
+        .send(body)
+
+    beforeEach(() => publishAuctionStub.execute.mockClear())
+
+    it('responde 201 y usa el sujeto verificado como vendedor', async () => {
+      const response = await publish()
+
+      expect(response.status).toBe(201)
+      expect(response.body).toMatchObject({
+        id: 'auction-created',
+        sellerId: 'sujeto-jugador',
+        status: 'ACTIVE',
+        publicationFeeCredits: 1,
+      })
+      expect(publishAuctionStub.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ sellerId: 'sujeto-jugador', operationId: 'operation-1' }),
+      )
+    })
+
+    it('responde 401 sin access token', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions')
+        .set('Idempotency-Key', 'operation-1')
+        .send(validBody)
+      expect(response.status).toBe(401)
+    })
+
+    it('responde 403 si la identidad no tiene rol PLAYER', async () => {
+      expect((await publish('token-admin')).status).toBe(403)
+    })
+
+    it('responde 400 ante campos desconocidos o sin clave idempotente', async () => {
+      const unknownField = await publish('token-jugador', { ...validBody, sellerId: 'otro' })
+      expect(unknownField.status).toBe(400)
+      expect(unknownField.body).toMatchObject({ code: 'INVALID_REQUEST' })
+      const realMoney = await publish('token-jugador', {
+        ...validBody,
+        currency: 'REAL_MONEY',
+      })
+      expect(realMoney.status).toBe(400)
+      expect(realMoney.body).toMatchObject({ code: 'INVALID_REQUEST' })
+      const missingKey = await request(app.getHttpServer())
+        .post('/api/v1/auctions')
+        .set('Authorization', 'Bearer token-jugador')
+        .send(validBody)
+      expect(missingKey.status).toBe(400)
+      expect(missingKey.body).toMatchObject({ code: 'INVALID_IDEMPOTENCY_KEY' })
+    })
+
+    it.each([
+      ['product-sanction', 403, AuctionRuleCode.SellerSanctioned],
+      ['product-limit', 409, AuctionRuleCode.ActiveAuctionLimitReached],
+      ['product-price', 422, AuctionRuleCode.InvalidBuyNowPrice],
+      ['product-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
+      ['product-insufficient-funds', 422, 'INSUFFICIENT_FUNDS'],
+    ])('mapea %s a HTTP %i con codigo estable', async (productId, status, code) => {
+      const response = await publish('token-jugador', { ...validBody, productId })
+      expect(response.status).toBe(status)
+      expect(response.body).toMatchObject({ statusCode: status, code })
+    })
+
+    it('publica en OpenAPI la operacion, seguridad, entrada y respuestas estables', () => {
+      const document = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().addBearerAuth().build(),
+      )
+      const operation = document.paths['/api/v1/auctions']?.post
+
+      expect(operation).toBeDefined()
+      expect(operation?.security).toEqual([{ bearer: [] }])
+      expect(operation?.parameters).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'Idempotency-Key', in: 'header' }),
+        ]),
+      )
+      expect(Object.keys(operation?.responses ?? {})).toEqual(
+        expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
+      )
     })
   })
 

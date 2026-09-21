@@ -10,6 +10,7 @@ import {
 import { Pool } from 'pg'
 
 import type { Database } from '../../adapters/outbound/persistence/schema'
+import * as createAuctionPublication from '../../adapters/outbound/persistence/migrations/001-create-auction-publication'
 
 export interface DatabaseOptions {
   readonly connectionString: string
@@ -68,7 +69,9 @@ export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
  * Esta vacio a proposito: el andamiaje no inventa tablas. Cada Historia de
  * Usuario anade aqui su migracion, con prefijo numerico que fija el orden.
  */
-export const MIGRATIONS: Readonly<Record<string, Migration>> = {}
+export const MIGRATIONS: Readonly<Record<string, Migration>> = {
+  '001-create-auction-publication': createAuctionPublication,
+}
 
 export interface MigrationOutcome {
   readonly applied: readonly string[]

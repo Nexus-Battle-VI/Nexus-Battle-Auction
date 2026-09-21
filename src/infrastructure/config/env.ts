@@ -42,6 +42,7 @@ export interface AppConfig {
   readonly authMode: AuthMode
   readonly cognito: CognitoConfig | null
   readonly internalServiceAuthSecret: string | null
+  readonly catalogBaseUrl: string
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -196,5 +197,6 @@ export const loadConfig = (env: RawEnv): AppConfig => {
         ? { userPoolId: cognitoUserPoolId, clientId: cognitoClientId }
         : null,
     internalServiceAuthSecret: internalServiceAuthSecret === '' ? null : internalServiceAuthSecret,
+    catalogBaseUrl: readString(env, 'CATALOG_BASE_URL', 'http://catalog:3003'),
   }
 }
