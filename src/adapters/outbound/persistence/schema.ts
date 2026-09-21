@@ -8,11 +8,11 @@
  *
  * Nombres de columna en `snake_case`, que es la convencion de PostgreSQL. La
  * traduccion a la instantanea del agregado ocurre en un `mapping.ts` explicito.
- *
  */
 import type { ColumnType, Generated } from 'kysely'
 
 type Timestamp = ColumnType<Date, Date | string, Date | string>
+
 type GeneratedTimestamp = ColumnType<Date, Date | string | undefined, Date | string>
 
 export interface AuctionTable {
@@ -38,6 +38,29 @@ export interface AuctionBidTable {
   amount_credits: number
   placed_at: Timestamp
   is_leader: boolean
+
+  /**
+   * Reserva de Wallet que respalda los creditos comprometidos por esta puja.
+   *
+   * Es nullable porque las filas creadas antes de HU-63.2 no disponen de esta
+   * asociacion. Las nuevas pujas gestionadas por el flujo de HU-63.2 deberan
+   * persistirla.
+   */
+  credit_reservation_id: string | null
+}
+
+export interface AuctionBidCreditFailureTable {
+  operation_id: string
+  bid_id: string
+  auction_id: string
+  bidder_id: string
+  stage: string
+  reason: string
+  new_reservation_id: string | null
+  previous_reservation_id: string | null
+  new_reservation_released: boolean
+  previous_reservation_released: boolean
+  occurred_at: Timestamp
 }
 
 export interface AuctionPublicationOperationTable {
@@ -79,9 +102,24 @@ export interface OutboxEventTable {
   published_at: Timestamp | null
 }
 
+export interface AuctionBidCreditOperationTable {
+  operation_id: string
+  bid_id: string
+  auction_id: string
+  bidder_id: string
+  amount_credits: number
+  status: string
+  reservation_id: string | null
+  previous_reservation_id: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
 export interface Database {
   auctions: AuctionTable
   auction_bids: AuctionBidTable
+  auction_bid_credit_operations: AuctionBidCreditOperationTable
+  auction_bid_credit_failures: AuctionBidCreditFailureTable
   auction_publication_operations: AuctionPublicationOperationTable
   auction_publication_failures: AuctionPublicationFailureTable
   auction_audit_log: AuctionAuditLogTable
