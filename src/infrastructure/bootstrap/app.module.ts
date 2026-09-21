@@ -19,6 +19,12 @@ import {
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
+import { InMemoryWatchlistRepository } from '../../adapters/outbound/persistence/InMemoryWatchlistRepository'
+import { PostgresWatchlistRepository } from '../../adapters/outbound/persistence/PostgresWatchlistRepository'
+import {
+  WATCHLIST_REPOSITORY,
+  type WatchlistRepositoryPort,
+} from '../../application/ports/WatchlistRepositoryPort'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 import { SystemClock } from '../../adapters/outbound/system/SystemClock'
 import { UuidGenerator } from '../../adapters/outbound/system/UuidGenerator'
@@ -162,6 +168,18 @@ export const INTERNAL_CALLERS: readonly string[] = []
               now: () => clock.now(),
             }),
       inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
+      // TASK 68.1: ambos adaptadores mantienen unicidad e integridad local.
+      provide: WATCHLIST_REPOSITORY,
+      useFactory: (
+        db: Kysely<Database> | null,
+        auctions: AuctionRepositoryPort,
+      ): WatchlistRepositoryPort =>
+        db === null
+          ? new InMemoryWatchlistRepository(auctions)
+          : new PostgresWatchlistRepository(db),
+      inject: [DATABASE, AUCTION_REPOSITORY],
     },
     {
       provide: PRODUCT_INVENTORY,

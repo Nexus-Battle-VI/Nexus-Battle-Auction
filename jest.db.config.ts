@@ -27,6 +27,8 @@ const config: Config = {
   // infraestructura de persistencia, que la suite por defecto no puede ver.
   collectCoverageFrom: [
     'src/adapters/outbound/persistence/Postgres*.ts',
+    // TASK 68.1 mide tambien el DDL nuevo, ejercitado con up/down contra PostgreSQL.
+    'src/adapters/outbound/persistence/migrations/003-create-auction-watchlist.ts',
     'src/infrastructure/persistence/**/*.ts',
     '!src/infrastructure/persistence/migrate.ts',
   ],

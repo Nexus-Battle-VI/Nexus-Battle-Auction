@@ -80,10 +80,18 @@ export interface OutboxEventTable {
 }
 
 export interface Database {
+  auction_watchlist: AuctionWatchlistTable
   auctions: AuctionTable
   auction_bids: AuctionBidTable
   auction_publication_operations: AuctionPublicationOperationTable
   auction_publication_failures: AuctionPublicationFailureTable
   auction_audit_log: AuctionAuditLogTable
   outbox_events: OutboxEventTable
+}
+
+/** Identidad compuesta de seguimiento; player_id no referencia bases de otros servicios. */
+export interface AuctionWatchlistTable {
+  player_id: string
+  auction_id: string
+  followed_at: Timestamp
 }

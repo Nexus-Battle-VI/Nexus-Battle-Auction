@@ -10,6 +10,7 @@ import {
 import { Pool } from 'pg'
 
 import * as createAuctionBids from '../../adapters/outbound/persistence/migrations/002-create-auction-bids'
+import * as createAuctionWatchlist from '../../adapters/outbound/persistence/migrations/003-create-auction-watchlist'
 import * as createAuctionPublication from '../../adapters/outbound/persistence/migrations/001-create-auction-publication'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
@@ -75,6 +76,8 @@ export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
 export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '001-create-auction-publication': createAuctionPublication,
   '002-create-auction-bids': createAuctionBids,
+  // TASK 68.1: se aplica despues de la tabla auctions referenciada por la watchlist.
+  '003-create-auction-watchlist': createAuctionWatchlist,
 }
 
 export interface MigrationOutcome {
