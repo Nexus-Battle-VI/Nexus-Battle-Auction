@@ -25,3 +25,17 @@ export class PersistedAuctionNotFoundError extends Error {
     this.name = 'PersistedAuctionNotFoundError'
   }
 }
+
+export class BidAlreadyExistsError extends Error {
+  constructor(bidId: string) {
+    super(`La puja ${bidId} ya existe.`)
+    this.name = 'BidAlreadyExistsError'
+  }
+}
+
+export class ConcurrentBidConflictError extends Error {
+  constructor() {
+    super('La puja dejo de ser valida porque otra oferta se convirtio en lider.')
+    this.name = 'ConcurrentBidConflictError'
+  }
+}
