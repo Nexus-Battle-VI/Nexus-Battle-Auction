@@ -17,7 +17,9 @@ const config: Config = {
     '^.+\\.ts$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
   },
   moduleFileExtensions: ['ts', 'js', 'json'],
-  testMatch: ['<rootDir>/test/db/**/*.spec.ts'],
+  // Patron portable: Jest mezcla separadores en Windows cuando `rootDir`
+  // contiene un junction, por lo que anclarlo a `<rootDir>` oculta la suite.
+  testMatch: ['**/test/db/**/*.spec.ts'],
   // Descargar y arrancar la imagen la primera vez supera el limite por defecto.
   testTimeout: 120_000,
 
