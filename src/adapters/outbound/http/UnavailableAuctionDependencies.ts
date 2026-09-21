@@ -1,5 +1,9 @@
 import { ExternalDependencyUnavailableError } from '../../../application/errors/ExternalDependencyError'
 import type {
+  CatalogProductPolicy,
+  CatalogProductPolicyPort,
+} from '../../../application/ports/CatalogProductPolicyPort'
+import type {
   CommitInventoryProductCommand,
   InventoryProductCommitment,
   InventoryProductEligibility,
@@ -17,6 +21,13 @@ import type { SellerSanctionPort } from '../../../application/ports/SellerSancti
  * publiquen los contratos requeridos por HU-62. Evitan sustituir una ausencia
  * de evidencia por una respuesta permisiva inventada.
  */
+export class UnavailableCatalogProductPolicy implements CatalogProductPolicyPort {
+  getPolicy(productId: string): Promise<CatalogProductPolicy> {
+    void productId
+    return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
+  }
+}
+
 export class UnavailableProductInventory implements ProductInventoryPort {
   inspect(ownerId: string, productId: string): Promise<InventoryProductEligibility> {
     void ownerId

@@ -28,7 +28,6 @@ const requestHash = (command: PersistAuctionPublicationCommand): string => {
   return createHash('sha256')
     .update(
       JSON.stringify([
-        auction.id,
         auction.sellerId,
         auction.productId,
         auction.durationHours,
@@ -36,10 +35,6 @@ const requestHash = (command: PersistAuctionPublicationCommand): string => {
         auction.minimumBidCredits,
         auction.buyNowCredits,
         auction.status,
-        auction.publishedAt.toISOString(),
-        auction.closesAt.toISOString(),
-        command.inventoryCommitmentId,
-        command.feeChargeId,
       ]),
       'utf8',
     )

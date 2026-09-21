@@ -179,9 +179,16 @@ describe('Persistencia PostgreSQL', () => {
     it('un reintento devuelve la publicacion sin duplicar efectos locales', async () => {
       const repository = new PostgresAuctionRepository(db)
       const command = publication('auction-idempotent')
+      const retry = {
+        ...publication('auction-generated-again', 'seller-1', 'product-auction-idempotent'),
+        operationId: command.operationId,
+      }
 
       await expect(repository.publish(command)).resolves.toMatchObject({ replayed: false })
-      await expect(repository.publish(command)).resolves.toMatchObject({ replayed: true })
+      await expect(repository.publish(retry)).resolves.toMatchObject({
+        replayed: true,
+        auction: { id: 'auction-idempotent' },
+      })
 
       const { amount } = await db
         .selectFrom('outbox_events')

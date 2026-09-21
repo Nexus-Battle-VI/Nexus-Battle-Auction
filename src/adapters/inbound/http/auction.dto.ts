@@ -1,0 +1,65 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
+import { IsIn, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator'
+
+export class PublishAuctionRequestDto {
+  @ApiProperty({ example: 'inventory-product-123', minLength: 1, maxLength: 128 })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(128)
+  productId!: string
+
+  @ApiProperty({ enum: [24, 48], example: 24 })
+  @IsInt()
+  @IsIn([24, 48])
+  durationHours!: number
+
+  @ApiProperty({ example: 10, minimum: 1 })
+  @IsInt()
+  @Min(1)
+  minimumBidCredits!: number
+
+  @ApiPropertyOptional({ example: 25, minimum: 1, nullable: true })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  buyNowCredits?: number | null
+}
+
+export class AuctionResponseDto {
+  @ApiProperty()
+  id!: string
+
+  @ApiProperty()
+  sellerId!: string
+
+  @ApiProperty()
+  productId!: string
+
+  @ApiProperty({ enum: [24, 48] })
+  durationHours!: number
+
+  @ApiProperty()
+  publicationFeeCredits!: number
+
+  @ApiProperty()
+  minimumBidCredits!: number
+
+  @ApiPropertyOptional({ nullable: true })
+  buyNowCredits!: number | null
+
+  @ApiProperty({ enum: ['ACTIVE'] })
+  status!: string
+
+  @ApiProperty({ type: String, format: 'date-time' })
+  publishedAt!: Date
+
+  @ApiProperty({ type: String, format: 'date-time' })
+  closesAt!: Date
+}
+
+export const assertIdempotencyKey = (value: string | undefined): string => {
+  if (value === undefined || value.trim().length === 0 || value.length > 128) {
+    throw new Error('INVALID_IDEMPOTENCY_KEY')
+  }
+  return value
+}

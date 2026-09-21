@@ -3,16 +3,53 @@ import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
 
 import { HealthController } from '../../adapters/inbound/http/health.controller'
+import { AuctionController } from '../../adapters/inbound/http/auction.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymous.guard'
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
 import { JwtAuthGuard } from '../../adapters/inbound/http/auth/jwt-auth.guard'
 import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
 import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
+import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
+import {
+  UnavailableCatalogProductPolicy,
+  UnavailableProductInventory,
+  UnavailablePublicationFee,
+  UnavailableSellerSanctions,
+} from '../../adapters/outbound/http/UnavailableAuctionDependencies'
+import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
+import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 import { SystemClock } from '../../adapters/outbound/system/SystemClock'
+import { UuidGenerator } from '../../adapters/outbound/system/UuidGenerator'
+import {
+  AUCTION_REPOSITORY,
+  type AuctionRepositoryPort,
+} from '../../application/ports/AuctionRepositoryPort'
+import {
+  CATALOG_PRODUCT_POLICY,
+  type CatalogProductPolicyPort,
+} from '../../application/ports/CatalogProductPolicyPort'
 import { CLOCK, type ClockPort } from '../../application/ports/ClockPort'
+import {
+  IDENTIFIER_GENERATOR,
+  type IdentifierGeneratorPort,
+} from '../../application/ports/IdentifierGeneratorPort'
+import {
+  PRODUCT_INVENTORY,
+  type ProductInventoryPort,
+} from '../../application/ports/ProductInventoryPort'
+import {
+  PUBLICATION_FEE,
+  type PublicationFeePort,
+} from '../../application/ports/PublicationFeePort'
+import {
+  SELLER_SANCTIONS,
+  type SellerSanctionPort,
+} from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
+import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
+import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -42,7 +79,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
  * independiente del framework.
  */
 @Module({
-  controllers: [HealthController],
+  controllers: [HealthController, AuctionController],
   providers: [
     {
       provide: APP_CONFIG,
@@ -61,6 +98,10 @@ export const INTERNAL_CALLERS: readonly string[] = []
     {
       provide: CLOCK,
       useFactory: (): ClockPort => new SystemClock(),
+    },
+    {
+      provide: IDENTIFIER_GENERATOR,
+      useFactory: (): IdentifierGeneratorPort => new UuidGenerator(),
     },
     {
       provide: DATABASE,
@@ -96,6 +137,84 @@ export const INTERNAL_CALLERS: readonly string[] = []
         },
       }),
       inject: [DATABASE],
+    },
+    {
+      provide: AUCTION_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): AuctionRepositoryPort =>
+        db === null ? new InMemoryAuctionRepository() : new PostgresAuctionRepository(db),
+      inject: [DATABASE],
+    },
+    {
+      provide: CATALOG_PRODUCT_POLICY,
+      useFactory: (
+        config: AppConfig,
+        logger: Logger,
+        clock: ClockPort,
+      ): CatalogProductPolicyPort =>
+        config.internalServiceAuthSecret === null
+          ? new UnavailableCatalogProductPolicy()
+          : new CatalogProductPolicyClient({
+              baseUrl: config.catalogBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: 3_000,
+              logger,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
+      provide: PRODUCT_INVENTORY,
+      useFactory: (): ProductInventoryPort => new UnavailableProductInventory(),
+    },
+    {
+      provide: PUBLICATION_FEE,
+      useFactory: (): PublicationFeePort => new UnavailablePublicationFee(),
+    },
+    {
+      provide: SELLER_SANCTIONS,
+      useFactory: (): SellerSanctionPort => new UnavailableSellerSanctions(),
+    },
+    {
+      provide: PersistAuctionPublication,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        inventory: ProductInventoryPort,
+        fees: PublicationFeePort,
+        clock: ClockPort,
+      ): PersistAuctionPublication =>
+        new PersistAuctionPublication(repository, inventory, fees, clock),
+      inject: [AUCTION_REPOSITORY, PRODUCT_INVENTORY, PUBLICATION_FEE, CLOCK],
+    },
+    {
+      provide: PublishAuction,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        catalog: CatalogProductPolicyPort,
+        inventory: ProductInventoryPort,
+        sanctions: SellerSanctionPort,
+        persistence: PersistAuctionPublication,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): PublishAuction =>
+        new PublishAuction(
+          repository,
+          catalog,
+          inventory,
+          sanctions,
+          persistence,
+          clock,
+          identifiers,
+        ),
+      inject: [
+        AUCTION_REPOSITORY,
+        CATALOG_PRODUCT_POLICY,
+        PRODUCT_INVENTORY,
+        SELLER_SANCTIONS,
+        PersistAuctionPublication,
+        CLOCK,
+        IDENTIFIER_GENERATOR,
+      ],
     },
     {
       provide: TOKEN_VERIFIER,
