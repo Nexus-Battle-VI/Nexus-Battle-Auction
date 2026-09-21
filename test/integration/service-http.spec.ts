@@ -12,7 +12,10 @@ import {
   Roles,
 } from '../../src/adapters/inbound/http/auth/decorators'
 import { signInternalRequest } from '../../src/adapters/outbound/identity/internal-signature'
-import { ActiveAuctionLimitExceededError } from '../../src/application/errors/AuctionPersistenceError'
+import {
+  ActiveAuctionLimitExceededError,
+  InsufficientPublicationFundsError,
+} from '../../src/application/errors/AuctionPersistenceError'
 import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
 import {
   Role,
@@ -105,6 +108,9 @@ const publishAuctionStub = {
     }
     if (command.productId === 'product-unavailable') {
       return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
+    }
+    if (command.productId === 'product-insufficient-funds') {
+      return Promise.reject(new InsufficientPublicationFundsError())
     }
     return Promise.resolve({ ...publishedAuction, productId: command.productId })
   }),
@@ -284,6 +290,12 @@ describe('Servicio con autenticacion activa', () => {
       const unknownField = await publish('token-jugador', { ...validBody, sellerId: 'otro' })
       expect(unknownField.status).toBe(400)
       expect(unknownField.body).toMatchObject({ code: 'INVALID_REQUEST' })
+      const realMoney = await publish('token-jugador', {
+        ...validBody,
+        currency: 'REAL_MONEY',
+      })
+      expect(realMoney.status).toBe(400)
+      expect(realMoney.body).toMatchObject({ code: 'INVALID_REQUEST' })
       const missingKey = await request(app.getHttpServer())
         .post('/api/v1/auctions')
         .set('Authorization', 'Bearer token-jugador')
@@ -297,6 +309,7 @@ describe('Servicio con autenticacion activa', () => {
       ['product-limit', 409, AuctionRuleCode.ActiveAuctionLimitReached],
       ['product-price', 422, AuctionRuleCode.InvalidBuyNowPrice],
       ['product-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
+      ['product-insufficient-funds', 422, 'INSUFFICIENT_FUNDS'],
     ])('mapea %s a HTTP %i con codigo estable', async (productId, status, code) => {
       const response = await publish('token-jugador', { ...validBody, productId })
       expect(response.status).toBe(status)

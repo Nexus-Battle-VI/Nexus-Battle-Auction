@@ -66,6 +66,8 @@ El dominio no importa NestJS, drivers ni adaptadores, y la aplicación depende s
 
 ## Verificación local
 
+La matriz y los resultados reproducibles de HU-62 están en [docs/hu-62-acceptance-evidence.md](docs/hu-62-acceptance-evidence.md).
+
 ```bash
 npm ci
 npm run lint

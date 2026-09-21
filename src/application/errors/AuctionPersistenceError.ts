@@ -5,6 +5,13 @@ export class ActiveAuctionLimitExceededError extends Error {
   }
 }
 
+export class InsufficientPublicationFundsError extends Error {
+  constructor() {
+    super('El vendedor no tiene creditos suficientes para pagar la publicacion.')
+    this.name = 'InsufficientPublicationFundsError'
+  }
+}
+
 export class IdempotencyConflictError extends Error {
   constructor() {
     super('La operacion ya fue utilizada con otra solicitud.')

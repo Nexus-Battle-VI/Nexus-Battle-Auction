@@ -10,6 +10,7 @@ import {
 import {
   ActiveAuctionLimitExceededError,
   IdempotencyConflictError,
+  InsufficientPublicationFundsError,
 } from '../../../application/errors/AuctionPersistenceError'
 import {
   ExternalContractError,
@@ -37,6 +38,9 @@ export const toAuctionHttpException = (error: unknown): HttpException => {
     return new ConflictException(
       body(409, AuctionRuleCode.ActiveAuctionLimitReached, error.message),
     )
+  }
+  if (error instanceof InsufficientPublicationFundsError) {
+    return new UnprocessableEntityException(body(422, 'INSUFFICIENT_FUNDS', error.message))
   }
   if (error instanceof AuctionRuleViolation) {
     if (error.code === AuctionRuleCode.SellerSanctioned) {
