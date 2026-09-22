@@ -63,6 +63,19 @@ export interface AuctionBidCreditFailureTable {
   occurred_at: Timestamp
 }
 
+export interface AuctionBidCreditOperationTable {
+  operation_id: string
+  bid_id: string
+  auction_id: string
+  bidder_id: string
+  amount_credits: number
+  status: string
+  reservation_id: string | null
+  previous_reservation_id: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
 export interface AuctionPublicationOperationTable {
   operation_id: string
   request_hash: string
@@ -100,19 +113,6 @@ export interface OutboxEventTable {
   payload: unknown
   occurred_at: Timestamp
   published_at: Timestamp | null
-}
-
-export interface AuctionBidCreditOperationTable {
-  operation_id: string
-  bid_id: string
-  auction_id: string
-  bidder_id: string
-  amount_credits: number
-  status: string
-  reservation_id: string | null
-  previous_reservation_id: string | null
-  created_at: Timestamp
-  updated_at: Timestamp
 }
 
 export interface Database {

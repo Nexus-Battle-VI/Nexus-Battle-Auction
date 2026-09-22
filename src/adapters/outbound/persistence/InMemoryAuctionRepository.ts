@@ -241,6 +241,15 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
       if (operation === undefined) {
         return Promise.reject(new Error(`La operacion de creditos ${operationId} no existe.`))
       }
+
+      if (
+        operation.bidId !== snapshot.id ||
+        operation.auctionId !== snapshot.auctionId ||
+        operation.bidderId !== snapshot.bidderId ||
+        operation.amountCredits !== snapshot.amountCredits
+      ) {
+        return Promise.reject(new IdempotencyConflictError())
+      }
     }
 
     const stored: StoredBid = {

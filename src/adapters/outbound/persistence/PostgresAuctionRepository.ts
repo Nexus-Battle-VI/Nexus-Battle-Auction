@@ -126,11 +126,14 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
 
       const hash = requestHash(command)
 
+      /*
+       * Serializa reintentos de la misma operacion.
+       */
       await sql`
-          select pg_advisory_xact_lock(
-            hashtext(${command.operationId})
-          )
-        `.execute(transaction)
+            select pg_advisory_xact_lock(
+              hashtext(${command.operationId})
+            )
+          `.execute(transaction)
 
       const previous = await transaction
         .selectFrom('auction_publication_operations')
@@ -155,18 +158,22 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
         }
       }
 
+      /*
+       * Serializa el limite de subastas
+       * activas por vendedor.
+       */
       await sql`
-          select pg_advisory_xact_lock(
-            hashtext(${snapshot.sellerId})
-          )
-        `.execute(transaction)
+            select pg_advisory_xact_lock(
+              hashtext(${snapshot.sellerId})
+            )
+          `.execute(transaction)
 
       const active = await transaction
         .selectFrom('auctions')
         .select(
           sql<number>`
-                count(*)::integer
-              `.as('amount'),
+                  count(*)::integer
+                `.as('amount'),
         )
         .where('seller_id', '=', snapshot.sellerId)
         .where('status', '=', AuctionStatus.Active)
@@ -241,16 +248,16 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
   createBidCreditOperation(command: CreateBidCreditOperationCommand): Promise<void> {
     return this.db.transaction().execute(async (transaction) => {
       await sql`
-          select pg_advisory_xact_lock(
-            hashtext(${command.operationId})
-          )
-        `.execute(transaction)
+            select pg_advisory_xact_lock(
+              hashtext(${command.operationId})
+            )
+          `.execute(transaction)
 
       await sql`
-          select pg_advisory_xact_lock(
-            hashtext(${command.bidId})
-          )
-        `.execute(transaction)
+            select pg_advisory_xact_lock(
+              hashtext(${command.bidId})
+            )
+          `.execute(transaction)
 
       const previous = await transaction
         .selectFrom('auction_bid_credit_operations')
@@ -335,11 +342,15 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
     return this.db.transaction().execute(async (transaction) => {
       const snapshot = bid.snapshot()
 
+      /*
+       * Todas las pujas de una misma subasta
+       * pasan de una en una por esta seccion.
+       */
       await sql`
-          select pg_advisory_xact_lock(
-            hashtext(${snapshot.auctionId})
-          )
-        `.execute(transaction)
+            select pg_advisory_xact_lock(
+              hashtext(${snapshot.auctionId})
+            )
+          `.execute(transaction)
 
       const auction = await transaction
         .selectFrom('auctions')
@@ -395,6 +406,15 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
       const previousLeaderReservationId =
         previousLeaderRow === undefined ? null : previousLeaderRow.credit_reservation_id
 
+      /*
+       * La validacion de dominio ocurre antes de
+       * llegar al repositorio, pero mientras una
+       * solicitud esperaba el lock otra puja pudo
+       * convertirse en lider.
+       *
+       * Por eso se vuelve a comprobar contra el
+       * lider REAL dentro de la transaccion.
+       */
       if (previousLeaderRow !== undefined) {
         const minimumAllowed = previousLeaderRow.amount_credits + auction.minimum_bid_credits
 
@@ -424,6 +444,10 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
         })
         .execute()
 
+      /*
+       * La puja y el cambio a BID_PERSISTED se guardan
+       * dentro de la misma transaccion.
+       */
       if (operationId !== null) {
         const update = await transaction
           .updateTable('auction_bid_credit_operations')

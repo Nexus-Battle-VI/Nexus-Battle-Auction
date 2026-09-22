@@ -60,6 +60,14 @@ export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
 
 /**
  * Migraciones declaradas en codigo, no descubiertas del sistema de ficheros.
+ *
+ * `FileMigrationProvider` leeria el directorio en tiempo de ejecucion, y en la
+ * imagen de produccion ese directorio contiene JavaScript compilado con otra
+ * ruta. Importarlas explicitamente hace que el compilador las verifique y que
+ * el empaquetado no pueda dejarse ninguna fuera en silencio.
+ *
+ * Cada Historia de Usuario anade aqui su migracion, con prefijo numerico que
+ * fija el orden.
  */
 export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '001-create-auction-publication': createAuctionPublication,
@@ -113,8 +121,8 @@ export const migrateToLatest = async (
 export const pingDatabase = async (db: Kysely<Database>): Promise<boolean> => {
   try {
     await sql`
-      select 1
-    `.execute(db)
+        select 1
+      `.execute(db)
 
     return true
   } catch {

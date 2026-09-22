@@ -81,12 +81,6 @@ export interface BidCreditOperationSnapshot {
 export interface PersistBidResult {
   readonly bid: BidSnapshot
   readonly previousLeader: BidSnapshot | null
-
-  /**
-   * Reserva de creditos asociada al lider anterior.
-   *
-   * Puede ser null para pujas historicas creadas antes de HU-63.2.
-   */
   readonly previousLeaderReservationId?: string | null
 }
 
@@ -107,13 +101,6 @@ export interface AuctionRepositoryPort {
 
   countActiveBySeller(sellerId: string): Promise<number>
 
-  /**
-   * Persiste una puja y la convierte en lider.
-   *
-   * Si se proporciona operationId, la misma transaccion tambien marca
-   * la operacion de creditos como BID_PERSISTED y conserva la reserva
-   * del lider anterior.
-   */
   persistBid(
     bid: Bid,
     creditReservationId?: string | null,
