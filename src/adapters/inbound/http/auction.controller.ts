@@ -28,6 +28,7 @@ import {
 } from '@nestjs/swagger'
 
 import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVerifierPort'
+import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
 import { PublishAuction } from '../../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../../application/use-cases/RegisterBid'
@@ -35,7 +36,9 @@ import { CurrentIdentity, Roles } from './auth/decorators'
 import {
   AuctionDetailResponseDto,
   AuctionResponseDto,
+  AutoBidConfigResponseDto,
   BidResponseDto,
+  ConfigureAutoBidRequestDto,
   PublishAuctionRequestDto,
   RegisterBidRequestDto,
   assertIdempotencyKey,
@@ -50,6 +53,7 @@ export class AuctionController {
     private readonly publishAuction: PublishAuction,
     private readonly registerBid: RegisterBid,
     private readonly getAuctionDetail: GetAuctionDetail,
+    private readonly configureAutoBid: ConfigureAutoBid,
   ) {}
 
   /**
@@ -240,6 +244,80 @@ export class AuctionController {
         bidderId: identity.subject,
 
         amountCredits: request.amountCredits,
+      })
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === 'INVALID_IDEMPOTENCY_KEY') {
+        throw new BadRequestException({
+          statusCode: 400,
+
+          code: 'INVALID_IDEMPOTENCY_KEY',
+
+          message: 'Idempotency-Key es obligatorio y debe ser valido.',
+        })
+      }
+
+      throw toAuctionHttpException(error)
+    }
+  }
+
+  @Post(':auctionId/auto-bid')
+  @HttpCode(HttpStatus.CREATED)
+  @Roles(Role.Player)
+  @ApiOperation({
+    summary: 'Configurar (o reconfigurar) una puja automatica en una subasta activa',
+  })
+  @ApiParam({
+    name: 'auctionId',
+    required: true,
+    description: 'Identificador de la subasta.',
+    example: 'auction-123',
+  })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Identificador unico de hasta 128 caracteres para reintentos seguros.',
+  })
+  @ApiCreatedResponse({
+    type: AutoBidConfigResponseDto,
+    description: 'Configuracion de puja automatica guardada correctamente.',
+  })
+  @ApiBadRequestResponse({
+    description: 'Solicitud, limite maximo o Idempotency-Key invalidos.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Access token ausente o invalido.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Rol insuficiente o el vendedor intenta configurar en su propia subasta.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description: 'Subasta no disponible o limite maximo invalido.',
+  })
+  @ApiServiceUnavailableResponse({
+    description: 'Dependencia requerida no disponible.',
+  })
+  async autoBid(
+    @CurrentIdentity()
+    identity: VerifiedIdentity,
+
+    @Param('auctionId')
+    auctionId: string,
+
+    @Headers('idempotency-key')
+    idempotencyKey: string | undefined,
+
+    @Body()
+    request: ConfigureAutoBidRequestDto,
+  ): Promise<AutoBidConfigResponseDto> {
+    try {
+      assertIdempotencyKey(idempotencyKey)
+
+      return await this.configureAutoBid.execute({
+        auctionId,
+
+        bidderId: identity.subject,
+
+        maxAmountCredits: request.maxAmountCredits,
       })
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'INVALID_IDEMPOTENCY_KEY') {
