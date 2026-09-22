@@ -56,6 +56,7 @@ import {
   type SellerSanctionPort,
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
+import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
@@ -278,6 +279,24 @@ export const INTERNAL_CALLERS: readonly string[] = []
       ): PersistBidWithCredits => new PersistBidWithCredits(repository, credits, clock),
 
       inject: [AUCTION_REPOSITORY, BID_CREDITS, CLOCK],
+    },
+
+    {
+      provide: GetAuctionDetail,
+
+      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
+        new GetAuctionDetail(repository),
+
+      inject: [AUCTION_REPOSITORY],
+    },
+
+    {
+      provide: GetAuctionDetail,
+
+      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
+        new GetAuctionDetail(repository),
+
+      inject: [AUCTION_REPOSITORY],
     },
 
     {

@@ -2,23 +2,37 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
 import { IsIn, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator'
 
 export class PublishAuctionRequestDto {
-  @ApiProperty({ example: 'inventory-product-123', minLength: 1, maxLength: 128 })
+  @ApiProperty({
+    example: 'inventory-product-123',
+    minLength: 1,
+    maxLength: 128,
+  })
   @IsString()
   @MinLength(1)
   @MaxLength(128)
   productId!: string
 
-  @ApiProperty({ enum: [24, 48], example: 24 })
+  @ApiProperty({
+    enum: [24, 48],
+    example: 24,
+  })
   @IsInt()
   @IsIn([24, 48])
   durationHours!: number
 
-  @ApiProperty({ example: 10, minimum: 1 })
+  @ApiProperty({
+    example: 10,
+    minimum: 1,
+  })
   @IsInt()
   @Min(1)
   minimumBidCredits!: number
 
-  @ApiPropertyOptional({ example: 25, minimum: 1, nullable: true })
+  @ApiPropertyOptional({
+    example: 25,
+    minimum: 1,
+    nullable: true,
+  })
   @IsOptional()
   @IsInt()
   @Min(1)
@@ -35,7 +49,9 @@ export class AuctionResponseDto {
   @ApiProperty()
   productId!: string
 
-  @ApiProperty({ enum: [24, 48] })
+  @ApiProperty({
+    enum: [24, 48],
+  })
   durationHours!: number
 
   @ApiProperty()
@@ -44,16 +60,26 @@ export class AuctionResponseDto {
   @ApiProperty()
   minimumBidCredits!: number
 
-  @ApiPropertyOptional({ nullable: true })
+  @ApiPropertyOptional({
+    nullable: true,
+  })
   buyNowCredits!: number | null
 
-  @ApiProperty({ enum: ['ACTIVE'] })
+  @ApiProperty({
+    enum: ['ACTIVE'],
+  })
   status!: string
 
-  @ApiProperty({ type: String, format: 'date-time' })
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
   publishedAt!: Date
 
-  @ApiProperty({ type: String, format: 'date-time' })
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
   closesAt!: Date
 }
 
@@ -95,6 +121,20 @@ export class BidResponseDto {
     format: 'date-time',
   })
   placedAt!: Date
+}
+
+/**
+ * Respuesta utilizada por la Web para HU-63.6.
+ *
+ * La oferta lider puede ser null cuando aun nadie
+ * ha realizado una puja.
+ */
+export class AuctionDetailResponseDto extends AuctionResponseDto {
+  @ApiPropertyOptional({
+    type: BidResponseDto,
+    nullable: true,
+  })
+  currentBid!: BidResponseDto | null
 }
 
 export const assertIdempotencyKey = (value: string | undefined): string => {
