@@ -11,10 +11,15 @@ import {
 } from '../../../application/errors/AuctionPersistenceError'
 import type {
   AuctionRepositoryPort,
+  BidCreditOperationSnapshot,
+  BidCreditOperationStatus,
+  CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
   PersistBidResult,
+  RecordBidCreditFailureCommand,
   RecordPublicationFailureCommand,
+  UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
 import {
   AuctionStatus,
@@ -27,6 +32,8 @@ import type { Database } from './schema'
 type AuctionRow = Selectable<Database['auctions']>
 
 type AuctionBidRow = Selectable<Database['auction_bids']>
+
+type BidCreditOperationRow = Selectable<Database['auction_bid_credit_operations']>
 
 type AuctionDatabase = Kysely<Database> | Transaction<Database>
 
@@ -68,6 +75,19 @@ const toBidSnapshot = (row: AuctionBidRow): BidSnapshot => ({
   bidderId: row.bidder_id,
   amountCredits: row.amount_credits,
   placedAt: new Date(row.placed_at),
+})
+
+const toBidCreditOperationSnapshot = (row: BidCreditOperationRow): BidCreditOperationSnapshot => ({
+  operationId: row.operation_id,
+  bidId: row.bid_id,
+  auctionId: row.auction_id,
+  bidderId: row.bidder_id,
+  amountCredits: row.amount_credits,
+  status: row.status as BidCreditOperationStatus,
+  reservationId: row.reservation_id,
+  previousReservationId: row.previous_reservation_id,
+  createdAt: new Date(row.created_at),
+  updatedAt: new Date(row.updated_at),
 })
 
 const findAuction = async (
@@ -317,8 +337,10 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
     return this.db.transaction().execute(async (transaction) => {
       const snapshot = bid.snapshot()
 
-      // Todas las pujas de una misma subasta
-      // pasan de una en una por esta seccion.
+      /*
+       * Todas las pujas de una misma subasta
+       * pasan de una en una por esta seccion.
+       */
       await sql`
         select pg_advisory_xact_lock(
           hashtext(${snapshot.auctionId})
@@ -333,6 +355,27 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
 
       if (auction === undefined) {
         throw new PersistedAuctionNotFoundError(snapshot.auctionId)
+      }
+
+      if (operationId !== null) {
+        const creditOperation = await transaction
+          .selectFrom('auction_bid_credit_operations')
+          .selectAll()
+          .where('operation_id', '=', operationId)
+          .executeTakeFirst()
+
+        if (creditOperation === undefined) {
+          throw new Error(`La operacion de creditos ${operationId} no existe.`)
+        }
+
+        if (
+          creditOperation.bid_id !== snapshot.id ||
+          creditOperation.auction_id !== snapshot.auctionId ||
+          creditOperation.bidder_id !== snapshot.bidderId ||
+          creditOperation.amount_credits !== snapshot.amountCredits
+        ) {
+          throw new IdempotencyConflictError()
+        }
       }
 
       const duplicated = await transaction
@@ -354,6 +397,9 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
 
       const previousLeader =
         previousLeaderRow === undefined ? null : toBidSnapshot(previousLeaderRow)
+
+      const previousLeaderReservationId =
+        previousLeaderRow === undefined ? null : previousLeaderRow.credit_reservation_id
 
       /*
        * La validacion de dominio ocurre antes de
@@ -389,8 +435,30 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
           amount_credits: snapshot.amountCredits,
           placed_at: snapshot.placedAt,
           is_leader: true,
+          credit_reservation_id: creditReservationId,
         })
         .execute()
+
+      /*
+       * La puja y el cambio a BID_PERSISTED se guardan
+       * dentro de la misma transaccion.
+       */
+      if (operationId !== null) {
+        const update = await transaction
+          .updateTable('auction_bid_credit_operations')
+          .set({
+            status: 'BID_PERSISTED',
+            reservation_id: creditReservationId,
+            previous_reservation_id: previousLeaderReservationId,
+            updated_at: snapshot.placedAt,
+          })
+          .where('operation_id', '=', operationId)
+          .executeTakeFirst()
+
+        if (update.numUpdatedRows === 0n) {
+          throw new Error(`La operacion de creditos ${operationId} no existe.`)
+        }
+      }
 
       return {
         bid: {
@@ -398,6 +466,7 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
           placedAt: new Date(snapshot.placedAt),
         },
         previousLeader,
+        previousLeaderReservationId,
       }
     })
   }
@@ -474,6 +543,39 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
           inventory_commitment_id: command.inventoryCommitmentId,
           fee_refunded: command.feeRefunded,
           inventory_released: command.inventoryReleased,
+          occurred_at: command.occurredAt,
+        }),
+      )
+      .execute()
+  }
+
+  async recordBidCreditFailure(command: RecordBidCreditFailureCommand): Promise<void> {
+    await this.db
+      .insertInto('auction_bid_credit_failures')
+      .values({
+        operation_id: command.operationId,
+        bid_id: command.bidId,
+        auction_id: command.auctionId,
+        bidder_id: command.bidderId,
+        stage: command.stage,
+        reason: command.reason,
+        new_reservation_id: command.newReservationId,
+        previous_reservation_id: command.previousReservationId,
+        new_reservation_released: command.newReservationReleased,
+        previous_reservation_released: command.previousReservationReleased,
+        occurred_at: command.occurredAt,
+      })
+      .onConflict((conflict) =>
+        conflict.column('operation_id').doUpdateSet({
+          bid_id: command.bidId,
+          auction_id: command.auctionId,
+          bidder_id: command.bidderId,
+          stage: command.stage,
+          reason: command.reason,
+          new_reservation_id: command.newReservationId,
+          previous_reservation_id: command.previousReservationId,
+          new_reservation_released: command.newReservationReleased,
+          previous_reservation_released: command.previousReservationReleased,
           occurred_at: command.occurredAt,
         }),
       )
