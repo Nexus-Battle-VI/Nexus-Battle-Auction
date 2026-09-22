@@ -207,6 +207,16 @@ export interface AuctionRepositoryPort {
 
   findBidCreditOperation(operationId: string): Promise<BidCreditOperationSnapshot | null>
 
+  /**
+   * La operacion de creditos asociada a una puja concreta (HU-64.5).
+   *
+   * `bid_id` es unico en `auction_bid_credit_operations` (HU-63.2): a lo sumo
+   * un resultado. Permite encontrar `reservationId` a partir de la puja lider
+   * -que es lo unico que `findLeadingBid` expone-, sin que quien lo consulta
+   * necesite conocer de antemano el `operationId` original de esa puja.
+   */
+  findBidCreditOperationByBid(bidId: string): Promise<BidCreditOperationSnapshot | null>
+
   recordBidCreditFailure(command: RecordBidCreditFailureCommand): Promise<void>
 
   /**

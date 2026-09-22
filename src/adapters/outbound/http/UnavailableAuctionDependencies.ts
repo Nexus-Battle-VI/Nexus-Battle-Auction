@@ -21,6 +21,11 @@ import type {
   PublicationFeeCharge,
   PublicationFeePort,
 } from '../../../application/ports/PublicationFeePort'
+import type {
+  NotificationDispatch,
+  NotificationPort,
+  NotifyAuctionClosedEarlyCommand,
+} from '../../../application/ports/NotificationPort'
 import type { SellerSanctionPort } from '../../../application/ports/SellerSanctionPort'
 import type {
   BuyNowCreditTransfer,
@@ -137,5 +142,20 @@ export class UnavailableWallet implements WalletPort {
     void operationId
     void transferId
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+}
+
+/**
+ * Notifications no tiene, hoy, ningun endpoint para el cierre anticipado por
+ * compra inmediata (HU-64.5) -a diferencia de la puja superada, HU-63.5, que
+ * si publico el suyo-. Fallar cerrado evita simular una entrega que nadie
+ * realizo.
+ */
+export class UnavailableEarlyClosureNotification implements NotificationPort {
+  notifyAuctionClosedEarly(
+    command: NotifyAuctionClosedEarlyCommand,
+  ): Promise<NotificationDispatch> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('notifications'))
   }
 }

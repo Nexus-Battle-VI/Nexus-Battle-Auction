@@ -2,6 +2,7 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { sql, type Kysely, type Migration } from 'kysely'
 
 import { PostgresAuctionRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionRepository'
+import { PostgresEarlyClosureNotificationRepository } from '../../src/adapters/outbound/persistence/PostgresEarlyClosureNotificationRepository'
 import type { Database } from '../../src/adapters/outbound/persistence/schema'
 import {
   ActiveAuctionLimitExceededError,
@@ -244,6 +245,9 @@ describe('Persistencia PostgreSQL', () => {
         truncate
           auction_settlement_releases,
           auction_settlements,
+          auction_early_closure_notifications,
+          auction_bid_credit_failures,
+          auction_bid_credit_operations,
           auction_bids,
           auction_publication_operations,
           auction_audit_log,
@@ -1947,6 +1951,167 @@ describe('Persistencia PostgreSQL', () => {
 
         expect(rows).toHaveLength(1)
         expect(rows[0]).toMatchObject({ credits_reversed: true })
+      })
+
+      it('findBidCreditOperationByBid encuentra la operacion por bidId, no por operationId', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await expect(repository.findBidCreditOperationByBid('bid-lookup')).resolves.toBeNull()
+
+        const createdAt = new Date('2026-09-21T12:00:10.000Z')
+
+        await repository.createBidCreditOperation({
+          operationId: 'operation-lookup',
+          bidId: 'bid-lookup',
+          auctionId: 'auction-lookup',
+          bidderId: 'bidder-lookup',
+          amountCredits: 25,
+          createdAt,
+        })
+
+        await repository.updateBidCreditOperation({
+          operationId: 'operation-lookup',
+          status: 'RESERVED',
+          reservationId: 'reservation-lookup',
+          previousReservationId: null,
+          updatedAt: createdAt,
+        })
+
+        await expect(repository.findBidCreditOperationByBid('bid-lookup')).resolves.toMatchObject({
+          operationId: 'operation-lookup',
+          bidId: 'bid-lookup',
+          reservationId: 'reservation-lookup',
+        })
+      })
+    })
+
+    describe('notificaciones de cierre anticipado HU-64.5', () => {
+      const pendingInput = (
+        auctionId: string,
+        overrides: Partial<
+          Parameters<PostgresEarlyClosureNotificationRepository['ensurePending']>[0]
+        > = {},
+      ) => ({
+        auctionId,
+        bidderId: 'bidder-1',
+        transactionId: 'txn-1',
+        bidId: 'bid-1',
+        amountCredits: 20,
+        closedAt: new Date('2026-09-21T15:00:00.000Z'),
+        creditOperationId: 'operation-1',
+        creditReservationId: 'reservation-1',
+        ...overrides,
+      })
+
+      it('crea el registro PENDING con creditsReleased derivado de la reserva', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-1'))
+
+        const withReservation = await repository.ensurePending(pendingInput('auction-notif-1'))
+
+        expect(withReservation).toMatchObject({
+          status: 'PENDING',
+          attempts: 0,
+          creditsReleased: false,
+          lastError: null,
+        })
+
+        const withoutReservation = await repository.ensurePending(
+          pendingInput('auction-notif-1', {
+            bidderId: 'bidder-2',
+            creditOperationId: null,
+            creditReservationId: null,
+          }),
+        )
+
+        // Nada que liberar para este postor: nace ya liberado.
+        expect(withoutReservation.creditsReleased).toBe(true)
+
+        const rows = await db
+          .selectFrom('auction_early_closure_notifications')
+          .selectAll()
+          .execute()
+
+        expect(rows).toHaveLength(2)
+      })
+
+      it('reutiliza el registro existente en llamadas posteriores del mismo evento', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-2'))
+
+        const first = await repository.ensurePending(pendingInput('auction-notif-2'))
+        const second = await repository.ensurePending(
+          pendingInput('auction-notif-2', { amountCredits: 999 }),
+        )
+
+        expect(second).toEqual(first)
+
+        const rows = await db
+          .selectFrom('auction_early_closure_notifications')
+          .selectAll()
+          .execute()
+
+        expect(rows).toHaveLength(1)
+      })
+
+      it('recordAttempt actualiza el estado y findByAuction/findFailed lo reflejan', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-3'))
+
+        await repository.ensurePending(pendingInput('auction-notif-3'))
+
+        await repository.recordAttempt({
+          auctionId: 'auction-notif-3',
+          bidderId: 'bidder-1',
+          transactionId: 'txn-1',
+          status: 'FAILED',
+          attempts: 1,
+          creditsReleased: false,
+          lastError: 'wallet caido',
+          occurredAt: new Date('2026-09-21T15:05:00.000Z'),
+        })
+
+        await expect(repository.findByAuction('auction-notif-3')).resolves.toEqual([
+          expect.objectContaining({
+            status: 'FAILED',
+            attempts: 1,
+            creditsReleased: false,
+            lastError: 'wallet caido',
+          }),
+        ])
+
+        await expect(repository.findFailed()).resolves.toEqual([
+          expect.objectContaining({ auctionId: 'auction-notif-3', status: 'FAILED' }),
+        ])
+
+        await repository.recordAttempt({
+          auctionId: 'auction-notif-3',
+          bidderId: 'bidder-1',
+          transactionId: 'txn-1',
+          status: 'SENT',
+          attempts: 2,
+          creditsReleased: true,
+          lastError: null,
+          occurredAt: new Date('2026-09-21T15:06:00.000Z'),
+        })
+
+        await expect(repository.findFailed()).resolves.toEqual([])
+      })
+
+      it('distingue notificaciones de distintos postores para la misma subasta', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-4'))
+
+        await repository.ensurePending(pendingInput('auction-notif-4', { bidderId: 'bidder-1' }))
+        await repository.ensurePending(
+          pendingInput('auction-notif-4', { bidderId: 'bidder-2', bidId: 'bid-2' }),
+        )
+
+        await expect(repository.findByAuction('auction-notif-4')).resolves.toHaveLength(2)
       })
     })
   })

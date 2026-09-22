@@ -131,6 +131,23 @@ export interface AuctionBuyNowFailureTable {
   occurred_at: Timestamp
 }
 
+export interface AuctionEarlyClosureNotificationTable {
+  auction_id: string
+  bidder_id: string
+  transaction_id: string
+  bid_id: string
+  amount_credits: number
+  closed_at: Timestamp
+  credit_operation_id: string | null
+  credit_reservation_id: string | null
+  status: string
+  attempts: number
+  credits_released: boolean
+  last_error: string | null
+  created_at: GeneratedTimestamp
+  updated_at: GeneratedTimestamp
+}
+
 export interface AuctionAuditLogTable {
   id: Generated<number>
   auction_id: string
@@ -162,6 +179,7 @@ export interface Database {
   auction_bid_credit_failures: AuctionBidCreditFailureTable
   auction_buy_now_operations: AuctionBuyNowOperationTable
   auction_buy_now_failures: AuctionBuyNowFailureTable
+  auction_early_closure_notifications: AuctionEarlyClosureNotificationTable
   auction_audit_log: AuctionAuditLogTable
   outbox_events: OutboxEventTable
   auction_settlements: AuctionSettlementTable
