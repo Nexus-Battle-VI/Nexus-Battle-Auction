@@ -85,16 +85,25 @@ export class TransactionProcessingService {
         transferId,
       })
 
-      await this.repository.recordBuyNowFailure({
-        operationId: command.operationId,
-        auctionId: approval.auctionId,
-        buyerId: approval.buyerId,
-        stage,
-        reason: reasonOf(error),
-        transferId,
-        creditsReversed,
-        occurredAt: closedAt,
-      })
+      // La auditoria es un efecto secundario de MEJOR esfuerzo: si el propio
+      // registro de auditoria falla -por ejemplo, bajo la misma presion de
+      // conexiones que esta provocando el fallo que se intenta registrar-, esa
+      // falla NUNCA debe sustituir al error real y ocultar por que la compra
+      // no se completo.
+      try {
+        await this.repository.recordBuyNowFailure({
+          operationId: command.operationId,
+          auctionId: approval.auctionId,
+          buyerId: approval.buyerId,
+          stage,
+          reason: reasonOf(error),
+          transferId,
+          creditsReversed,
+          occurredAt: closedAt,
+        })
+      } catch {
+        // Intencionalmente ignorado; ver el comentario de arriba.
+      }
 
       throw error
     }
