@@ -13,12 +13,14 @@ import { CatalogProductPolicyClient } from '../../adapters/outbound/http/Catalog
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
+import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
   UnavailableProductInventory,
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
+  UnavailableWallet,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
 import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
@@ -66,12 +68,14 @@ import {
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
+import { WALLET, type WalletPort } from '../../application/ports/WalletPort'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
+import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -295,6 +299,21 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: WALLET,
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): WalletPort =>
+        config.walletBaseUrl === null || config.internalServiceAuthSecret === null
+          ? new UnavailableWallet()
+          : new WalletHttpClient({
+              baseUrl: config.walletBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: config.walletRequestTimeoutMs,
+              logger,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
       provide: PersistAuctionPublication,
 
       useFactory: (
@@ -424,6 +443,17 @@ export const INTERNAL_CALLERS: readonly string[] = []
       inject: [AUCTION_REPOSITORY, CLOCK],
     },
 
+    {
+      provide: TransactionProcessingService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        wallet: WalletPort,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): TransactionProcessingService =>
+        new TransactionProcessingService(repository, wallet, clock, identifiers),
+      inject: [AUCTION_REPOSITORY, WALLET, CLOCK, IDENTIFIER_GENERATOR],
+    },
     {
       provide: TOKEN_VERIFIER,
 
