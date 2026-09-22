@@ -1,9 +1,9 @@
 import 'reflect-metadata'
 
 import { NestFactory } from '@nestjs/core'
-import { ValidationPipe } from '@nestjs/common'
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger'
 
+import { createValidationPipe } from './adapters/inbound/http/validation.pipe'
 import { AppModule } from './infrastructure/bootstrap/app.module'
 import { loadConfig } from './infrastructure/config/env'
 import { createLogger } from './infrastructure/observability/logger'
@@ -20,16 +20,8 @@ const bootstrap = async (): Promise<void> => {
 
   app.setGlobalPrefix(config.globalPrefix)
 
-  app.useGlobalPipes(
-    new ValidationPipe({
-      // Se descartan las propiedades no declaradas y se rechaza la peticion si
-      // llegan campos desconocidos: evita que un cliente fije datos que el
-      // contrato no contempla, como un importe o un propietario.
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-    }),
-  )
+  // Rechaza campos desconocidos y devuelve un contrato de error estable.
+  app.useGlobalPipes(createValidationPipe())
 
   app.enableShutdownHooks()
 

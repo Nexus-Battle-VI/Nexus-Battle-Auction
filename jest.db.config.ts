@@ -17,7 +17,9 @@ const config: Config = {
     '^.+\\.ts$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
   },
   moduleFileExtensions: ['ts', 'js', 'json'],
-  testMatch: ['<rootDir>/test/db/**/*.spec.ts'],
+  // Patron portable: Jest mezcla separadores en Windows cuando `rootDir`
+  // contiene un junction, por lo que anclarlo a `<rootDir>` oculta la suite.
+  testMatch: ['**/test/db/**/*.spec.ts'],
   // Descargar y arrancar la imagen la primera vez supera el limite por defecto.
   testTimeout: 120_000,
 
@@ -25,6 +27,8 @@ const config: Config = {
   // infraestructura de persistencia, que la suite por defecto no puede ver.
   collectCoverageFrom: [
     'src/adapters/outbound/persistence/Postgres*.ts',
+    // TASK 68.1 mide tambien el DDL nuevo, ejercitado con up/down contra PostgreSQL.
+    'src/adapters/outbound/persistence/migrations/003-create-auction-watchlist.ts',
     'src/infrastructure/persistence/**/*.ts',
     '!src/infrastructure/persistence/migrate.ts',
   ],

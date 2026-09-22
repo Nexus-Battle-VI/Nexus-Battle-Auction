@@ -9,6 +9,12 @@ import {
 } from 'kysely'
 import { Pool } from 'pg'
 
+import * as createAuctionBids from '../../adapters/outbound/persistence/migrations/002-create-auction-bids'
+import * as createAuctionWatchlist from '../../adapters/outbound/persistence/migrations/003-create-auction-watchlist'
+import * as createAuctionPublication from '../../adapters/outbound/persistence/migrations/001-create-auction-publication'
+import * as addBidCreditReservation from '../../adapters/outbound/persistence/migrations/003-add-bid-credit-reservation'
+import * as createBidCreditFailures from '../../adapters/outbound/persistence/migrations/004-create-bid-credit-failures'
+import * as createBidCreditOperations from '../../adapters/outbound/persistence/migrations/005-create-bid-credit-operations'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
@@ -54,7 +60,9 @@ export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
     options.onIdleError?.(error)
   })
 
-  return new Kysely<Database>({ dialect: new PostgresDialect({ pool }) })
+  return new Kysely<Database>({
+    dialect: new PostgresDialect({ pool }),
+  })
 }
 
 /**
@@ -65,10 +73,19 @@ export const createDatabase = (options: DatabaseOptions): Kysely<Database> => {
  * ruta. Importarlas explicitamente hace que el compilador las verifique y que
  * el empaquetado no pueda dejarse ninguna fuera en silencio.
  *
- * Esta vacio a proposito: el andamiaje no inventa tablas. Cada Historia de
- * Usuario anade aqui su migracion, con prefijo numerico que fija el orden.
+ * Cada Historia de Usuario anade aqui su migracion, con prefijo numerico que
+ * fija el orden.
  */
-export const MIGRATIONS: Readonly<Record<string, Migration>> = {}
+export const MIGRATIONS: Readonly<Record<string, Migration>> = {
+  '001-create-auction-publication': createAuctionPublication,
+  '002-create-auction-bids': createAuctionBids,
+  // TASK 68.1: se aplica despues de la tabla auctions referenciada por la watchlist.
+  '003-create-auction-watchlist': createAuctionWatchlist,
+  // Conserva las migraciones de pujas al integrar la persistencia de watchlist.
+  '003-add-bid-credit-reservation': addBidCreditReservation,
+  '004-create-bid-credit-failures': createBidCreditFailures,
+  '005-create-bid-credit-operations': createBidCreditOperations,
+}
 
 export interface MigrationOutcome {
   readonly applied: readonly string[]
@@ -94,7 +111,12 @@ export const migrateToLatest = async (
   const provider: MigrationProvider = {
     getMigrations: () => Promise.resolve({ ...migrations }),
   }
-  const migrator = new Migrator({ db, provider })
+
+  const migrator = new Migrator({
+    db,
+    provider,
+  })
+
   const { error, results } = await migrator.migrateToLatest()
 
   return {

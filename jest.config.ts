@@ -18,12 +18,12 @@ const config: Config = {
     {
       ...shared,
       displayName: 'unit',
-      testMatch: ['<rootDir>/test/unit/**/*.spec.ts'],
+      testMatch: ['**/test/unit/**/*.spec.ts'],
     },
     {
       ...shared,
       displayName: 'integration',
-      testMatch: ['<rootDir>/test/integration/**/*.spec.ts'],
+      testMatch: ['**/test/integration/**/*.spec.ts'],
     },
   ],
   // Los adaptadores de PostgreSQL y la infraestructura de persistencia quedan

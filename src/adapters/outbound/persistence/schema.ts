@@ -9,7 +9,120 @@
  * Nombres de columna en `snake_case`, que es la convencion de PostgreSQL. La
  * traduccion a la instantanea del agregado ocurre en un `mapping.ts` explicito.
  *
- * Vacio en el andamiaje: ninguna Historia de Usuario ha definido todavia tablas.
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface Database {}
+import type { ColumnType, Generated } from 'kysely'
+
+type Timestamp = ColumnType<Date, Date | string, Date | string>
+type GeneratedTimestamp = ColumnType<Date, Date | string | undefined, Date | string>
+
+export interface AuctionTable {
+  id: string
+  seller_id: string
+  product_id: string
+  duration_hours: number
+  publication_fee_credits: number
+  minimum_bid_credits: number
+  buy_now_credits: number | null
+  status: string
+  published_at: Timestamp
+  closes_at: Timestamp
+  inventory_commitment_id: string
+  fee_charge_id: string
+  created_at: GeneratedTimestamp
+}
+
+export interface AuctionBidTable {
+  id: string
+  auction_id: string
+  bidder_id: string
+  amount_credits: number
+  placed_at: Timestamp
+  is_leader: boolean
+  credit_reservation_id: string | null
+}
+
+export interface AuctionBidCreditOperationTable {
+  operation_id: string
+  bid_id: string
+  auction_id: string
+  bidder_id: string
+  amount_credits: number
+  status: string
+  reservation_id: string | null
+  previous_reservation_id: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+export interface AuctionBidCreditFailureTable {
+  id: Generated<number>
+  operation_id: string
+  bid_id: string
+  auction_id: string
+  bidder_id: string
+  stage: string
+  reason: string
+  new_reservation_id: string | null
+  previous_reservation_id: string | null
+  new_reservation_released: boolean
+  previous_reservation_released: boolean
+  occurred_at: Timestamp
+}
+
+export interface AuctionPublicationOperationTable {
+  operation_id: string
+  request_hash: string
+  auction_id: string
+  completed_at: Timestamp
+}
+
+export interface AuctionPublicationFailureTable {
+  operation_id: string
+  auction_id: string
+  seller_id: string
+  stage: string
+  reason: string
+  fee_charge_id: string | null
+  inventory_commitment_id: string | null
+  fee_refunded: boolean
+  inventory_released: boolean
+  occurred_at: Timestamp
+}
+
+export interface AuctionAuditLogTable {
+  id: Generated<number>
+  auction_id: string
+  operation_id: string
+  action: string
+  actor_id: string
+  occurred_at: Timestamp
+  details: unknown
+}
+
+export interface OutboxEventTable {
+  id: string
+  aggregate_id: string
+  event_type: string
+  payload: unknown
+  occurred_at: Timestamp
+  published_at: Timestamp | null
+}
+
+export interface Database {
+  auction_watchlist: AuctionWatchlistTable
+  auctions: AuctionTable
+  auction_bids: AuctionBidTable
+  auction_publication_operations: AuctionPublicationOperationTable
+  auction_publication_failures: AuctionPublicationFailureTable
+  auction_bid_credit_operations: AuctionBidCreditOperationTable
+  auction_bid_credit_failures: AuctionBidCreditFailureTable
+  auction_audit_log: AuctionAuditLogTable
+  outbox_events: OutboxEventTable
+}
+
+/** Identidad compuesta de seguimiento; player_id no referencia bases de otros servicios. */
+export interface AuctionWatchlistTable {
+  player_id: string
+  auction_id: string
+  followed_at: Timestamp
+}
