@@ -1,3 +1,4 @@
+import type { AutoBidConfigSnapshot } from '../../domain/entities/AutoBidConfig'
 import { Bid, type BidSnapshot } from '../../domain/entities/Bid'
 import { AutoBidLimit } from '../../domain/value-objects/AutoBidLimit'
 import { ConcurrentBidConflictError } from '../errors/AuctionPersistenceError'
@@ -80,16 +81,36 @@ export class ReactToRivalBid {
 
       const nextAmount = currentLeader.amountCredits + auction.minimumBidCredits
 
-      const affordable = candidates
-        .filter((candidate) =>
-          AutoBidLimit.positive(candidate.maxAmountCredits).canAfford(nextAmount),
-        )
-        .sort(
-          (left, right) =>
-            right.maxAmountCredits - left.maxAmountCredits ||
-            left.configuredAt.getTime() - right.configuredAt.getTime() ||
-            left.bidderId.localeCompare(right.bidderId),
-        )
+      const affordable: AutoBidConfigSnapshot[] = []
+
+      /*
+       * HU-67.3: un candidato cuyo limite ya no alcanza para el siguiente
+       * incremento minimo nunca podra alcanzar uno mayor mas adelante en
+       * esta misma cadena (nextAmount solo crece), asi que se notifica una
+       * unica vez y se excluye del resto de la cadena.
+       */
+      for (const candidate of candidates) {
+        if (AutoBidLimit.positive(candidate.maxAmountCredits).canAfford(nextAmount)) {
+          affordable.push(candidate)
+        } else {
+          excludedThisChain.add(candidate.bidderId)
+
+          await this.notifyLimitReached(
+            command.operationId,
+            candidate,
+            currentLeader,
+            nextAmount,
+            now,
+          )
+        }
+      }
+
+      affordable.sort(
+        (left, right) =>
+          right.maxAmountCredits - left.maxAmountCredits ||
+          left.configuredAt.getTime() - right.configuredAt.getTime() ||
+          left.bidderId.localeCompare(right.bidderId),
+      )
 
       if (affordable.length === 0) {
         return
@@ -217,6 +238,45 @@ export class ReactToRivalBid {
       /*
        * Igual que RegisterBid.notifyPreviousLeader: un fallo temporal de
        * Notifications no debe deshacer una puja automatica ya confirmada.
+       */
+    }
+  }
+
+  /**
+   * HU-67.3 / CA-02: el jugador tiene una puja automatica activa pero su
+   * limite ya no alcanza para seguir liderando. Best-effort: nunca debe
+   * afectar el resultado de la puja rival que origino la cadena.
+   */
+  private async notifyLimitReached(
+    operationId: string,
+    candidate: AutoBidConfigSnapshot,
+    leadingBid: BidSnapshot,
+    requiredAmountCredits: number,
+    occurredAt: Date,
+  ): Promise<void> {
+    try {
+      await this.notifications.publishAutoBidLimitReached({
+        notificationId: `${operationId}:auto:limit:${candidate.bidderId}`,
+
+        operationId,
+
+        recipientPlayerId: candidate.bidderId,
+
+        auctionId: candidate.auctionId,
+
+        autoBidLimitCredits: candidate.maxAmountCredits,
+
+        requiredAmountCredits,
+
+        leadingBidderId: leadingBid.bidderId,
+
+        occurredAt,
+      })
+    } catch {
+      /*
+       * Notificar el limite alcanzado es best-effort: un fallo temporal de
+       * Notifications no debe interrumpir la evaluacion del resto de la
+       * cadena ni la puja rival ya confirmada.
        */
     }
   }

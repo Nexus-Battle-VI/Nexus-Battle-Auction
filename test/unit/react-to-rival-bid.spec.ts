@@ -3,6 +3,7 @@ import type {
   PersistBidResult,
 } from '../../src/application/ports/AuctionRepositoryPort'
 import type {
+  AutoBidLimitReachedNotification,
   OutbidNotification,
   OutbidNotificationPort,
 } from '../../src/application/ports/OutbidNotificationPort'
@@ -82,6 +83,14 @@ const dependencies = () => {
 
       return Promise.resolve()
     }),
+
+    publishAutoBidLimitReached: jest.fn(
+      (notification: AutoBidLimitReachedNotification): Promise<void> => {
+        void notification
+
+        return Promise.resolve()
+      },
+    ),
   }
 
   let nextId = 0
@@ -137,8 +146,8 @@ describe('ReactToRivalBid HU-67.2', () => {
     )
   })
 
-  it('CA-02: no reacciona cuando la siguiente oferta necesaria supera el limite', async () => {
-    const { repository, persistence, useCase } = dependencies()
+  it('CA-02: no reacciona cuando la siguiente oferta necesaria supera el limite y avisa (HU-67.3)', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
 
     repository.findActiveAutoBidsForAuction.mockResolvedValueOnce([
       autoBidConfig('bidder-auto', 35, new Date('2026-09-21T12:00:30.000Z')),
@@ -147,6 +156,41 @@ describe('ReactToRivalBid HU-67.2', () => {
     await useCase.execute({ operationId: 'operation-ca-02', leadingBid })
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publishAutoBidLimitReached).toHaveBeenCalledTimes(1)
+
+    expect(notifications.publishAutoBidLimitReached).toHaveBeenCalledWith({
+      notificationId: 'operation-ca-02:auto:limit:bidder-auto',
+      operationId: 'operation-ca-02',
+      recipientPlayerId: 'bidder-auto',
+      auctionId: auction.id,
+      autoBidLimitCredits: 35,
+      requiredAmountCredits: 40,
+      leadingBidderId: 'bidder-human',
+      occurredAt: now,
+    })
+  })
+
+  it('avisa el limite alcanzado una sola vez aunque el candidato siga sin poder reaccionar', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
+
+    const priced = autoBidConfig('bidder-priced-out', 35, new Date('2026-09-21T12:00:30.000Z'))
+
+    const strong = autoBidConfig('bidder-strong', 1000, new Date('2026-09-21T12:00:10.000Z'))
+
+    repository.findActiveAutoBidsForAuction.mockImplementation((_auctionId, excludeBidderId) =>
+      Promise.resolve([priced, strong].filter((c) => c.bidderId !== excludeBidderId)),
+    )
+
+    await useCase.execute({ operationId: 'operation-once', leadingBid })
+
+    // Ronda 1: bidder-priced-out (35) no alcanza 40 y se avisa+excluye;
+    // bidder-strong (1000) gana y pasa a liderar. Ronda 2: el unico otro
+    // candidato ya esta excluido, asi que la cadena termina sin volver a
+    // evaluar (ni volver a avisar) a bidder-priced-out.
+    expect(persistence.execute).toHaveBeenCalledTimes(1)
+
+    expect(notifications.publishAutoBidLimitReached).toHaveBeenCalledTimes(1)
   })
 
   it('encadena rondas alternando entre los dos limites mas altos hasta que ninguno alcance', async () => {

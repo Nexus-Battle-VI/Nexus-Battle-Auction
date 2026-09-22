@@ -61,7 +61,10 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
       reserve,
       release,
     }
-    const notifications: OutbidNotificationPort = { publish: publishNotification }
+    const notifications: OutbidNotificationPort = {
+      publish: publishNotification,
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
     const identifiers = { generate: () => `bid-${String(++nextBidNumber)}` }
     const autoBidReactor = new ReactToRivalBid(
@@ -195,7 +198,10 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
       reserve,
       release,
     }
-    const notifications: OutbidNotificationPort = { publish: publishNotification }
+    const notifications: OutbidNotificationPort = {
+      publish: publishNotification,
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
     const identifiers = { generate: () => `bid-cp-02-${String(++nextBidNumber)}` }
     const autoBidReactor = new ReactToRivalBid(
@@ -303,7 +309,10 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
     }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
     const identifiers = { generate: () => `bid-invalid-${String(++nextBidNumber)}` }
-    const notifications = { publish: publishNotification }
+    const notifications = {
+      publish: publishNotification,
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
     const autoBidReactor = new ReactToRivalBid(
       repository,
       persistence,
@@ -384,7 +393,10 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
     }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
     const identifiers = { generate: () => `bid-limit-${String(++nextBidNumber)}` }
-    const notifications = { publish: () => Promise.resolve() }
+    const notifications = {
+      publish: () => Promise.resolve(),
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
     const autoBidReactor = new ReactToRivalBid(
       repository,
       persistence,

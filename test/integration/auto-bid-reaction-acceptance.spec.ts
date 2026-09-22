@@ -4,6 +4,7 @@ import type {
   ReserveBidCreditsCommand,
 } from '../../src/application/ports/BidCreditsPort'
 import type {
+  AutoBidLimitReachedNotification,
   OutbidNotification,
   OutbidNotificationPort,
 } from '../../src/application/ports/OutbidNotificationPort'
@@ -110,9 +111,19 @@ describe('HU-67.2: aceptacion de la reaccion automatica ante una puja rival', ()
 
     const notified: OutbidNotification[] = []
 
+    const limitReachedNotified: AutoBidLimitReachedNotification[] = []
+
     const notifications: OutbidNotificationPort = {
       publish: (notification: OutbidNotification): Promise<void> => {
         notified.push(notification)
+
+        return Promise.resolve()
+      },
+
+      publishAutoBidLimitReached: (
+        notification: AutoBidLimitReachedNotification,
+      ): Promise<void> => {
+        limitReachedNotified.push(notification)
 
         return Promise.resolve()
       },
@@ -176,5 +187,28 @@ describe('HU-67.2: aceptacion de la reaccion automatica ante una puja rival', ()
     expect(release).toHaveBeenCalledTimes(5)
 
     expect(notified.length).toBeGreaterThanOrEqual(5)
+
+    /*
+     * bidder-A (50) queda fuera de la ronda de 60 (C lidera con 50, no
+     * alcanza el siguiente incremento minimo); bidder-B (70) sigue
+     * compitiendo hasta la ronda de 80, donde tampoco alcanza. Cada uno
+     * recibe el aviso de HU-67.3 exactamente una vez, con el monto que
+     * realmente necesitaba superar.
+     */
+    expect(limitReachedNotified).toHaveLength(2)
+
+    expect(
+      limitReachedNotified
+        .map((n) => ({
+          recipientPlayerId: n.recipientPlayerId,
+          requiredAmountCredits: n.requiredAmountCredits,
+        }))
+        .sort((left, right) => left.recipientPlayerId.localeCompare(right.recipientPlayerId)),
+    ).toEqual([
+      { recipientPlayerId: 'bidder-A', requiredAmountCredits: 60 },
+      { recipientPlayerId: 'bidder-B', requiredAmountCredits: 80 },
+    ])
+
+    expect(limitReachedNotified.every((n) => n.leadingBidderId === 'bidder-C')).toBe(true)
   })
 })
