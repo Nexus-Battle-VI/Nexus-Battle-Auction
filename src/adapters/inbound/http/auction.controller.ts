@@ -2,9 +2,11 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   Headers,
   HttpCode,
   HttpStatus,
+  NotFoundException,
   Param,
   Post,
 } from '@nestjs/common'
@@ -15,6 +17,8 @@ import {
   ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiHeader,
+  ApiNotFoundResponse,
+  ApiOkResponse,
   ApiOperation,
   ApiParam,
   ApiServiceUnavailableResponse,
@@ -24,10 +28,12 @@ import {
 } from '@nestjs/swagger'
 
 import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVerifierPort'
+import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
 import { PublishAuction } from '../../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../../application/use-cases/RegisterBid'
 import { CurrentIdentity, Roles } from './auth/decorators'
 import {
+  AuctionDetailResponseDto,
   AuctionResponseDto,
   BidResponseDto,
   PublishAuctionRequestDto,
@@ -43,7 +49,59 @@ export class AuctionController {
   constructor(
     private readonly publishAuction: PublishAuction,
     private readonly registerBid: RegisterBid,
+    private readonly getAuctionDetail: GetAuctionDetail,
   ) {}
+
+  /**
+   * HU-63.6.
+   *
+   * Proporciona a la Web la informacion necesaria
+   * para presentar una subasta sin duplicar reglas
+   * de negocio en el cliente.
+   */
+  @Get(':auctionId')
+  @Roles(Role.Player)
+  @ApiOperation({
+    summary: 'Consultar detalle y oferta lider de una subasta',
+  })
+  @ApiParam({
+    name: 'auctionId',
+    required: true,
+    description: 'Identificador de la subasta.',
+    example: 'auction-123',
+  })
+  @ApiOkResponse({
+    type: AuctionDetailResponseDto,
+    description: 'Detalle actual de la subasta.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Access token ausente o invalido.',
+  })
+  @ApiForbiddenResponse({
+    description: 'La identidad no posee el rol requerido.',
+  })
+  @ApiNotFoundResponse({
+    description: 'La subasta solicitada no existe.',
+  })
+  async detail(
+    @Param('auctionId')
+    auctionId: string,
+  ): Promise<AuctionDetailResponseDto> {
+    const detail = await this.getAuctionDetail.execute(auctionId)
+
+    if (detail === null) {
+      throw new NotFoundException({
+        statusCode: HttpStatus.NOT_FOUND,
+        code: 'AUCTION_NOT_FOUND',
+        message: 'La subasta solicitada no existe.',
+      })
+    }
+
+    return {
+      ...detail.auction,
+      currentBid: detail.currentBid,
+    }
+  }
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
@@ -56,7 +114,9 @@ export class AuctionController {
     required: true,
     description: 'Identificador unico de hasta 128 caracteres para reintentos seguros.',
   })
-  @ApiCreatedResponse({ type: AuctionResponseDto })
+  @ApiCreatedResponse({
+    type: AuctionResponseDto,
+  })
   @ApiBadRequestResponse({
     description: 'Solicitud o Idempotency-Key invalida.',
   })
@@ -76,26 +136,38 @@ export class AuctionController {
     description: 'Dependencia requerida no disponible.',
   })
   async publish(
-    @CurrentIdentity() identity: VerifiedIdentity,
-    @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body() request: PublishAuctionRequestDto,
+    @CurrentIdentity()
+    identity: VerifiedIdentity,
+
+    @Headers('idempotency-key')
+    idempotencyKey: string | undefined,
+
+    @Body()
+    request: PublishAuctionRequestDto,
   ): Promise<AuctionResponseDto> {
     try {
       const operationId = assertIdempotencyKey(idempotencyKey)
 
       return await this.publishAuction.execute({
         operationId,
+
         sellerId: identity.subject,
+
         productId: request.productId,
+
         durationHours: request.durationHours,
+
         minimumBidCredits: request.minimumBidCredits,
+
         buyNowCredits: request.buyNowCredits,
       })
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'INVALID_IDEMPOTENCY_KEY') {
         throw new BadRequestException({
           statusCode: 400,
+
           code: 'INVALID_IDEMPOTENCY_KEY',
+
           message: 'Idempotency-Key es obligatorio y debe ser valido.',
         })
       }
@@ -145,25 +217,37 @@ export class AuctionController {
     description: 'Dependencia requerida no disponible o compensacion de creditos fallida.',
   })
   async bid(
-    @CurrentIdentity() identity: VerifiedIdentity,
-    @Param('auctionId') auctionId: string,
-    @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body() request: RegisterBidRequestDto,
+    @CurrentIdentity()
+    identity: VerifiedIdentity,
+
+    @Param('auctionId')
+    auctionId: string,
+
+    @Headers('idempotency-key')
+    idempotencyKey: string | undefined,
+
+    @Body()
+    request: RegisterBidRequestDto,
   ): Promise<BidResponseDto> {
     try {
       const operationId = assertIdempotencyKey(idempotencyKey)
 
       return await this.registerBid.execute({
         operationId,
+
         auctionId,
+
         bidderId: identity.subject,
+
         amountCredits: request.amountCredits,
       })
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'INVALID_IDEMPOTENCY_KEY') {
         throw new BadRequestException({
           statusCode: 400,
+
           code: 'INVALID_IDEMPOTENCY_KEY',
+
           message: 'Idempotency-Key es obligatorio y debe ser valido.',
         })
       }

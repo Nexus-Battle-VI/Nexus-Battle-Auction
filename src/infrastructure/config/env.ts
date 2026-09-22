@@ -11,6 +11,7 @@ export const AuthMode = {
    * binario con `NODE_ENV=production` y este modo NO ARRANCA (ADR-004).
    */
   Disabled: 'disabled',
+
   /** Se exige un testimonio firmado por el user pool de Cognito. */
   Jwt: 'jwt',
 } as const
@@ -31,18 +32,40 @@ export type PersistenceDriver = (typeof PersistenceDriver)[keyof typeof Persiste
 
 export interface AppConfig {
   readonly nodeEnv: 'development' | 'test' | 'production'
+
   readonly serviceName: string
   readonly version: string
+
   readonly logLevel: 'debug' | 'info' | 'warn' | 'error'
+
   readonly port: number
   readonly globalPrefix: string
   readonly swaggerEnabled: boolean
+
   readonly persistenceDriver: PersistenceDriver
+
   readonly databaseUrl: string | null
+
   readonly authMode: AuthMode
+
   readonly cognito: CognitoConfig | null
+
   readonly internalServiceAuthSecret: string | null
+
   readonly catalogBaseUrl: string
+
+  /**
+   * HU-63.5.
+   *
+   * URL interna del servidor de Notifications que recibe
+   * las notificaciones de puja superada.
+   *
+   * null permite ejecutar Auction localmente sin levantar
+   * Notifications.
+   */
+  readonly notificationsBaseUrl: string | null
+
+  readonly notificationsTimeoutMs: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -117,12 +140,9 @@ const readBoolean = (env: RawEnv, key: string, fallback: boolean): boolean => {
 }
 
 /**
- * Construye la configuracion a partir del entorno. Es una funcion pura sobre
- * `env`: no lee `process.env` directamente, de modo que puede verificarse por
- * completo sin contaminar el proceso de pruebas.
+ * Construye la configuracion a partir del entorno.
  *
- * Falla de inmediato ante una configuracion invalida. Un servicio mal
- * configurado no debe arrancar y aparentar salud.
+ * Falla de inmediato ante una configuracion invalida.
  */
 export const loadConfig = (env: RawEnv): AppConfig => {
   const nodeEnv = readEnum(
@@ -157,6 +177,7 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   }
 
   const cognitoUserPoolId = readString(env, 'COGNITO_USER_POOL_ID', '')
+
   const cognitoClientId = readString(env, 'COGNITO_CLIENT_ID', '')
 
   if (authMode === AuthMode.Jwt && (cognitoUserPoolId === '' || cognitoClientId === '')) {
@@ -165,12 +186,11 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     )
   }
 
-  // Se comprueba DESPUES de la identidad a proposito: la imagen sin configurar
-  // debe negarse a arrancar nombrando AUTH_MODE, que es lo que verifica la CI.
-  //
-  // Una puja que desaparece al reiniciar deja creditos reservados sin dueno.
-  // La persistencia en memoria es un doble de desarrollo y pruebas, nunca un
-  // modo de produccion.
+  /*
+   * Una puja que desaparece al reiniciar deja creditos
+   * reservados sin dueno. Memory solo es valido fuera de
+   * produccion.
+   */
   if (nodeEnv === 'production' && persistenceDriver === PersistenceDriver.Memory) {
     throw new ConfigurationError(
       'PERSISTENCE_DRIVER no puede ser "memory" con NODE_ENV=production. Vease ADR-019.',
@@ -179,24 +199,59 @@ export const loadConfig = (env: RawEnv): AppConfig => {
 
   const internalServiceAuthSecret = readString(env, 'INTERNAL_SERVICE_AUTH_SECRET', '')
 
+  const notificationsBaseUrl = readString(env, 'NOTIFICATIONS_BASE_URL', '')
+
+  const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  /*
+   * Si se configura Notifications, una llamada sin firma no
+   * serviria: Notifications la rechazaria con 401.
+   *
+   * Se falla al arrancar en vez de fingir que la integracion
+   * esta disponible.
+   */
+  if (notificationsBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando NOTIFICATIONS_BASE_URL esta configurado.',
+    )
+  }
+
   return {
     nodeEnv,
+
     serviceName: readString(env, 'SERVICE_NAME', 'nexus-battle-auction'),
+
     version: readString(env, 'SERVICE_VERSION', '0.1.0'),
+
     logLevel: readEnum(env, 'LOG_LEVEL', ['debug', 'info', 'warn', 'error'] as const, 'info'),
+
     port: readInteger(env, 'PORT', 3008, 1, 65_535),
+
     globalPrefix: readString(env, 'GLOBAL_PREFIX', 'api'),
-    // La documentacion interactiva permanece deshabilitada en produccion salvo
-    // decision explicita: expone la superficie completa de la API.
+
     swaggerEnabled: readBoolean(env, 'SWAGGER_ENABLED', nodeEnv !== 'production'),
+
     persistenceDriver,
+
     databaseUrl: databaseUrl === '' ? null : databaseUrl,
+
     authMode,
+
     cognito:
       authMode === AuthMode.Jwt
-        ? { userPoolId: cognitoUserPoolId, clientId: cognitoClientId }
+        ? {
+            userPoolId: cognitoUserPoolId,
+
+            clientId: cognitoClientId,
+          }
         : null,
+
     internalServiceAuthSecret: internalServiceAuthSecret === '' ? null : internalServiceAuthSecret,
+
     catalogBaseUrl: readString(env, 'CATALOG_BASE_URL', 'http://catalog:3003'),
+
+    notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
+
+    notificationsTimeoutMs,
   }
 }

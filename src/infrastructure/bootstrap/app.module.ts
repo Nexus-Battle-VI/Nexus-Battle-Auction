@@ -10,6 +10,7 @@ import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
 import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
+import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
@@ -17,6 +18,7 @@ import {
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
+import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
 import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
@@ -38,6 +40,10 @@ import {
   type IdentifierGeneratorPort,
 } from '../../application/ports/IdentifierGeneratorPort'
 import {
+  OUTBID_NOTIFICATION,
+  type OutbidNotificationPort,
+} from '../../application/ports/OutbidNotificationPort'
+import {
   PRODUCT_INVENTORY,
   type ProductInventoryPort,
 } from '../../application/ports/ProductInventoryPort'
@@ -50,6 +56,7 @@ import {
   type SellerSanctionPort,
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
+import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
@@ -61,54 +68,55 @@ import { createLogger, type Logger } from '../observability/logger'
 import { createDatabase, pingDatabase } from '../persistence/database'
 
 export const APP_CONFIG = Symbol('AppConfig')
+
 export const LOGGER = Symbol('Logger')
+
 export const DATABASE = Symbol('Database')
+
 export const DATABASE_LIFECYCLE = Symbol('DatabaseLifecycle')
 
-/**
- * Servicios autorizados a llamar a las rutas `@InternalOnly()` de Auction.
- *
- * Es la lista de consumidores que ADR-019 declara. Anadir uno es una decision
- * de arquitectura, no un ajuste de configuracion: por eso vive en codigo, donde
- * cambiarla exige un Pull Request revisado.
- */
 export const INTERNAL_CALLERS: readonly string[] = []
 
-/**
- * Raiz de composicion.
- *
- * Es el unico lugar donde se eligen implementaciones concretas. Los casos de
- * uso son clases planas sin decoradores de NestJS: se registran aqui con
- * fabricas explicitas, de modo que la capa de aplicacion permanece
- * independiente del framework.
- */
 @Module({
   controllers: [HealthController, AuctionController],
+
   providers: [
     {
       provide: APP_CONFIG,
+
       useFactory: (): AppConfig => loadConfig(process.env),
     },
+
     {
       provide: LOGGER,
+
       useFactory: (config: AppConfig): Logger =>
         createLogger({
           level: config.logLevel,
+
           service: config.serviceName,
+
           version: config.version,
         }),
+
       inject: [APP_CONFIG],
     },
+
     {
       provide: CLOCK,
+
       useFactory: (): ClockPort => new SystemClock(),
     },
+
     {
       provide: IDENTIFIER_GENERATOR,
+
       useFactory: (): IdentifierGeneratorPort => new UuidGenerator(),
     },
+
     {
       provide: DATABASE,
+
       useFactory: (config: AppConfig, logger: Logger): Kysely<Database> | null => {
         if (config.persistenceDriver !== PersistenceDriver.Postgres) {
           logger.warn('in_memory_persistence', {
@@ -118,14 +126,13 @@ export const INTERNAL_CALLERS: readonly string[] = []
           return null
         }
 
-        // `loadConfig` ya garantiza que DATABASE_URL existe con este driver.
         if (config.databaseUrl === null) {
           throw new Error('DATABASE_URL es obligatorio con PERSISTENCE_DRIVER=postgres.')
         }
 
-        // El esquema NO se migra aqui: es un paso explicito, `npm run migrate`.
         return createDatabase({
           connectionString: config.databaseUrl,
+
           onIdleError: (error) => {
             logger.warn('postgres_idle_connection_error', {
               detail: describeError(error),
@@ -133,10 +140,13 @@ export const INTERNAL_CALLERS: readonly string[] = []
           },
         })
       },
+
       inject: [APP_CONFIG, LOGGER],
     },
+
     {
       provide: DATABASE_LIFECYCLE,
+
       useFactory: (
         db: Kysely<Database> | null,
       ): {
@@ -146,16 +156,22 @@ export const INTERNAL_CALLERS: readonly string[] = []
           await db?.destroy()
         },
       }),
+
       inject: [DATABASE],
     },
+
     {
       provide: AUCTION_REPOSITORY,
+
       useFactory: (db: Kysely<Database> | null): AuctionRepositoryPort =>
         db === null ? new InMemoryAuctionRepository() : new PostgresAuctionRepository(db),
+
       inject: [DATABASE],
     },
+
     {
       provide: CATALOG_PRODUCT_POLICY,
+
       useFactory: (
         config: AppConfig,
         logger: Logger,
@@ -165,32 +181,83 @@ export const INTERNAL_CALLERS: readonly string[] = []
           ? new UnavailableCatalogProductPolicy()
           : new CatalogProductPolicyClient({
               baseUrl: config.catalogBaseUrl,
+
               secret: config.internalServiceAuthSecret,
+
               serviceName: 'auction',
+
               timeoutMs: 3_000,
+
               logger,
+
               now: () => clock.now(),
             }),
+
       inject: [APP_CONFIG, LOGGER, CLOCK],
     },
+
     {
       provide: PRODUCT_INVENTORY,
+
       useFactory: (): ProductInventoryPort => new UnavailableProductInventory(),
     },
+
     {
       provide: PUBLICATION_FEE,
+
       useFactory: (): PublicationFeePort => new UnavailablePublicationFee(),
     },
+
     {
       provide: BID_CREDITS,
+
       useFactory: (): BidCreditsPort => new UnavailableBidCredits(),
     },
+
+    /**
+     * HU-63.5.
+     *
+     * Con URL + secreto configurados se utiliza la integracion
+     * HTTP real con Notifications.
+     *
+     * Sin configuracion se conserva el adaptador no disponible
+     * para desarrollo local.
+     */
+    {
+      provide: OUTBID_NOTIFICATION,
+
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): OutbidNotificationPort => {
+        if (config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailableOutbidNotification()
+        }
+
+        return new HttpOutbidNotificationClient({
+          baseUrl: config.notificationsBaseUrl,
+
+          secret: config.internalServiceAuthSecret,
+
+          serviceName: 'auction',
+
+          timeoutMs: config.notificationsTimeoutMs,
+
+          logger,
+
+          now: () => clock.now(),
+        })
+      },
+
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+
     {
       provide: SELLER_SANCTIONS,
+
       useFactory: (): SellerSanctionPort => new UnavailableSellerSanctions(),
     },
+
     {
       provide: PersistAuctionPublication,
+
       useFactory: (
         repository: AuctionRepositoryPort,
         inventory: ProductInventoryPort,
@@ -198,19 +265,43 @@ export const INTERNAL_CALLERS: readonly string[] = []
         clock: ClockPort,
       ): PersistAuctionPublication =>
         new PersistAuctionPublication(repository, inventory, fees, clock),
+
       inject: [AUCTION_REPOSITORY, PRODUCT_INVENTORY, PUBLICATION_FEE, CLOCK],
     },
+
     {
       provide: PersistBidWithCredits,
+
       useFactory: (
         repository: AuctionRepositoryPort,
         credits: BidCreditsPort,
         clock: ClockPort,
       ): PersistBidWithCredits => new PersistBidWithCredits(repository, credits, clock),
+
       inject: [AUCTION_REPOSITORY, BID_CREDITS, CLOCK],
     },
+
+    {
+      provide: GetAuctionDetail,
+
+      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
+        new GetAuctionDetail(repository),
+
+      inject: [AUCTION_REPOSITORY],
+    },
+
+    {
+      provide: GetAuctionDetail,
+
+      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
+        new GetAuctionDetail(repository),
+
+      inject: [AUCTION_REPOSITORY],
+    },
+
     {
       provide: PublishAuction,
+
       useFactory: (
         repository: AuctionRepositoryPort,
         catalog: CatalogProductPolicyPort,
@@ -229,6 +320,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
           clock,
           identifiers,
         ),
+
       inject: [
         AUCTION_REPOSITORY,
         CATALOG_PRODUCT_POLICY,
@@ -239,22 +331,32 @@ export const INTERNAL_CALLERS: readonly string[] = []
         IDENTIFIER_GENERATOR,
       ],
     },
+
     {
       provide: RegisterBid,
+
       useFactory: (
         repository: AuctionRepositoryPort,
         persistence: PersistBidWithCredits,
         clock: ClockPort,
         identifiers: IdentifierGeneratorPort,
-      ): RegisterBid => new RegisterBid(repository, persistence, clock, identifiers),
-      inject: [AUCTION_REPOSITORY, PersistBidWithCredits, CLOCK, IDENTIFIER_GENERATOR],
+        notifications: OutbidNotificationPort,
+      ): RegisterBid => new RegisterBid(repository, persistence, clock, identifiers, notifications),
+
+      inject: [
+        AUCTION_REPOSITORY,
+        PersistBidWithCredits,
+        CLOCK,
+        IDENTIFIER_GENERATOR,
+        OUTBID_NOTIFICATION,
+      ],
     },
+
     {
       provide: TOKEN_VERIFIER,
+
       useFactory: (config: AppConfig, logger: Logger): TokenVerifierPort => {
         if (config.cognito === null) {
-          // No se devuelve un verificador que acepte cualquier cosa: con
-          // AUTH_MODE=disabled el guard que lo usaria no se registra.
           logger.warn('authentication_disabled', {
             detail: 'AUTH_MODE=disabled: ninguna ruta verifica quien realiza la peticion.',
           })
@@ -267,14 +369,13 @@ export const INTERNAL_CALLERS: readonly string[] = []
 
         return new CognitoTokenVerifier(config.cognito)
       },
+
       inject: [APP_CONFIG, LOGGER],
     },
 
-    // El orden importa: NestJS ejecuta los guards globales en el orden en que se
-    // declaran. Primero la identidad, despues los roles, despues el contrato
-    // interno, que solo actua sobre rutas `@InternalOnly()`.
     {
       provide: APP_GUARD,
+
       useFactory: (
         config: AppConfig,
         reflector: Reflector,
@@ -283,20 +384,26 @@ export const INTERNAL_CALLERS: readonly string[] = []
         config.authMode === AuthMode.Jwt
           ? new JwtAuthGuard(reflector, verifier)
           : new AnonymousIdentityGuard(),
+
       inject: [APP_CONFIG, Reflector, TOKEN_VERIFIER],
     },
+
     {
       provide: APP_GUARD,
+
       useFactory: (config: AppConfig, reflector: Reflector): CanActivate =>
         config.authMode === AuthMode.Jwt
           ? new RolesGuard(reflector)
           : {
               canActivate: (): boolean => true,
             },
+
       inject: [APP_CONFIG, Reflector],
     },
+
     {
       provide: APP_GUARD,
+
       useFactory: (
         config: AppConfig,
         reflector: Reflector,
@@ -305,33 +412,47 @@ export const INTERNAL_CALLERS: readonly string[] = []
       ): CanActivate =>
         new InternalServiceGuard({
           reflector,
+
           secret: config.internalServiceAuthSecret,
+
           allowedServices: INTERNAL_CALLERS,
+
           clock,
+
           logger,
         }),
+
       inject: [APP_CONFIG, Reflector, CLOCK, LOGGER],
     },
+
     {
       provide: READINESS_CHECKS,
+
       useFactory: (db: Kysely<Database> | null): readonly ReadinessCheck[] =>
         db === null
           ? []
           : [
               {
                 name: 'postgres',
+
                 check: () => pingDatabase(db),
               },
             ],
+
       inject: [DATABASE],
     },
+
     {
       provide: VERSION_REPORT,
+
       useFactory: (config: AppConfig): VersionReport => ({
         service: config.serviceName,
+
         version: config.version,
+
         nodeEnv: config.nodeEnv,
       }),
+
       inject: [APP_CONFIG],
     },
   ],
