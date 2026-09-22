@@ -31,3 +31,7 @@ La construcción y las pruebas de arranque de la imagen se verifican en GitHub A
 Commit: `fix(auction): restore watchlist composition and migrations #TASK-68.1`.
 
 Refs Nexus-Battle-VI/Nexus-Battle-Management#53.
+
+## Validacion tras actualizar develop
+
+Se integro develop en 060af93 (HU-63.7), sin conflictos, y se repitieron lint, formato, tipos, pruebas y build. Resultado: 285 pruebas generales + 42 PostgreSQL = 327 aprobadas, cero fallos. Cobertura general: sentencias 94,54 %, ramas 89,10 %, funciones 91,70 %, lineas 94,56 %. PostgreSQL conserva 97,61 %, 92,20 %, 100 % y 97,50 %, respectivamente.

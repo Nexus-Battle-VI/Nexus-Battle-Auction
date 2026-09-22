@@ -6,9 +6,15 @@ import type { Database } from '../../src/adapters/outbound/persistence/schema'
 import {
   ActiveAuctionLimitExceededError,
   BidAlreadyExistsError,
+  ConcurrentBidConflictError,
   IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../src/application/errors/AuctionPersistenceError'
+import type {
+  BidCreditsPort,
+  ReserveBidCreditsCommand,
+} from '../../src/application/ports/BidCreditsPort'
+import { PersistBidWithCredits } from '../../src/application/use-cases/PersistBidWithCredits'
 import { Auction } from '../../src/domain/entities/Auction'
 import { Bid } from '../../src/domain/entities/Bid'
 import {
@@ -771,7 +777,23 @@ describe('Persistencia PostgreSQL', () => {
         null,
       )
 
-      await Promise.allSettled([repository.persistBid(lowerBid), repository.persistBid(higherBid)])
+      const [lowerResult, higherResult] = await Promise.allSettled([
+        repository.persistBid(lowerBid),
+        repository.persistBid(higherBid),
+      ])
+
+      expect(higherResult.status).toBe('fulfilled')
+
+      if (lowerResult.status === 'fulfilled') {
+        expect(lowerResult.value.bid).toEqual(lowerBid.snapshot())
+      } else {
+        expect(lowerResult.reason).toBeInstanceOf(ConcurrentBidConflictError)
+      }
+
+      const history = await repository.findBidHistory('auction-bid-concurrent')
+
+      expect(history).toHaveLength(lowerResult.status === 'fulfilled' ? 2 : 1)
+      expect(history.some((entry) => entry.id === higherBid.snapshot().id)).toBe(true)
 
       await expect(repository.findLeadingBid('auction-bid-concurrent')).resolves.toEqual(
         higherBid.snapshot(),
@@ -789,6 +811,80 @@ describe('Persistencia PostgreSQL', () => {
       expect(leaders[0]).toEqual({
         id: 'bid-concurrent-30',
         amount_credits: 30,
+      })
+    })
+
+    it('conserva solo la reserva del lider cuando compiten dos pujas', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const auctionId = 'auction-concurrent-credits'
+
+      await repository.publish(publication(auctionId))
+
+      const activeReservations = new Set<string>()
+      const reserve = jest.fn((command: ReserveBidCreditsCommand) => {
+        const reservationId = `reservation-${command.bidId}`
+        activeReservations.add(reservationId)
+        return Promise.resolve({ reservationId })
+      })
+      const release = jest.fn((operationId: string, reservationId: string) => {
+        void operationId
+        activeReservations.delete(reservationId)
+        return Promise.resolve()
+      })
+      const credits: BidCreditsPort = {
+        getAvailableCredits: () => Promise.resolve({ availableCredits: 100 }),
+        reserve,
+        release,
+      }
+      const clock = { now: (): Date => new Date('2026-09-21T12:00:10.000Z') }
+      const persistence = new PersistBidWithCredits(repository, credits, clock)
+
+      const lowerBid = bid(
+        'bid-credit-concurrent-20',
+        auctionId,
+        'bidder-1',
+        20,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      )
+      const higherBid = bid(
+        'bid-credit-concurrent-30',
+        auctionId,
+        'bidder-2',
+        30,
+        new Date('2026-09-21T12:00:11.000Z'),
+        null,
+      )
+
+      const [lowerResult, higherResult] = await Promise.allSettled([
+        persistence.execute({
+          operationId: 'operation-credit-concurrent-20',
+          bid: lowerBid,
+          expiresAt: new Date('2026-09-22T12:00:00.000Z'),
+        }),
+        persistence.execute({
+          operationId: 'operation-credit-concurrent-30',
+          bid: higherBid,
+          expiresAt: new Date('2026-09-22T12:00:00.000Z'),
+        }),
+      ])
+
+      expect(higherResult.status).toBe('fulfilled')
+      if (lowerResult.status === 'rejected') {
+        expect(lowerResult.reason).toBeInstanceOf(ConcurrentBidConflictError)
+      }
+
+      await expect(repository.findLeadingBid(auctionId)).resolves.toEqual(higherBid.snapshot())
+      expect(activeReservations).toEqual(new Set(['reservation-bid-credit-concurrent-30']))
+      expect(reserve).toHaveBeenCalledTimes(2)
+      expect(release).toHaveBeenCalledTimes(1)
+      await expect(
+        repository.findBidCreditOperation('operation-credit-concurrent-30'),
+      ).resolves.toMatchObject({ status: 'COMPLETED' })
+      await expect(
+        repository.findBidCreditOperation('operation-credit-concurrent-20'),
+      ).resolves.toMatchObject({
+        status: lowerResult.status === 'fulfilled' ? 'COMPLETED' : 'COMPENSATED',
       })
     })
   })
