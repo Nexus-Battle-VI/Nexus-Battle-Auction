@@ -11,11 +11,16 @@ import {
   Public,
   Roles,
 } from '../../src/adapters/inbound/http/auth/decorators'
+import { createValidationPipe } from '../../src/adapters/inbound/http/validation.pipe'
 import { signInternalRequest } from '../../src/adapters/outbound/identity/internal-signature'
 import {
   ActiveAuctionLimitExceededError,
+  ConcurrentBidConflictError,
+  IdempotencyConflictError,
   InsufficientPublicationFundsError,
+  PersistedAuctionNotFoundError,
 } from '../../src/application/errors/AuctionPersistenceError'
+import { InsufficientBidCreditsError } from '../../src/application/errors/BidCreditError'
 import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
 import {
   Role,
@@ -24,50 +29,72 @@ import {
   type TokenVerifierPort,
   type VerifiedIdentity,
 } from '../../src/application/ports/TokenVerifierPort'
-import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
 import { PublishAuction } from '../../src/application/use-cases/PublishAuction'
+import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
-import { createValidationPipe } from '../../src/adapters/inbound/http/validation.pipe'
+import { BidRuleCode, BidRuleViolation } from '../../src/domain/errors/BidRuleViolation'
+import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
 
 /**
- * Controlador SOLO de prueba. El andamiaje no tiene todavia rutas de negocio, y
- * lo que hay que demostrar es que la proteccion global aplica a cualquier ruta
- * nueva que una Historia de Usuario anada: nace protegida, y abrirla o
+ * Controlador SOLO de prueba. Lo que se demuestra aqui es que la proteccion
+ * global aplica a cualquier ruta nueva: nace protegida, y abrirla o
  * restringirla es una decision explicita.
  */
 @Controller('probe')
 class ProbeController {
   @Get('protegida')
-  protegida(@CurrentIdentity() identity: VerifiedIdentity): { subject: string } {
-    return { subject: identity.subject }
+  protegida(@CurrentIdentity() identity: VerifiedIdentity): {
+    subject: string
+  } {
+    return {
+      subject: identity.subject,
+    }
   }
 
   @Public()
   @Get('publica')
-  publica(): { ok: true } {
-    return { ok: true }
+  publica(): {
+    ok: true
+  } {
+    return {
+      ok: true,
+    }
   }
 
   @Roles(Role.Administrator)
   @Get('administracion')
-  administracion(): { ok: true } {
-    return { ok: true }
+  administracion(): {
+    ok: true
+  } {
+    return {
+      ok: true,
+    }
   }
 
   @InternalOnly()
   @Post('interna')
-  interna(@Body() body: unknown): { recibido: unknown } {
-    return { recibido: body }
+  interna(@Body() body: unknown): {
+    recibido: unknown
+  } {
+    return {
+      recibido: body,
+    }
   }
 }
 
 const IDENTITIES: Readonly<Record<string, VerifiedIdentity>> = {
-  'token-jugador': { subject: 'sujeto-jugador', email: null, roles: new Set([Role.Player]) },
+  'token-jugador': {
+    subject: 'sujeto-jugador',
+    email: null,
+    roles: new Set([Role.Player]),
+  },
+
   'token-super': {
     subject: 'sujeto-super',
     email: null,
     roles: new Set([Role.Player, Role.SuperAdministrator]),
   },
+
   'token-admin': {
     subject: 'sujeto-admin',
     email: null,
@@ -95,9 +122,11 @@ const publishAuctionStub = {
         new AuctionRuleViolation(AuctionRuleCode.SellerSanctioned, 'Vendedor sancionado.'),
       )
     }
+
     if (command.productId === 'product-limit') {
       return Promise.reject(new ActiveAuctionLimitExceededError())
     }
+
     if (command.productId === 'product-price') {
       return Promise.reject(
         new AuctionRuleViolation(
@@ -106,13 +135,106 @@ const publishAuctionStub = {
         ),
       )
     }
+
     if (command.productId === 'product-unavailable') {
       return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
     }
+
     if (command.productId === 'product-insufficient-funds') {
       return Promise.reject(new InsufficientPublicationFundsError())
     }
-    return Promise.resolve({ ...publishedAuction, productId: command.productId })
+
+    return Promise.resolve({
+      ...publishedAuction,
+      productId: command.productId,
+    })
+  }),
+}
+
+interface RegisterBidStubCommand {
+  operationId: string
+  auctionId: string
+  bidderId: string
+  amountCredits: number
+}
+
+const registerBidStub = {
+  execute: jest.fn((command: RegisterBidStubCommand) => {
+    if (command.auctionId === 'auction-closed') {
+      return Promise.reject(
+        new BidRuleViolation(BidRuleCode.AuctionNotActive, 'La subasta no esta activa.'),
+      )
+    }
+
+    if (command.auctionId === 'auction-own') {
+      return Promise.reject(
+        new BidRuleViolation(
+          BidRuleCode.SellerCannotBid,
+          'El vendedor no puede pujar en su propia subasta.',
+        ),
+      )
+    }
+
+    if (command.auctionId === 'auction-too-low') {
+      return Promise.reject(
+        new BidRuleViolation(BidRuleCode.BidTooLow, 'La puja debe superar la oferta actual.'),
+      )
+    }
+
+    if (command.auctionId === 'auction-minimum-increment') {
+      return Promise.reject(
+        new BidRuleViolation(
+          BidRuleCode.MinimumIncrementNotMet,
+          'La puja no cumple el incremento minimo requerido.',
+        ),
+      )
+    }
+
+    if (command.auctionId === 'auction-cooldown') {
+      return Promise.reject(
+        new BidRuleViolation(
+          BidRuleCode.BidCooldownActive,
+          'El jugador debe esperar antes de realizar otra puja.',
+        ),
+      )
+    }
+
+    if (command.auctionId === 'auction-active-limit') {
+      return Promise.reject(
+        new BidRuleViolation(
+          BidRuleCode.ActiveBidLimitReached,
+          'El jugador alcanzo el limite de pujas activas.',
+        ),
+      )
+    }
+
+    if (command.auctionId === 'auction-insufficient-credits') {
+      return Promise.reject(new InsufficientBidCreditsError(10, command.amountCredits))
+    }
+
+    if (command.auctionId === 'auction-not-found') {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+
+    if (command.auctionId === 'auction-concurrent') {
+      return Promise.reject(new ConcurrentBidConflictError())
+    }
+
+    if (command.auctionId === 'auction-idempotency-conflict') {
+      return Promise.reject(new IdempotencyConflictError())
+    }
+
+    if (command.auctionId === 'auction-wallet-unavailable') {
+      return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+    }
+
+    return Promise.resolve({
+      id: 'bid-created',
+      auctionId: command.auctionId,
+      bidderId: command.bidderId,
+      amountCredits: command.amountCredits,
+      placedAt: new Date('2026-09-21T12:00:10.000Z'),
+    })
   }),
 }
 
@@ -130,6 +252,7 @@ const SECRET = 'secreto-de-integracion'
 
 const withEnv = (values: Record<string, string>): (() => void) => {
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]))
+
   Object.assign(process.env, values)
 
   return () => {
@@ -152,11 +275,16 @@ const buildApp = async (): Promise<INestApplication> => {
     .useValue(stubVerifier)
     .overrideProvider(PublishAuction)
     .useValue(publishAuctionStub)
+    .overrideProvider(RegisterBid)
+    .useValue(registerBidStub)
     .compile()
 
   const app = moduleRef.createNestApplication()
+
   app.setGlobalPrefix('api')
+
   app.useGlobalPipes(createValidationPipe())
+
   await app.init()
 
   return app
@@ -164,6 +292,7 @@ const buildApp = async (): Promise<INestApplication> => {
 
 describe('Servicio con autenticacion activa', () => {
   let app: INestApplication
+
   let restore: () => void
 
   beforeAll(async () => {
@@ -174,11 +303,13 @@ describe('Servicio con autenticacion activa', () => {
       INTERNAL_SERVICE_AUTH_SECRET: SECRET,
       PERSISTENCE_DRIVER: 'memory',
     })
+
     app = await buildApp()
   })
 
   afterAll(async () => {
     await app.close()
+
     restore()
   })
 
@@ -187,10 +318,12 @@ describe('Servicio con autenticacion activa', () => {
       const server = app.getHttpServer()
 
       expect((await request(server).get('/api/health/live')).status).toBe(200)
+
       expect((await request(server).get('/api/health/ready')).body).toEqual({
         status: 'ok',
         checks: {},
       })
+
       expect((await request(server).get('/api/version')).body).toMatchObject({
         service: 'nexus-battle-auction',
       })
@@ -216,7 +349,10 @@ describe('Servicio con autenticacion activa', () => {
         .set('Authorization', 'Bearer token-jugador')
 
       expect(response.status).toBe(200)
-      expect(response.body).toEqual({ subject: 'sujeto-jugador' })
+
+      expect(response.body).toEqual({
+        subject: 'sujeto-jugador',
+      })
     })
 
     it('abrir una ruta es explicito', async () => {
@@ -257,20 +393,27 @@ describe('Servicio con autenticacion activa', () => {
         .set('Idempotency-Key', 'operation-1')
         .send(body)
 
-    beforeEach(() => publishAuctionStub.execute.mockClear())
+    beforeEach(() => {
+      publishAuctionStub.execute.mockClear()
+    })
 
     it('responde 201 y usa el sujeto verificado como vendedor', async () => {
       const response = await publish()
 
       expect(response.status).toBe(201)
+
       expect(response.body).toMatchObject({
         id: 'auction-created',
         sellerId: 'sujeto-jugador',
         status: 'ACTIVE',
         publicationFeeCredits: 1,
       })
+
       expect(publishAuctionStub.execute).toHaveBeenCalledWith(
-        expect.objectContaining({ sellerId: 'sujeto-jugador', operationId: 'operation-1' }),
+        expect.objectContaining({
+          sellerId: 'sujeto-jugador',
+          operationId: 'operation-1',
+        }),
       )
     })
 
@@ -279,6 +422,7 @@ describe('Servicio con autenticacion activa', () => {
         .post('/api/v1/auctions')
         .set('Idempotency-Key', 'operation-1')
         .send(validBody)
+
       expect(response.status).toBe(401)
     })
 
@@ -287,21 +431,38 @@ describe('Servicio con autenticacion activa', () => {
     })
 
     it('responde 400 ante campos desconocidos o sin clave idempotente', async () => {
-      const unknownField = await publish('token-jugador', { ...validBody, sellerId: 'otro' })
+      const unknownField = await publish('token-jugador', {
+        ...validBody,
+        sellerId: 'otro',
+      })
+
       expect(unknownField.status).toBe(400)
-      expect(unknownField.body).toMatchObject({ code: 'INVALID_REQUEST' })
+
+      expect(unknownField.body).toMatchObject({
+        code: 'INVALID_REQUEST',
+      })
+
       const realMoney = await publish('token-jugador', {
         ...validBody,
         currency: 'REAL_MONEY',
       })
+
       expect(realMoney.status).toBe(400)
-      expect(realMoney.body).toMatchObject({ code: 'INVALID_REQUEST' })
+
+      expect(realMoney.body).toMatchObject({
+        code: 'INVALID_REQUEST',
+      })
+
       const missingKey = await request(app.getHttpServer())
         .post('/api/v1/auctions')
         .set('Authorization', 'Bearer token-jugador')
         .send(validBody)
+
       expect(missingKey.status).toBe(400)
-      expect(missingKey.body).toMatchObject({ code: 'INVALID_IDEMPOTENCY_KEY' })
+
+      expect(missingKey.body).toMatchObject({
+        code: 'INVALID_IDEMPOTENCY_KEY',
+      })
     })
 
     it.each([
@@ -311,9 +472,17 @@ describe('Servicio con autenticacion activa', () => {
       ['product-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
       ['product-insufficient-funds', 422, 'INSUFFICIENT_FUNDS'],
     ])('mapea %s a HTTP %i con codigo estable', async (productId, status, code) => {
-      const response = await publish('token-jugador', { ...validBody, productId })
+      const response = await publish('token-jugador', {
+        ...validBody,
+        productId,
+      })
+
       expect(response.status).toBe(status)
-      expect(response.body).toMatchObject({ statusCode: status, code })
+
+      expect(response.body).toMatchObject({
+        statusCode: status,
+        code,
+      })
     })
 
     it('publica en OpenAPI la operacion, seguridad, entrada y respuestas estables', () => {
@@ -321,15 +490,239 @@ describe('Servicio con autenticacion activa', () => {
         app,
         new DocumentBuilder().addBearerAuth().build(),
       )
+
       const operation = document.paths['/api/v1/auctions']?.post
 
       expect(operation).toBeDefined()
-      expect(operation?.security).toEqual([{ bearer: [] }])
+
+      expect(operation?.security).toEqual([
+        {
+          bearer: [],
+        },
+      ])
+
       expect(operation?.parameters).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ name: 'Idempotency-Key', in: 'header' }),
+          expect.objectContaining({
+            name: 'Idempotency-Key',
+            in: 'header',
+          }),
         ]),
       )
+
+      expect(Object.keys(operation?.responses ?? {})).toEqual(
+        expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
+      )
+    })
+  })
+
+  describe('Registro de pujas HU-63.4', () => {
+    const validBody = {
+      amountCredits: 30,
+    }
+
+    const invalidRequests: readonly {
+      body: Record<string, unknown>
+      description: string
+    }[] = [
+      {
+        body: {
+          amountCredits: 0,
+        },
+        description: 'monto cero',
+      },
+      {
+        body: {
+          amountCredits: -10,
+        },
+        description: 'monto negativo',
+      },
+      {
+        body: {
+          amountCredits: 10.5,
+        },
+        description: 'monto decimal',
+      },
+      {
+        body: {
+          amountCredits: '30',
+        },
+        description: 'monto con tipo incorrecto',
+      },
+      {
+        body: {},
+        description: 'monto ausente',
+      },
+    ]
+
+    const bid = (
+      auctionId = 'auction-ok',
+      token = 'token-jugador',
+      body: Record<string, unknown> = validBody,
+      operationId = 'operation-bid-1',
+    ) =>
+      request(app.getHttpServer())
+        .post(`/api/v1/auctions/${auctionId}/bids`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', operationId)
+        .send(body)
+
+    beforeEach(() => {
+      registerBidStub.execute.mockClear()
+    })
+
+    it('responde 201 y usa la identidad autenticada como bidder', async () => {
+      const response = await bid()
+
+      expect(response.status).toBe(201)
+
+      expect(response.body).toMatchObject({
+        id: 'bid-created',
+        auctionId: 'auction-ok',
+        bidderId: 'sujeto-jugador',
+        amountCredits: 30,
+      })
+
+      expect(registerBidStub.execute).toHaveBeenCalledWith({
+        operationId: 'operation-bid-1',
+        auctionId: 'auction-ok',
+        bidderId: 'sujeto-jugador',
+        amountCredits: 30,
+      })
+    })
+
+    it('responde 401 cuando no existe access token', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions/auction-ok/bids')
+        .set('Idempotency-Key', 'operation-bid-1')
+        .send(validBody)
+
+      expect(response.status).toBe(401)
+
+      expect(registerBidStub.execute).not.toHaveBeenCalled()
+    })
+
+    it('responde 403 cuando la identidad no tiene rol PLAYER', async () => {
+      const response = await bid('auction-ok', 'token-admin')
+
+      expect(response.status).toBe(403)
+
+      expect(registerBidStub.execute).not.toHaveBeenCalled()
+    })
+
+    it('rechaza campos desconocidos y no permite que el cliente envie bidderId', async () => {
+      const response = await bid('auction-ok', 'token-jugador', {
+        amountCredits: 30,
+        bidderId: 'jugador-falsificado',
+      })
+
+      expect(response.status).toBe(400)
+
+      expect(response.body).toMatchObject({
+        code: 'INVALID_REQUEST',
+      })
+
+      expect(registerBidStub.execute).not.toHaveBeenCalled()
+    })
+
+    it.each(invalidRequests)(
+      'responde 400 ante request invalido: $description',
+      async ({ body }) => {
+        const response = await bid('auction-ok', 'token-jugador', body)
+
+        expect(response.status).toBe(400)
+
+        expect(response.body).toMatchObject({
+          code: 'INVALID_REQUEST',
+        })
+
+        expect(registerBidStub.execute).not.toHaveBeenCalled()
+      },
+    )
+
+    it('responde 400 cuando falta Idempotency-Key', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions/auction-ok/bids')
+        .set('Authorization', 'Bearer token-jugador')
+        .send(validBody)
+
+      expect(response.status).toBe(400)
+
+      expect(response.body).toMatchObject({
+        statusCode: 400,
+        code: 'INVALID_IDEMPOTENCY_KEY',
+      })
+    })
+
+    it('responde 400 cuando Idempotency-Key esta vacio', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions/auction-ok/bids')
+        .set('Authorization', 'Bearer token-jugador')
+        .set('Idempotency-Key', ' ')
+        .send(validBody)
+
+      expect(response.status).toBe(400)
+
+      expect(response.body).toMatchObject({
+        statusCode: 400,
+        code: 'INVALID_IDEMPOTENCY_KEY',
+      })
+    })
+
+    it.each([
+      ['auction-closed', 422, BidRuleCode.AuctionNotActive],
+      ['auction-own', 403, BidRuleCode.SellerCannotBid],
+      ['auction-too-low', 422, BidRuleCode.BidTooLow],
+      ['auction-minimum-increment', 422, BidRuleCode.MinimumIncrementNotMet],
+      ['auction-cooldown', 409, BidRuleCode.BidCooldownActive],
+      ['auction-active-limit', 409, BidRuleCode.ActiveBidLimitReached],
+      ['auction-insufficient-credits', 422, 'INSUFFICIENT_BID_CREDITS'],
+      ['auction-not-found', 422, 'AUCTION_NOT_FOUND'],
+      ['auction-concurrent', 409, 'CONCURRENT_BID_CONFLICT'],
+      ['auction-idempotency-conflict', 409, 'IDEMPOTENCY_CONFLICT'],
+      ['auction-wallet-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
+    ])('mapea el escenario %s a HTTP %i con codigo %s', async (auctionId, status, code) => {
+      const response = await bid(auctionId)
+
+      expect(response.status).toBe(status)
+
+      expect(response.body).toMatchObject({
+        statusCode: status,
+        code,
+      })
+    })
+
+    it('publica en OpenAPI el endpoint, autenticacion, Idempotency-Key y respuestas estables', () => {
+      const document = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().addBearerAuth().build(),
+      )
+
+      const operation = document.paths['/api/v1/auctions/{auctionId}/bids']?.post
+
+      expect(operation).toBeDefined()
+
+      expect(operation?.security).toEqual([
+        {
+          bearer: [],
+        },
+      ])
+
+      expect(operation?.parameters).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: 'auctionId',
+            in: 'path',
+            required: true,
+          }),
+          expect.objectContaining({
+            name: 'Idempotency-Key',
+            in: 'header',
+            required: true,
+          }),
+        ]),
+      )
+
       expect(Object.keys(operation?.responses ?? {})).toEqual(
         expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
       )
@@ -337,7 +730,10 @@ describe('Servicio con autenticacion activa', () => {
   })
 
   describe('Contrato interno', () => {
-    const body = { operationId: 'op-1' }
+    const body = {
+      operationId: 'op-1',
+    }
+
     const path = '/api/probe/interna'
 
     const signed = (service: string) => {
@@ -349,20 +745,27 @@ describe('Servicio con autenticacion activa', () => {
         .set('x-internal-timestamp', timestamp)
         .set(
           'x-internal-signature',
-          signInternalRequest(SECRET, { service, method: 'POST', path, timestamp, body }),
+          signInternalRequest(SECRET, {
+            service,
+            method: 'POST',
+            path,
+            timestamp,
+            body,
+          }),
         )
         .send(body)
     }
 
     /**
      * ADR-019 no declara todavia consumidores de las rutas internas de este
-     * servicio, asi que una firma valida de cualquier servicio se rechaza. El
-     * control de que una firma correcta SI se acepta esta en
-     * `test/unit/internal-auth.spec.ts`. Cuando una Historia de Usuario anada
-     * un consumidor, esta prueba debe pasar a comprobar que se acepta.
+     * servicio, asi que una firma valida de cualquier servicio se rechaza.
+     * El control de que una firma correcta SI se acepta esta en
+     * `test/unit/internal-auth.spec.ts`. Cuando una Historia de Usuario
+     * anada un consumidor, esta prueba debe pasar a comprobar que se acepta.
      */
     it('no acepta a ningun servicio mientras ADR-019 no declare consumidores', async () => {
       expect(INTERNAL_CALLERS).toEqual([])
+
       expect((await signed('wallet')).status).toBe(401)
     })
 
@@ -378,15 +781,21 @@ describe('Servicio con autenticacion activa', () => {
 
 describe('Servicio sin autenticacion (solo desarrollo)', () => {
   let app: INestApplication
+
   let restore: () => void
 
   beforeAll(async () => {
-    restore = withEnv({ AUTH_MODE: 'disabled', PERSISTENCE_DRIVER: 'memory' })
+    restore = withEnv({
+      AUTH_MODE: 'disabled',
+      PERSISTENCE_DRIVER: 'memory',
+    })
+
     app = await buildApp()
   })
 
   afterAll(async () => {
     await app.close()
+
     restore()
   })
 
@@ -394,7 +803,10 @@ describe('Servicio sin autenticacion (solo desarrollo)', () => {
     const response = await request(app.getHttpServer()).get('/api/probe/protegida')
 
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({ subject: 'anonymous' })
+
+    expect(response.body).toEqual({
+      subject: 'anonymous',
+    })
   })
 
   it('el contrato interno sigue exigiendo firma y niega sin secreto', async () => {

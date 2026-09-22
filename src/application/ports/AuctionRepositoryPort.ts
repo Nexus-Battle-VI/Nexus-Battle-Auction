@@ -110,6 +110,10 @@ export interface AuctionRepositoryPort {
   findLeadingBid(auctionId: string): Promise<BidSnapshot | null>
 
   findBidHistory(auctionId: string): Promise<readonly BidSnapshot[]>
+
+  findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null>
+
+  countActiveBidsByBidder(bidderId: string): Promise<number>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')

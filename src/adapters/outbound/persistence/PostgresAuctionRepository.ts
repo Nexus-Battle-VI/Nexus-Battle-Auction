@@ -126,14 +126,12 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
 
       const hash = requestHash(command)
 
-      /*
-       * Serializa reintentos de la misma operacion.
-       */
+      // Serializa reintentos de la misma operacion.
       await sql`
-            select pg_advisory_xact_lock(
-              hashtext(${command.operationId})
-            )
-          `.execute(transaction)
+        select pg_advisory_xact_lock(
+          hashtext(${command.operationId})
+        )
+      `.execute(transaction)
 
       const previous = await transaction
         .selectFrom('auction_publication_operations')
@@ -158,22 +156,19 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
         }
       }
 
-      /*
-       * Serializa el limite de subastas
-       * activas por vendedor.
-       */
+      // Serializa el limite de subastas activas por vendedor.
       await sql`
-            select pg_advisory_xact_lock(
-              hashtext(${snapshot.sellerId})
-            )
-          `.execute(transaction)
+        select pg_advisory_xact_lock(
+          hashtext(${snapshot.sellerId})
+        )
+      `.execute(transaction)
 
       const active = await transaction
         .selectFrom('auctions')
         .select(
           sql<number>`
-                  count(*)::integer
-                `.as('amount'),
+            count(*)::integer
+          `.as('amount'),
         )
         .where('seller_id', '=', snapshot.sellerId)
         .where('status', '=', AuctionStatus.Active)
@@ -248,16 +243,16 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
   createBidCreditOperation(command: CreateBidCreditOperationCommand): Promise<void> {
     return this.db.transaction().execute(async (transaction) => {
       await sql`
-            select pg_advisory_xact_lock(
-              hashtext(${command.operationId})
-            )
-          `.execute(transaction)
+        select pg_advisory_xact_lock(
+          hashtext(${command.operationId})
+        )
+      `.execute(transaction)
 
       await sql`
-            select pg_advisory_xact_lock(
-              hashtext(${command.bidId})
-            )
-          `.execute(transaction)
+        select pg_advisory_xact_lock(
+          hashtext(${command.bidId})
+        )
+      `.execute(transaction)
 
       const previous = await transaction
         .selectFrom('auction_bid_credit_operations')
@@ -347,10 +342,10 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
        * pasan de una en una por esta seccion.
        */
       await sql`
-            select pg_advisory_xact_lock(
-              hashtext(${snapshot.auctionId})
-            )
-          `.execute(transaction)
+        select pg_advisory_xact_lock(
+          hashtext(${snapshot.auctionId})
+        )
+      `.execute(transaction)
 
       const auction = await transaction
         .selectFrom('auctions')
@@ -492,6 +487,35 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
     return rows.map(toBidSnapshot)
   }
 
+  async findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {
+    const row = await this.db
+      .selectFrom('auction_bids')
+      .selectAll()
+      .where('bidder_id', '=', bidderId)
+      .orderBy('placed_at', 'desc')
+      .orderBy('id', 'desc')
+      .executeTakeFirst()
+
+    return row === undefined ? null : toBidSnapshot(row)
+  }
+
+  async countActiveBidsByBidder(bidderId: string): Promise<number> {
+    const row = await this.db
+      .selectFrom('auction_bids')
+      .innerJoin('auctions', 'auctions.id', 'auction_bids.auction_id')
+      .select(
+        sql<number>`
+          count(*)::integer
+        `.as('amount'),
+      )
+      .where('auction_bids.bidder_id', '=', bidderId)
+      .where('auction_bids.is_leader', '=', true)
+      .where('auctions.status', '=', AuctionStatus.Active)
+      .executeTakeFirstOrThrow()
+
+    return row.amount
+  }
+
   findById(auctionId: string): Promise<AuctionSnapshot | null> {
     return findAuction(this.db, auctionId)
   }
@@ -563,8 +587,8 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
       .selectFrom('auctions')
       .select(
         sql<number>`
-            count(*)::integer
-          `.as('amount'),
+          count(*)::integer
+        `.as('amount'),
       )
       .where('seller_id', '=', sellerId)
       .where('status', '=', AuctionStatus.Active)

@@ -2,13 +2,13 @@ import { Module, type CanActivate } from '@nestjs/common'
 import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
 
-import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { AuctionController } from '../../adapters/inbound/http/auction.controller'
-import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymous.guard'
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
 import { JwtAuthGuard } from '../../adapters/inbound/http/auth/jwt-auth.guard'
 import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
+import { HealthController } from '../../adapters/inbound/http/health.controller'
+import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import {
   UnavailableBidCredits,
@@ -53,6 +53,7 @@ import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
+import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -237,6 +238,16 @@ export const INTERNAL_CALLERS: readonly string[] = []
         CLOCK,
         IDENTIFIER_GENERATOR,
       ],
+    },
+    {
+      provide: RegisterBid,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        persistence: PersistBidWithCredits,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): RegisterBid => new RegisterBid(repository, persistence, clock, identifiers),
+      inject: [AUCTION_REPOSITORY, PersistBidWithCredits, CLOCK, IDENTIFIER_GENERATOR],
     },
     {
       provide: TOKEN_VERIFIER,
