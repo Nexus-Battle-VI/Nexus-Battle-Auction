@@ -9,6 +9,7 @@ import { JwtAuthGuard } from '../../adapters/inbound/http/auth/jwt-auth.guard'
 import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
 import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
+import { WatchlistController } from '../../adapters/inbound/http/watchlist.controller'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import {
@@ -63,10 +64,13 @@ import {
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
+import { FollowAuction } from '../../application/use-cases/FollowAuction'
+import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
+import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -84,7 +88,8 @@ export const DATABASE_LIFECYCLE = Symbol('DatabaseLifecycle')
 export const INTERNAL_CALLERS: readonly string[] = []
 
 @Module({
-  controllers: [HealthController, AuctionController],
+  // La ruta estatica /watchlist debe registrarse antes de /:auctionId.
+  controllers: [HealthController, WatchlistController, AuctionController],
 
   providers: [
     {
@@ -187,6 +192,33 @@ export const INTERNAL_CALLERS: readonly string[] = []
           : new PostgresWatchlistRepository(db),
       inject: [DATABASE, AUCTION_REPOSITORY],
     },
+
+    {
+      provide: FollowAuction,
+      useFactory: (
+        watchlist: WatchlistRepositoryPort,
+        auctions: AuctionRepositoryPort,
+        clock: ClockPort,
+      ): FollowAuction => new FollowAuction(watchlist, auctions, clock),
+      inject: [WATCHLIST_REPOSITORY, AUCTION_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: ListFollowedAuctions,
+      useFactory: (
+        watchlist: WatchlistRepositoryPort,
+        auctions: AuctionRepositoryPort,
+      ): ListFollowedAuctions => new ListFollowedAuctions(watchlist, auctions),
+      inject: [WATCHLIST_REPOSITORY, AUCTION_REPOSITORY],
+    },
+
+    {
+      provide: UnfollowAuction,
+      useFactory: (watchlist: WatchlistRepositoryPort): UnfollowAuction =>
+        new UnfollowAuction(watchlist),
+      inject: [WATCHLIST_REPOSITORY],
+    },
+
     {
       provide: CATALOG_PRODUCT_POLICY,
 

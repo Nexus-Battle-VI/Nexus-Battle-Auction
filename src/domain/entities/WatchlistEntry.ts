@@ -1,5 +1,6 @@
 import { DomainError } from '../errors/DomainError'
 import { AuctionId } from '../value-objects/AuctionIdentifiers'
+import { WatchlistPlayerId } from '../value-objects/WatchlistPlayerId'
 
 export interface WatchlistEntrySnapshot {
   playerId: string
@@ -13,10 +14,7 @@ export class WatchlistEntry {
 
   /** Valida identidades y fecha explicita; elegibilidad y autenticacion pertenecen a TASK 68.2. */
   static create(input: WatchlistEntrySnapshot): WatchlistEntry {
-    const playerId = input.playerId.trim()
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,126}[A-Za-z0-9])?$/.test(playerId)) {
-      throw new DomainError('playerId debe ser un identificador valido de maximo 128 caracteres.')
-    }
+    const playerId = WatchlistPlayerId.create(input.playerId).value
     if (Number.isNaN(input.followedAt.getTime())) {
       throw new DomainError('La fecha de seguimiento debe ser valida.')
     }

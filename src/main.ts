@@ -32,6 +32,8 @@ const bootstrap = async (): Promise<void> => {
         .setTitle('Nexus Battles VI — Auction')
         .setDescription('API del bounded context Auction.')
         .setVersion(config.version)
+        // Los contratos protegidos, incluida watchlist, referencian este esquema JWT.
+        .addBearerAuth()
         .build(),
     )
 

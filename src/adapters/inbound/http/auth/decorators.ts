@@ -11,6 +11,11 @@ export const IS_PUBLIC = 'auth:public'
 export const IS_INTERNAL = 'auth:internal'
 export const InternalOnly = (): MethodDecorator & ClassDecorator => SetMetadata(IS_INTERNAL, true)
 export const REQUIRED_ROLES = 'auth:roles'
+export const AUTHENTICATION_REQUIRED = 'auth:required-even-in-development'
+
+/** Impide compartir datos privados bajo la identidad anonima del modo local. */
+export const AuthenticationRequired = (): MethodDecorator & ClassDecorator =>
+  SetMetadata(AUTHENTICATION_REQUIRED, true)
 
 /**
  * Marca una ruta como accesible sin testimonio.
