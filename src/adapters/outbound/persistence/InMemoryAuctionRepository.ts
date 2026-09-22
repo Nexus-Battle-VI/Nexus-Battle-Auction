@@ -206,6 +206,19 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     return Promise.resolve(this.auctions.get(auctionId) ?? null)
   }
 
+  /** Replica la ventana `(from, until]` utilizada por PostgreSQL. */
+  findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]> {
+    return Promise.resolve(
+      [...this.auctions.values()]
+        .filter(
+          (auction) =>
+            auction.closesAt.getTime() > from.getTime() &&
+            auction.closesAt.getTime() <= until.getTime(),
+        )
+        .sort((a, b) => a.closesAt.getTime() - b.closesAt.getTime()),
+    )
+  }
+
   countActiveBySeller(sellerId: string): Promise<number> {
     return Promise.resolve(this.count(sellerId))
   }

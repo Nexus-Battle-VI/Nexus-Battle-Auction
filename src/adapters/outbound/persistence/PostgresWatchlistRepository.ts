@@ -63,6 +63,17 @@ export class PostgresWatchlistRepository implements WatchlistRepositoryPort {
     return rows.map(fromRow)
   }
 
+  /** Usa el índice por auction_id creado en TASK 68.1 para resolver destinatarios. */
+  async listByAuction(auctionId: string): Promise<readonly WatchlistEntry[]> {
+    const rows = await this.db
+      .selectFrom('auction_watchlist')
+      .selectAll()
+      .where('auction_id', '=', auctionId)
+      .orderBy(sql`player_id collate "C"`, 'asc')
+      .execute()
+    return rows.map(fromRow)
+  }
+
   /** La eliminacion repetida es inocua y nunca amplia el alcance a otro jugador. */
   async delete(playerId: string, auctionId: string): Promise<boolean> {
     const result = await this.db

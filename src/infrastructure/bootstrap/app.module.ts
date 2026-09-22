@@ -12,6 +12,7 @@ import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/to
 import { WatchlistController } from '../../adapters/inbound/http/watchlist.controller'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
+import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
@@ -20,6 +21,7 @@ import {
   UnavailableSellerSanctions,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
+import { UnavailableWatchlistEventPublisher } from '../../adapters/outbound/http/UnavailableWatchlistEventPublisher'
 import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
 import { InMemoryWatchlistRepository } from '../../adapters/outbound/persistence/InMemoryWatchlistRepository'
 import { PostgresWatchlistRepository } from '../../adapters/outbound/persistence/PostgresWatchlistRepository'
@@ -63,9 +65,15 @@ import {
   type SellerSanctionPort,
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
+import {
+  WATCHLIST_EVENT_PUBLISHER,
+  type WatchlistEventPublisherPort,
+} from '../../application/ports/WatchlistEventPublisherPort'
+import { DispatchClosingSoonReminders } from '../../application/use-cases/DispatchClosingSoonReminders'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { FollowAuction } from '../../application/use-cases/FollowAuction'
 import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
+import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchlistChange'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
@@ -76,6 +84,7 @@ import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
 import { createLogger, type Logger } from '../observability/logger'
 import { createDatabase, pingDatabase } from '../persistence/database'
+import { AuctionReminderScheduler } from '../scheduling/AuctionReminderScheduler'
 
 export const APP_CONFIG = Symbol('AppConfig')
 
@@ -306,6 +315,50 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: WATCHLIST_EVENT_PUBLISHER,
+      useFactory: (config: AppConfig, clock: ClockPort): WatchlistEventPublisherPort =>
+        config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null
+          ? new UnavailableWatchlistEventPublisher()
+          : new HttpWatchlistEventPublisher({
+              baseUrl: config.notificationsBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: config.notificationsTimeoutMs,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, CLOCK],
+    },
+
+    {
+      provide: NotifyWatchlistChange,
+      useFactory: (
+        watchlist: WatchlistRepositoryPort,
+        publisher: WatchlistEventPublisherPort,
+      ): NotifyWatchlistChange => new NotifyWatchlistChange(watchlist, publisher),
+      inject: [WATCHLIST_REPOSITORY, WATCHLIST_EVENT_PUBLISHER],
+    },
+
+    {
+      provide: DispatchClosingSoonReminders,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        publisher: WatchlistEventPublisherPort,
+        clock: ClockPort,
+      ): DispatchClosingSoonReminders =>
+        new DispatchClosingSoonReminders(auctions, publisher, clock),
+      inject: [AUCTION_REPOSITORY, WATCHLIST_EVENT_PUBLISHER, CLOCK],
+    },
+
+    {
+      provide: AuctionReminderScheduler,
+      useFactory: (
+        reminders: DispatchClosingSoonReminders,
+        logger: Logger,
+      ): AuctionReminderScheduler => new AuctionReminderScheduler(reminders, logger),
+      inject: [DispatchClosingSoonReminders, LOGGER],
+    },
+
+    {
       provide: PersistAuctionPublication,
 
       useFactory: (
@@ -391,7 +444,16 @@ export const INTERNAL_CALLERS: readonly string[] = []
         clock: ClockPort,
         identifiers: IdentifierGeneratorPort,
         notifications: OutbidNotificationPort,
-      ): RegisterBid => new RegisterBid(repository, persistence, clock, identifiers, notifications),
+        watchlistChanges: NotifyWatchlistChange,
+      ): RegisterBid =>
+        new RegisterBid(
+          repository,
+          persistence,
+          clock,
+          identifiers,
+          notifications,
+          watchlistChanges,
+        ),
 
       inject: [
         AUCTION_REPOSITORY,
@@ -399,6 +461,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
         CLOCK,
         IDENTIFIER_GENERATOR,
         OUTBID_NOTIFICATION,
+        NotifyWatchlistChange,
       ],
     },
 
