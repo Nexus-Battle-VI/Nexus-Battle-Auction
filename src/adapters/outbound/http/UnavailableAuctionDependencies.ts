@@ -1,5 +1,5 @@
-import type { BidCreditsPort } from '../../../application/ports/BidCreditsPort'
 import { ExternalDependencyUnavailableError } from '../../../application/errors/ExternalDependencyError'
+import type { BidCreditsPort } from '../../../application/ports/BidCreditsPort'
 import type {
   CatalogProductPolicy,
   CatalogProductPolicyPort,
