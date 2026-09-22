@@ -20,6 +20,12 @@ import {
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
 import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
+import { InMemoryWatchlistRepository } from '../../adapters/outbound/persistence/InMemoryWatchlistRepository'
+import { PostgresWatchlistRepository } from '../../adapters/outbound/persistence/PostgresWatchlistRepository'
+import {
+  WATCHLIST_REPOSITORY,
+  type WatchlistRepositoryPort,
+} from '../../application/ports/WatchlistRepositoryPort'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
@@ -169,6 +175,18 @@ export const INTERNAL_CALLERS: readonly string[] = []
       inject: [DATABASE],
     },
 
+    {
+      // TASK 68.1: selecciona persistencia duradera con el mismo motor que las subastas.
+      provide: WATCHLIST_REPOSITORY,
+      useFactory: (
+        db: Kysely<Database> | null,
+        auctions: AuctionRepositoryPort,
+      ): WatchlistRepositoryPort =>
+        db === null
+          ? new InMemoryWatchlistRepository(auctions)
+          : new PostgresWatchlistRepository(db),
+      inject: [DATABASE, AUCTION_REPOSITORY],
+    },
     {
       provide: CATALOG_PRODUCT_POLICY,
 

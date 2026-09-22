@@ -6,6 +6,7 @@ import type { Database } from '../../src/adapters/outbound/persistence/schema'
 import {
   ActiveAuctionLimitExceededError,
   BidAlreadyExistsError,
+  IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../src/application/errors/AuctionPersistenceError'
 import { Auction } from '../../src/domain/entities/Auction'
@@ -205,6 +206,128 @@ describe('Persistencia PostgreSQL', () => {
       `.execute(db)
     })
 
+    /** Verifica las migraciones de creditos mediante operaciones reales e idempotentes. */
+    it('persiste reservas, cambio de lider y estado de creditos atomicamente', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-credit-flow'))
+      const now = new Date('2026-09-21T12:00:10.000Z')
+      const first = bid('bid-credit-first', 'auction-credit-flow', 'bidder-1', 20, now, null)
+      const second = bid('bid-credit-second', 'auction-credit-flow', 'bidder-2', 30, now, 20)
+      const command = {
+        operationId: 'credit-flow',
+        bidId: second.snapshot().id,
+        auctionId: 'auction-credit-flow',
+        bidderId: 'bidder-2',
+        amountCredits: 30,
+        createdAt: now,
+      }
+      await expect(repository.findBidCreditOperation(command.operationId)).resolves.toBeNull()
+      await repository.createBidCreditOperation(command)
+      await repository.createBidCreditOperation(command)
+      await expect(repository.findBidCreditOperation(command.operationId)).resolves.toEqual({
+        ...command,
+        status: 'PENDING_RESERVATION',
+        reservationId: null,
+        previousReservationId: null,
+        updatedAt: now,
+      })
+      await expect(
+        repository.createBidCreditOperation({ ...command, amountCredits: 40 }),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+      await expect(
+        repository.createBidCreditOperation({ ...command, operationId: 'another-operation' }),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+      await repository.updateBidCreditOperation({
+        operationId: command.operationId,
+        status: 'RESERVED',
+        reservationId: 'reserve-second',
+        previousReservationId: null,
+        updatedAt: now,
+      })
+      await repository.persistBid(first, 'reserve-first')
+      await expect(
+        repository.persistBid(second, 'reserve-second', command.operationId),
+      ).resolves.toEqual({
+        bid: second.snapshot(),
+        previousLeader: first.snapshot(),
+        previousLeaderReservationId: 'reserve-first',
+      })
+      await expect(repository.findBidCreditOperation(command.operationId)).resolves.toMatchObject({
+        status: 'BID_PERSISTED',
+        reservationId: 'reserve-second',
+        previousReservationId: 'reserve-first',
+      })
+    })
+
+    it('rechaza operaciones de creditos inexistentes o de otra puja sin efectos parciales', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-credit-invalid'))
+      const now = new Date('2026-09-21T12:00:10.000Z')
+      const candidate = bid(
+        'bid-credit-invalid',
+        'auction-credit-invalid',
+        'bidder-1',
+        20,
+        now,
+        null,
+      )
+      await expect(
+        repository.updateBidCreditOperation({
+          operationId: 'missing',
+          status: 'RESERVED',
+          reservationId: 'reserve',
+          previousReservationId: null,
+          updatedAt: now,
+        }),
+      ).rejects.toThrow('no existe')
+      await expect(repository.persistBid(candidate, 'reserve', 'missing')).rejects.toThrow(
+        'no existe',
+      )
+      await repository.createBidCreditOperation({
+        operationId: 'wrong-intent',
+        bidId: 'different-bid',
+        auctionId: 'auction-credit-invalid',
+        bidderId: 'bidder-1',
+        amountCredits: 20,
+        createdAt: now,
+      })
+      await expect(
+        repository.persistBid(candidate, 'reserve', 'wrong-intent'),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+      await expect(repository.findLeadingBid('auction-credit-invalid')).resolves.toBeNull()
+      await expect(repository.findBidHistory('auction-credit-invalid')).resolves.toEqual([])
+    })
+
+    it('actualiza el fallo de compensacion sin duplicar el registro', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const failure = {
+        operationId: 'credit-failure',
+        bidId: 'bid-failure',
+        auctionId: 'auction-failure',
+        bidderId: 'bidder-1',
+        stage: 'RELEASING_NEW_RESERVATION' as const,
+        reason: 'offline',
+        newReservationId: 'reserve',
+        previousReservationId: null,
+        newReservationReleased: false,
+        previousReservationReleased: false,
+        occurredAt: new Date('2026-09-21T12:00:00.000Z'),
+      }
+      await repository.recordBidCreditFailure(failure)
+      await repository.recordBidCreditFailure({
+        ...failure,
+        reason: 'recovered',
+        newReservationReleased: true,
+      })
+      const rows = await db
+        .selectFrom('auction_bid_credit_failures')
+        .selectAll()
+        .where('operation_id', '=', failure.operationId)
+        .execute()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ reason: 'recovered', new_reservation_released: true })
+    })
+
     it('persiste la subasta, auditoria y outbox en una unidad atomica', async () => {
       const repository = new PostgresAuctionRepository(db)
 
@@ -387,6 +510,7 @@ describe('Persistencia PostgreSQL', () => {
       await expect(repository.persistBid(firstBid)).resolves.toEqual({
         bid: firstBid.snapshot(),
         previousLeader: null,
+        previousLeaderReservationId: null,
       })
 
       await expect(repository.findLeadingBid('auction-bid-first')).resolves.toEqual(
@@ -438,6 +562,7 @@ describe('Persistencia PostgreSQL', () => {
       await expect(repository.persistBid(secondBid)).resolves.toEqual({
         bid: secondBid.snapshot(),
         previousLeader: firstBid.snapshot(),
+        previousLeaderReservationId: null,
       })
 
       await expect(repository.findLeadingBid('auction-bid-history')).resolves.toEqual(

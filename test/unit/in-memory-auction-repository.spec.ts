@@ -98,6 +98,7 @@ describe('InMemoryAuctionRepository', () => {
     await expect(repository.persistBid(firstBid)).resolves.toEqual({
       bid: firstBid.snapshot(),
       previousLeader: null,
+      previousLeaderReservationId: null,
     })
 
     await expect(repository.findLeadingBid('auction-bids')).resolves.toEqual(firstBid.snapshot())
@@ -131,6 +132,7 @@ describe('InMemoryAuctionRepository', () => {
     await expect(repository.persistBid(secondBid)).resolves.toEqual({
       bid: secondBid.snapshot(),
       previousLeader: firstBid.snapshot(),
+      previousLeaderReservationId: null,
     })
 
     await expect(repository.findLeadingBid('auction-history')).resolves.toEqual(
