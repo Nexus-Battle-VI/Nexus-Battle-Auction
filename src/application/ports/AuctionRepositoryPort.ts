@@ -101,10 +101,10 @@ export interface AuctionRepositoryPort {
   countActiveBySeller(sellerId: string): Promise<number>
 
   persistBid(
-  bid: Bid,
-  reservationId?: string,
-  operationId?: string,
-    ): Promise<PersistBidResult>
+    bid: Bid,
+    reservationId?: string,
+    operationId?: string,
+  ): Promise<PersistBidResult>
 
   findLeadingBid(auctionId: string): Promise<BidSnapshot | null>
 
