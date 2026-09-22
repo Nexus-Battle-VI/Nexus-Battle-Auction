@@ -31,6 +31,27 @@ export interface PersistBidResult {
   readonly previousLeader: BidSnapshot | null
 }
 
+export type BidCreditOperationStatus =
+  | 'PENDING_RESERVATION'
+  | 'RESERVED'
+  | 'BID_PERSISTED'
+  | 'COMPENSATION_PENDING'
+  | 'COMPENSATED'
+  | 'COMPLETED'
+
+export interface BidCreditOperationSnapshot {
+  readonly operationId: string
+  readonly bidId: string
+  readonly auctionId: string
+  readonly bidderId: string
+  readonly amountCredits: number
+  readonly status: BidCreditOperationStatus
+  readonly reservationId: string | null
+  readonly previousReservationId: string | null
+  readonly createdAt: Date
+  readonly updatedAt: Date
+}
+
 export interface AuctionRepositoryPort {
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult>
 
