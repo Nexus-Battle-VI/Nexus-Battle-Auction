@@ -69,6 +69,8 @@ import {
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { WALLET, type WalletPort } from '../../application/ports/WalletPort'
+import { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
+import { ExecuteBuyNowUseCase } from '../../application/use-cases/ExecuteBuyNowUseCase'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
@@ -453,6 +455,28 @@ export const INTERNAL_CALLERS: readonly string[] = []
       ): TransactionProcessingService =>
         new TransactionProcessingService(repository, wallet, clock, identifiers),
       inject: [AUCTION_REPOSITORY, WALLET, CLOCK, IDENTIFIER_GENERATOR],
+    },
+    {
+      provide: BuyNowDomainService,
+      useFactory: (): BuyNowDomainService => new BuyNowDomainService(),
+    },
+    {
+      provide: ExecuteBuyNowUseCase,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        wallet: WalletPort,
+        domainService: BuyNowDomainService,
+        transactions: TransactionProcessingService,
+        clock: ClockPort,
+      ): ExecuteBuyNowUseCase =>
+        new ExecuteBuyNowUseCase(repository, wallet, domainService, transactions, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        WALLET,
+        BuyNowDomainService,
+        TransactionProcessingService,
+        CLOCK,
+      ],
     },
     {
       provide: TOKEN_VERIFIER,

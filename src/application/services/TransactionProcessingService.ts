@@ -74,6 +74,7 @@ export class TransactionProcessingService {
         buyerId: approval.buyerId,
         transferId,
         priceCredits: approval.priceCredits,
+        remainingCredits: approval.remainingCredits,
         closedAt,
       })
 
