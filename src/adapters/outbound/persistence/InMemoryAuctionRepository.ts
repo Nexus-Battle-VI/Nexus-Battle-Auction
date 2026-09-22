@@ -308,6 +308,23 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     return Promise.resolve(history)
   }
 
+  findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {
+    const lastBid = [...this.bids.values()]
+      .map((stored) => stored.snapshot)
+      .filter((bid) => bid.bidderId === bidderId)
+      .sort((left, right) => right.placedAt.getTime() - left.placedAt.getTime())[0]
+
+    return Promise.resolve(lastBid === undefined ? null : cloneBid(lastBid))
+  }
+
+  countActiveBidsByBidder(bidderId: string): Promise<number> {
+    const activeBidCount = [...this.leadingBidByAuction.values()]
+      .map((bidId) => this.bids.get(bidId))
+      .filter((stored): stored is StoredBid => stored?.snapshot.bidderId === bidderId).length
+
+    return Promise.resolve(activeBidCount)
+  }
+
   private count(sellerId: string): number {
     return [...this.auctions.values()].filter((auction) => auction.sellerId === sellerId).length
   }

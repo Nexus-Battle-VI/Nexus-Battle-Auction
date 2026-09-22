@@ -70,6 +70,26 @@ export class Bid {
     )
   }
 
+  /**
+   * Reconstruye una puja cuya intencion ya fue aceptada y almacenada
+   * previamente.
+   *
+   * No vuelve a ejecutar reglas de elegibilidad porque esas reglas
+   * corresponden al momento de registrar una puja nueva. Este metodo
+   * existe para reanudar de forma idempotente una operacion durable.
+   */
+  static restore(snapshot: BidSnapshot): Bid {
+    Bid.assertValidDate(snapshot.placedAt)
+
+    return new Bid(
+      BidId.create(snapshot.id),
+      AuctionId.create(snapshot.auctionId),
+      BidderId.create(snapshot.bidderId),
+      BidAmount.positive(snapshot.amountCredits),
+      new Date(snapshot.placedAt),
+    )
+  }
+
   snapshot(): BidSnapshot {
     return {
       id: this.id.value,

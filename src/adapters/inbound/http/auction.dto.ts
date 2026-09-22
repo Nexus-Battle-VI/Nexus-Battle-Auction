@@ -57,9 +57,50 @@ export class AuctionResponseDto {
   closesAt!: Date
 }
 
+export class RegisterBidRequestDto {
+  @ApiProperty({
+    example: 25,
+    minimum: 1,
+    description: 'Monto de la puja expresado en creditos.',
+  })
+  @IsInt()
+  @Min(1)
+  amountCredits!: number
+}
+
+export class BidResponseDto {
+  @ApiProperty({
+    example: 'bid-123',
+  })
+  id!: string
+
+  @ApiProperty({
+    example: 'auction-123',
+  })
+  auctionId!: string
+
+  @ApiProperty({
+    example: 'player-123',
+  })
+  bidderId!: string
+
+  @ApiProperty({
+    example: 25,
+    minimum: 1,
+  })
+  amountCredits!: number
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  placedAt!: Date
+}
+
 export const assertIdempotencyKey = (value: string | undefined): string => {
   if (value === undefined || value.trim().length === 0 || value.length > 128) {
     throw new Error('INVALID_IDEMPOTENCY_KEY')
   }
+
   return value
 }

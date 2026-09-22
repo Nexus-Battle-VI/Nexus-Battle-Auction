@@ -516,6 +516,115 @@ describe('Persistencia PostgreSQL', () => {
       ])
     })
 
+    it('devuelve la ultima puja realizada por un jugador', async () => {
+      const repository = new PostgresAuctionRepository(db)
+
+      await repository.publish(publication('auction-last-bid-1'))
+
+      await repository.publish(publication('auction-last-bid-2'))
+
+      const firstBid = bid(
+        'bid-last-1',
+        'auction-last-bid-1',
+        'bidder-last',
+        20,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      )
+
+      const secondBid = bid(
+        'bid-last-2',
+        'auction-last-bid-2',
+        'bidder-last',
+        30,
+        new Date('2026-09-21T12:00:20.000Z'),
+        null,
+      )
+
+      const anotherBid = bid(
+        'bid-another',
+        'auction-last-bid-1',
+        'bidder-other',
+        30,
+        new Date('2026-09-21T12:00:30.000Z'),
+        20,
+      )
+
+      await repository.persistBid(firstBid)
+
+      await repository.persistBid(secondBid)
+
+      await repository.persistBid(anotherBid)
+
+      await expect(repository.findLastBidByBidder('bidder-last')).resolves.toEqual(
+        secondBid.snapshot(),
+      )
+
+      await expect(repository.findLastBidByBidder('bidder-without-bids')).resolves.toBeNull()
+    })
+
+    it('cuenta solo las pujas activas donde el jugador sigue siendo lider', async () => {
+      const repository = new PostgresAuctionRepository(db)
+
+      await repository.publish(publication('auction-active-bid-1'))
+
+      await repository.publish(publication('auction-active-bid-2'))
+
+      await repository.publish(publication('auction-active-bid-3'))
+
+      const leadingFirstAuction = bid(
+        'bid-active-1',
+        'auction-active-bid-1',
+        'bidder-active',
+        20,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      )
+
+      const leadingSecondAuction = bid(
+        'bid-active-2',
+        'auction-active-bid-2',
+        'bidder-active',
+        20,
+        new Date('2026-09-21T12:00:20.000Z'),
+        null,
+      )
+
+      const initiallyLeadingThirdAuction = bid(
+        'bid-active-3',
+        'auction-active-bid-3',
+        'bidder-active',
+        20,
+        new Date('2026-09-21T12:00:30.000Z'),
+        null,
+      )
+
+      const replacementThirdAuction = bid(
+        'bid-active-replacement',
+        'auction-active-bid-3',
+        'bidder-other',
+        30,
+        new Date('2026-09-21T12:00:40.000Z'),
+        20,
+      )
+
+      await repository.persistBid(leadingFirstAuction)
+
+      await repository.persistBid(leadingSecondAuction)
+
+      await repository.persistBid(initiallyLeadingThirdAuction)
+
+      await repository.persistBid(replacementThirdAuction)
+
+      await expect(repository.countActiveBidsByBidder('bidder-active')).resolves.toBe(2)
+
+      await expect(repository.countActiveBidsByBidder('bidder-other')).resolves.toBe(1)
+
+      await expect(repository.countActiveBidsByBidder('bidder-without-active-bids')).resolves.toBe(
+        0,
+      )
+    })
+
     it('rechaza un identificador de puja duplicado', async () => {
       const repository = new PostgresAuctionRepository(db)
 
