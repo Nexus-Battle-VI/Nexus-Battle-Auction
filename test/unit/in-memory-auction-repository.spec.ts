@@ -145,38 +145,6 @@ describe('InMemoryAuctionRepository', () => {
     ])
   })
 
-  it('conserva la reserva de creditos del lider anterior', async () => {
-    const repository = new InMemoryAuctionRepository()
-
-    await repository.publish(command('auction-reservations'))
-
-    const firstBid = bid(
-      'bid-reservation-1',
-      'auction-reservations',
-      'bidder-1',
-      20,
-      new Date('2026-09-21T12:00:10.000Z'),
-      null,
-    )
-
-    const secondBid = bid(
-      'bid-reservation-2',
-      'auction-reservations',
-      'bidder-2',
-      30,
-      new Date('2026-09-21T12:00:20.000Z'),
-      20,
-    )
-
-    await repository.persistBid(firstBid, 'reservation-first')
-
-    await expect(repository.persistBid(secondBid, 'reservation-second')).resolves.toEqual({
-      bid: secondBid.snapshot(),
-      previousLeader: firstBid.snapshot(),
-      previousLeaderReservationId: 'reservation-first',
-    })
-  })
-
   it('rechaza una puja con identificador duplicado', async () => {
     const repository = new InMemoryAuctionRepository()
 

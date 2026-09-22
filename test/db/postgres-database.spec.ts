@@ -24,6 +24,13 @@ import {
   pingDatabase,
 } from '../../src/infrastructure/persistence/database'
 
+/**
+ * Infraestructura de persistencia contra un PostgreSQL REAL.
+ *
+ * Lo que se comprueba no se puede comprobar con un doble: que el pool conecta,
+ * que el migrador registra lo aplicado y que una migracion rota se informa en
+ * lugar de darse por buena.
+ */
 describe('Persistencia PostgreSQL', () => {
   let container: StartedPostgreSqlContainer
   let db: Kysely<Database>
@@ -54,7 +61,6 @@ describe('Persistencia PostgreSQL', () => {
   it('registra las migraciones aplicadas y no las repite', async () => {
     const migrations: Record<string, Migration> = {
       ...MIGRATIONS,
-
       '900-prueba': {
         up: async (conexion: Kysely<unknown>) => {
           await conexion.schema.createTable('prueba').addColumn('id', 'text').execute()
@@ -66,9 +72,7 @@ describe('Persistencia PostgreSQL', () => {
 
     expect((await migrateToLatest(db, migrations)).applied).toEqual([])
 
-    const { rows } = await sql<{
-      existe: boolean
-    }>`
+    const { rows } = await sql<{ existe: boolean }>`
         select
           to_regclass('public.prueba')
           is not null as existe
@@ -80,11 +84,9 @@ describe('Persistencia PostgreSQL', () => {
   it('informa una migracion rota en lugar de darla por aplicada', async () => {
     const outcome = await migrateToLatest(db, {
       ...MIGRATIONS,
-
       '900-prueba': {
         up: () => Promise.resolve(),
       },
-
       '901-rota': {
         up: () => Promise.reject(new Error('sql invalido')),
       },
@@ -95,6 +97,12 @@ describe('Persistencia PostgreSQL', () => {
     expect(outcome.error).toBeInstanceOf(Error)
   })
 
+  /**
+   * Reproduce lo que tumbaba el servicio: el motor corta una conexion que
+   * espera ociosa en el pool. Sin oyente de `error`, Jest veria el proceso
+   * terminar; con el, el error llega a `onIdleError` y la siguiente consulta
+   * abre una conexion nueva.
+   */
   it('sobrevive a que el motor corte una conexion ociosa del pool', async () => {
     const errores: Error[] = []
 
@@ -102,7 +110,6 @@ describe('Persistencia PostgreSQL', () => {
 
     const propia = createDatabase({
       connectionString: `${container.getConnectionUri()}?application_name=${aplicacion}`,
-
       onIdleError: (error) => errores.push(error),
     })
 
@@ -129,6 +136,10 @@ describe('Persistencia PostgreSQL', () => {
     }
   })
 
+  /**
+   * El control de la primera prueba: con el motor inalcanzable la sonda dice
+   * `false`. Sin este caso, una sonda que devolviera siempre `true` pasaria.
+   */
   it('la sonda falla contra un motor inalcanzable', async () => {
     const inalcanzable = createDatabase({
       connectionString: 'postgres://nadie:nada@127.0.0.1:1/ninguna',
@@ -144,37 +155,23 @@ describe('Persistencia PostgreSQL', () => {
   describe('repositorio de publicaciones', () => {
     const publication = (id: string, sellerId = 'seller-1', productId = `product-${id}`) => ({
       operationId: `operation-${id}`,
-
       auction: Auction.publish({
         auctionId: id,
-
         sellerId,
-
         productId,
-
         durationHours: 24,
-
         minimumBidCredits: 10,
-
         buyNowCredits: 20,
-
         publishedAt: new Date('2026-09-21T12:00:00.000Z'),
-
         eligibility: {
           productOwnedBySeller: true,
-
           productInUse: false,
-
           productTradable: true,
-
           sellerHasActiveSanctions: false,
-
           activeAuctionCount: 0,
         },
       }),
-
       inventoryCommitmentId: `commitment-${id}`,
-
       feeChargeId: `charge-${id}`,
     })
 
@@ -192,18 +189,12 @@ describe('Persistencia PostgreSQL', () => {
         bidderId,
         amountCredits,
         placedAt,
-
         eligibility: {
           auctionStatus: 'ACTIVE',
-
           sellerId: 'seller-1',
-
           currentBidCredits,
-
           minimumIncrementCredits: 10,
-
           lastBidAtByBidder: null,
-
           activeBidCount: 0,
         },
       })
@@ -211,8 +202,6 @@ describe('Persistencia PostgreSQL', () => {
     beforeEach(async () => {
       await sql`
         truncate
-          auction_bid_credit_failures,
-          auction_bid_credit_operations,
           auction_bids,
           auction_publication_operations,
           auction_audit_log,
@@ -221,6 +210,128 @@ describe('Persistencia PostgreSQL', () => {
           auctions
         restart identity cascade
       `.execute(db)
+    })
+
+    /** Verifica las migraciones de creditos mediante operaciones reales e idempotentes. */
+    it('persiste reservas, cambio de lider y estado de creditos atomicamente', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-credit-flow'))
+      const now = new Date('2026-09-21T12:00:10.000Z')
+      const first = bid('bid-credit-first', 'auction-credit-flow', 'bidder-1', 20, now, null)
+      const second = bid('bid-credit-second', 'auction-credit-flow', 'bidder-2', 30, now, 20)
+      const command = {
+        operationId: 'credit-flow',
+        bidId: second.snapshot().id,
+        auctionId: 'auction-credit-flow',
+        bidderId: 'bidder-2',
+        amountCredits: 30,
+        createdAt: now,
+      }
+      await expect(repository.findBidCreditOperation(command.operationId)).resolves.toBeNull()
+      await repository.createBidCreditOperation(command)
+      await repository.createBidCreditOperation(command)
+      await expect(repository.findBidCreditOperation(command.operationId)).resolves.toEqual({
+        ...command,
+        status: 'PENDING_RESERVATION',
+        reservationId: null,
+        previousReservationId: null,
+        updatedAt: now,
+      })
+      await expect(
+        repository.createBidCreditOperation({ ...command, amountCredits: 40 }),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+      await expect(
+        repository.createBidCreditOperation({ ...command, operationId: 'another-operation' }),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+      await repository.updateBidCreditOperation({
+        operationId: command.operationId,
+        status: 'RESERVED',
+        reservationId: 'reserve-second',
+        previousReservationId: null,
+        updatedAt: now,
+      })
+      await repository.persistBid(first, 'reserve-first')
+      await expect(
+        repository.persistBid(second, 'reserve-second', command.operationId),
+      ).resolves.toEqual({
+        bid: second.snapshot(),
+        previousLeader: first.snapshot(),
+        previousLeaderReservationId: 'reserve-first',
+      })
+      await expect(repository.findBidCreditOperation(command.operationId)).resolves.toMatchObject({
+        status: 'BID_PERSISTED',
+        reservationId: 'reserve-second',
+        previousReservationId: 'reserve-first',
+      })
+    })
+
+    it('rechaza operaciones de creditos inexistentes o de otra puja sin efectos parciales', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-credit-invalid'))
+      const now = new Date('2026-09-21T12:00:10.000Z')
+      const candidate = bid(
+        'bid-credit-invalid',
+        'auction-credit-invalid',
+        'bidder-1',
+        20,
+        now,
+        null,
+      )
+      await expect(
+        repository.updateBidCreditOperation({
+          operationId: 'missing',
+          status: 'RESERVED',
+          reservationId: 'reserve',
+          previousReservationId: null,
+          updatedAt: now,
+        }),
+      ).rejects.toThrow('no existe')
+      await expect(repository.persistBid(candidate, 'reserve', 'missing')).rejects.toThrow(
+        'no existe',
+      )
+      await repository.createBidCreditOperation({
+        operationId: 'wrong-intent',
+        bidId: 'different-bid',
+        auctionId: 'auction-credit-invalid',
+        bidderId: 'bidder-1',
+        amountCredits: 20,
+        createdAt: now,
+      })
+      await expect(
+        repository.persistBid(candidate, 'reserve', 'wrong-intent'),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+      await expect(repository.findLeadingBid('auction-credit-invalid')).resolves.toBeNull()
+      await expect(repository.findBidHistory('auction-credit-invalid')).resolves.toEqual([])
+    })
+
+    it('actualiza el fallo de compensacion sin duplicar el registro', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const failure = {
+        operationId: 'credit-failure',
+        bidId: 'bid-failure',
+        auctionId: 'auction-failure',
+        bidderId: 'bidder-1',
+        stage: 'RELEASING_NEW_RESERVATION' as const,
+        reason: 'offline',
+        newReservationId: 'reserve',
+        previousReservationId: null,
+        newReservationReleased: false,
+        previousReservationReleased: false,
+        occurredAt: new Date('2026-09-21T12:00:00.000Z'),
+      }
+      await repository.recordBidCreditFailure(failure)
+      await repository.recordBidCreditFailure({
+        ...failure,
+        reason: 'recovered',
+        newReservationReleased: true,
+      })
+      const rows = await db
+        .selectFrom('auction_bid_credit_failures')
+        .selectAll()
+        .where('operation_id', '=', failure.operationId)
+        .execute()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ reason: 'recovered', new_reservation_released: true })
     })
 
     it('persiste la subasta, auditoria y outbox en una unidad atomica', async () => {
@@ -242,9 +353,7 @@ describe('Persistencia PostgreSQL', () => {
 
       expect(audit[0]).toMatchObject({
         auction_id: 'auction-1',
-
         operation_id: 'operation-auction-1',
-
         action: 'AUCTION_PUBLISHED',
       })
 
@@ -252,9 +361,7 @@ describe('Persistencia PostgreSQL', () => {
 
       expect(outbox[0]).toMatchObject({
         aggregate_id: 'auction-1',
-
         event_type: 'auction.published.v1',
-
         published_at: null,
       })
     })
@@ -266,7 +373,6 @@ describe('Persistencia PostgreSQL', () => {
 
       const retry = {
         ...publication('auction-generated-again', 'seller-1', 'product-auction-idempotent'),
-
         operationId: command.operationId,
       }
 
@@ -276,7 +382,6 @@ describe('Persistencia PostgreSQL', () => {
 
       await expect(repository.publish(retry)).resolves.toMatchObject({
         replayed: true,
-
         auction: {
           id: 'auction-idempotent',
         },
@@ -318,17 +423,13 @@ describe('Persistencia PostgreSQL', () => {
       const repository = new PostgresAuctionRepository(db)
 
       await Promise.all(
-        Array.from(
-          {
-            length: 9,
-          },
-          (_, index) => repository.publish(publication(`auction-${String(index)}`, 'seller-limit')),
+        Array.from({ length: 9 }, (_, index) =>
+          repository.publish(publication(`auction-${String(index)}`, 'seller-limit')),
         ),
       )
 
       const outcomes = await Promise.allSettled([
         repository.publish(publication('auction-9', 'seller-limit')),
-
         repository.publish(publication('auction-10', 'seller-limit')),
       ])
 
@@ -357,7 +458,6 @@ describe('Persistencia PostgreSQL', () => {
           new PostgresAuctionRepository(restarted).findById('auction-durable'),
         ).resolves.toMatchObject({
           id: 'auction-durable',
-
           status: 'ACTIVE',
         })
       } finally {
@@ -370,23 +470,14 @@ describe('Persistencia PostgreSQL', () => {
 
       const failure = {
         operationId: 'operation-failed',
-
         auctionId: 'auction-failed',
-
         sellerId: 'seller-failed',
-
         stage: 'PERSISTING_AUCTION',
-
         reason: 'database unavailable',
-
         feeChargeId: 'charge-failed',
-
         inventoryCommitmentId: 'commitment-failed',
-
         feeRefunded: false,
-
         inventoryReleased: false,
-
         occurredAt: new Date('2026-09-21T12:00:00.000Z'),
       }
 
@@ -394,9 +485,7 @@ describe('Persistencia PostgreSQL', () => {
 
       await repository.recordFailure({
         ...failure,
-
         feeRefunded: true,
-
         inventoryReleased: true,
       })
 
@@ -406,7 +495,6 @@ describe('Persistencia PostgreSQL', () => {
 
       expect(rows[0]).toMatchObject({
         fee_refunded: true,
-
         inventory_released: true,
       })
     })
@@ -427,9 +515,7 @@ describe('Persistencia PostgreSQL', () => {
 
       await expect(repository.persistBid(firstBid)).resolves.toEqual({
         bid: firstBid.snapshot(),
-
         previousLeader: null,
-
         previousLeaderReservationId: null,
       })
 
@@ -447,13 +533,9 @@ describe('Persistencia PostgreSQL', () => {
 
       expect(rows[0]).toMatchObject({
         id: 'bid-1',
-
         auction_id: 'auction-bid-first',
-
         bidder_id: 'bidder-1',
-
         amount_credits: 20,
-
         is_leader: true,
       })
     })
@@ -485,9 +567,7 @@ describe('Persistencia PostgreSQL', () => {
 
       await expect(repository.persistBid(secondBid)).resolves.toEqual({
         bid: secondBid.snapshot(),
-
         previousLeader: firstBid.snapshot(),
-
         previousLeaderReservationId: null,
       })
 
@@ -510,13 +590,10 @@ describe('Persistencia PostgreSQL', () => {
       expect(rows).toEqual([
         {
           id: 'bid-history-1',
-
           is_leader: false,
         },
-
         {
           id: 'bid-history-2',
-
           is_leader: true,
         },
       ])
@@ -677,467 +754,6 @@ describe('Persistencia PostgreSQL', () => {
       expect(rows).toHaveLength(0)
     })
 
-    it('persiste la reserva de creditos y devuelve la reserva del lider anterior', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await repository.publish(publication('auction-bid-credit-reservation'))
-
-      const firstBid = bid(
-        'bid-credit-1',
-        'auction-bid-credit-reservation',
-        'bidder-1',
-        20,
-        new Date('2026-09-21T12:00:10.000Z'),
-        null,
-      )
-
-      const secondBid = bid(
-        'bid-credit-2',
-        'auction-bid-credit-reservation',
-        'bidder-2',
-        30,
-        new Date('2026-09-21T12:00:20.000Z'),
-        20,
-      )
-
-      await repository.persistBid(firstBid, 'reservation-first')
-
-      await expect(repository.persistBid(secondBid, 'reservation-second')).resolves.toEqual({
-        bid: secondBid.snapshot(),
-
-        previousLeader: firstBid.snapshot(),
-
-        previousLeaderReservationId: 'reservation-first',
-      })
-
-      const rows = await db
-        .selectFrom('auction_bids')
-        .select(['id', 'is_leader', 'credit_reservation_id'])
-        .where('auction_id', '=', 'auction-bid-credit-reservation')
-        .orderBy('placed_at', 'asc')
-        .execute()
-
-      expect(rows).toEqual([
-        {
-          id: 'bid-credit-1',
-
-          is_leader: false,
-
-          credit_reservation_id: 'reservation-first',
-        },
-
-        {
-          id: 'bid-credit-2',
-
-          is_leader: true,
-
-          credit_reservation_id: 'reservation-second',
-        },
-      ])
-    })
-
-    it('registra y actualiza de forma idempotente un fallo de creditos de puja', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      const failure = {
-        operationId: 'operation-bid-credit-failed',
-
-        bidId: 'bid-credit-failed',
-
-        auctionId: 'auction-credit-failed',
-
-        bidderId: 'bidder-failed',
-
-        stage: 'PERSISTING_BID',
-
-        reason: 'database unavailable',
-
-        newReservationId: 'reservation-new',
-
-        previousReservationId: 'reservation-old',
-
-        newReservationReleased: false,
-
-        previousReservationReleased: false,
-
-        occurredAt: new Date('2026-09-21T12:00:00.000Z'),
-      }
-
-      await repository.recordBidCreditFailure(failure)
-
-      await repository.recordBidCreditFailure({
-        ...failure,
-
-        stage: 'RELEASING_NEW_RESERVATION',
-
-        reason: 'compensation completed',
-
-        newReservationReleased: true,
-      })
-
-      const rows = await db
-        .selectFrom('auction_bid_credit_failures')
-        .selectAll()
-        .where('operation_id', '=', failure.operationId)
-        .execute()
-
-      expect(rows).toHaveLength(1)
-
-      expect(rows[0]).toMatchObject({
-        operation_id: 'operation-bid-credit-failed',
-
-        bid_id: 'bid-credit-failed',
-
-        auction_id: 'auction-credit-failed',
-
-        bidder_id: 'bidder-failed',
-
-        stage: 'RELEASING_NEW_RESERVATION',
-
-        new_reservation_id: 'reservation-new',
-
-        previous_reservation_id: 'reservation-old',
-
-        new_reservation_released: true,
-
-        previous_reservation_released: false,
-      })
-    })
-
-    it('crea y recupera una operacion durable de creditos de puja', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      const createdAt = new Date('2026-09-21T12:00:10.000Z')
-
-      await repository.createBidCreditOperation({
-        operationId: 'operation-credit-create',
-
-        bidId: 'bid-credit-create',
-
-        auctionId: 'auction-credit-create',
-
-        bidderId: 'bidder-credit-create',
-
-        amountCredits: 25,
-
-        createdAt,
-      })
-
-      await expect(repository.findBidCreditOperation('operation-credit-create')).resolves.toEqual({
-        operationId: 'operation-credit-create',
-
-        bidId: 'bid-credit-create',
-
-        auctionId: 'auction-credit-create',
-
-        bidderId: 'bidder-credit-create',
-
-        amountCredits: 25,
-
-        status: 'PENDING_RESERVATION',
-
-        reservationId: null,
-
-        previousReservationId: null,
-
-        createdAt,
-
-        updatedAt: createdAt,
-      })
-    })
-
-    it('reintenta la misma intencion de creditos sin duplicarla', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      const command = {
-        operationId: 'operation-credit-idempotent',
-
-        bidId: 'bid-credit-idempotent',
-
-        auctionId: 'auction-credit-idempotent',
-
-        bidderId: 'bidder-credit-idempotent',
-
-        amountCredits: 30,
-
-        createdAt: new Date('2026-09-21T12:00:10.000Z'),
-      }
-
-      await repository.createBidCreditOperation(command)
-
-      await expect(repository.createBidCreditOperation(command)).resolves.toBeUndefined()
-
-      const rows = await db
-        .selectFrom('auction_bid_credit_operations')
-        .selectAll()
-        .where('operation_id', '=', command.operationId)
-        .execute()
-
-      expect(rows).toHaveLength(1)
-    })
-
-    it('rechaza reutilizar operationId con otra intencion de creditos', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await repository.createBidCreditOperation({
-        operationId: 'operation-credit-conflict',
-
-        bidId: 'bid-credit-conflict',
-
-        auctionId: 'auction-credit-conflict',
-
-        bidderId: 'bidder-1',
-
-        amountCredits: 30,
-
-        createdAt: new Date('2026-09-21T12:00:10.000Z'),
-      })
-
-      await expect(
-        repository.createBidCreditOperation({
-          operationId: 'operation-credit-conflict',
-
-          bidId: 'bid-credit-conflict',
-
-          auctionId: 'auction-credit-conflict',
-
-          bidderId: 'bidder-1',
-
-          amountCredits: 40,
-
-          createdAt: new Date('2026-09-21T12:00:20.000Z'),
-        }),
-      ).rejects.toBeInstanceOf(IdempotencyConflictError)
-    })
-
-    it('rechaza registrar el mismo bidId con otra operacion de creditos', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await repository.createBidCreditOperation({
-        operationId: 'operation-credit-first',
-
-        bidId: 'bid-credit-same',
-
-        auctionId: 'auction-credit-same',
-
-        bidderId: 'bidder-1',
-
-        amountCredits: 30,
-
-        createdAt: new Date('2026-09-21T12:00:10.000Z'),
-      })
-
-      await expect(
-        repository.createBidCreditOperation({
-          operationId: 'operation-credit-second',
-
-          bidId: 'bid-credit-same',
-
-          auctionId: 'auction-credit-same',
-
-          bidderId: 'bidder-1',
-
-          amountCredits: 30,
-
-          createdAt: new Date('2026-09-21T12:00:20.000Z'),
-        }),
-      ).rejects.toBeInstanceOf(IdempotencyConflictError)
-    })
-
-    it('actualiza el estado durable de una operacion de creditos', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      const createdAt = new Date('2026-09-21T12:00:10.000Z')
-
-      const updatedAt = new Date('2026-09-21T12:00:20.000Z')
-
-      await repository.createBidCreditOperation({
-        operationId: 'operation-credit-update',
-
-        bidId: 'bid-credit-update',
-
-        auctionId: 'auction-credit-update',
-
-        bidderId: 'bidder-1',
-
-        amountCredits: 30,
-
-        createdAt,
-      })
-
-      await repository.updateBidCreditOperation({
-        operationId: 'operation-credit-update',
-
-        status: 'RESERVED',
-
-        reservationId: 'reservation-update',
-
-        previousReservationId: null,
-
-        updatedAt,
-      })
-
-      await expect(
-        repository.findBidCreditOperation('operation-credit-update'),
-      ).resolves.toMatchObject({
-        status: 'RESERVED',
-
-        reservationId: 'reservation-update',
-
-        previousReservationId: null,
-
-        updatedAt,
-      })
-    })
-
-    it('rechaza actualizar una operacion de creditos inexistente', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await expect(
-        repository.updateBidCreditOperation({
-          operationId: 'operation-does-not-exist',
-
-          status: 'RESERVED',
-
-          reservationId: 'reservation-missing',
-
-          previousReservationId: null,
-
-          updatedAt: new Date('2026-09-21T12:00:10.000Z'),
-        }),
-      ).rejects.toThrow('operation-does-not-exist')
-    })
-
-    it('devuelve null cuando la operacion de creditos no existe', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await expect(repository.findBidCreditOperation('operation-missing')).resolves.toBeNull()
-    })
-
-    it('persiste atomicamente la puja y marca BID_PERSISTED', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await repository.publish(publication('auction-credit-atomic'))
-
-      const firstBid = bid(
-        'bid-credit-atomic-first',
-        'auction-credit-atomic',
-        'bidder-1',
-        20,
-        new Date('2026-09-21T12:00:10.000Z'),
-        null,
-      )
-
-      await repository.persistBid(firstBid, 'reservation-old')
-
-      const secondBid = bid(
-        'bid-credit-atomic-second',
-        'auction-credit-atomic',
-        'bidder-2',
-        30,
-        new Date('2026-09-21T12:00:20.000Z'),
-        20,
-      )
-
-      const secondSnapshot = secondBid.snapshot()
-
-      await repository.createBidCreditOperation({
-        operationId: 'operation-credit-atomic',
-
-        bidId: secondSnapshot.id,
-
-        auctionId: secondSnapshot.auctionId,
-
-        bidderId: secondSnapshot.bidderId,
-
-        amountCredits: secondSnapshot.amountCredits,
-
-        createdAt: new Date('2026-09-21T12:00:15.000Z'),
-      })
-
-      await repository.updateBidCreditOperation({
-        operationId: 'operation-credit-atomic',
-
-        status: 'RESERVED',
-
-        reservationId: 'reservation-new',
-
-        previousReservationId: null,
-
-        updatedAt: new Date('2026-09-21T12:00:16.000Z'),
-      })
-
-      await repository.persistBid(secondBid, 'reservation-new', 'operation-credit-atomic')
-
-      await expect(
-        repository.findBidCreditOperation('operation-credit-atomic'),
-      ).resolves.toMatchObject({
-        status: 'BID_PERSISTED',
-
-        reservationId: 'reservation-new',
-
-        previousReservationId: 'reservation-old',
-      })
-    })
-
-    it('rechaza persistir con una operacion de creditos inexistente', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await repository.publish(publication('auction-credit-no-operation'))
-
-      const currentBid = bid(
-        'bid-credit-no-operation',
-        'auction-credit-no-operation',
-        'bidder-1',
-        20,
-        new Date('2026-09-21T12:00:10.000Z'),
-        null,
-      )
-
-      await expect(
-        repository.persistBid(currentBid, 'reservation-new', 'operation-missing'),
-      ).rejects.toThrow('operation-missing')
-
-      await expect(repository.findBidHistory('auction-credit-no-operation')).resolves.toHaveLength(
-        0,
-      )
-    })
-
-    it('rechaza persistir si la operacion durable pertenece a otra intencion', async () => {
-      const repository = new PostgresAuctionRepository(db)
-
-      await repository.publish(publication('auction-credit-intent'))
-
-      const currentBid = bid(
-        'bid-credit-intent',
-        'auction-credit-intent',
-        'bidder-1',
-        20,
-        new Date('2026-09-21T12:00:10.000Z'),
-        null,
-      )
-
-      await repository.createBidCreditOperation({
-        operationId: 'operation-credit-wrong-intent',
-
-        bidId: 'different-bid',
-
-        auctionId: 'auction-credit-intent',
-
-        bidderId: 'bidder-1',
-
-        amountCredits: 20,
-
-        createdAt: new Date('2026-09-21T12:00:05.000Z'),
-      })
-
-      await expect(
-        repository.persistBid(currentBid, 'reservation-new', 'operation-credit-wrong-intent'),
-      ).rejects.toBeInstanceOf(IdempotencyConflictError)
-
-      await expect(repository.findBidHistory('auction-credit-intent')).resolves.toHaveLength(0)
-    })
-
     it('serializa pujas concurrentes y mantiene un unico lider', async () => {
       const repository = new PostgresAuctionRepository(db)
 
@@ -1194,7 +810,6 @@ describe('Persistencia PostgreSQL', () => {
 
       expect(leaders[0]).toEqual({
         id: 'bid-concurrent-30',
-
         amount_credits: 30,
       })
     })
