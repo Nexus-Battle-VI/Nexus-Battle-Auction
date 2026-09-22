@@ -100,11 +100,7 @@ export interface AuctionRepositoryPort {
 
   countActiveBySeller(sellerId: string): Promise<number>
 
-  persistBid(
-    bid: Bid,
-    reservationId?: string,
-    operationId?: string,
-  ): Promise<PersistBidResult>
+  persistBid(bid: Bid, reservationId?: string, operationId?: string): Promise<PersistBidResult>
 
   findLeadingBid(auctionId: string): Promise<BidSnapshot | null>
 
@@ -114,21 +110,13 @@ export interface AuctionRepositoryPort {
 
   countActiveBidsByBidder(bidderId: string): Promise<number>
 
-  createBidCreditOperation(
-    command: CreateBidCreditOperationCommand,
-  ): Promise<void>
+  createBidCreditOperation(command: CreateBidCreditOperationCommand): Promise<void>
 
-  updateBidCreditOperation(
-    command: UpdateBidCreditOperationCommand,
-  ): Promise<void>
+  updateBidCreditOperation(command: UpdateBidCreditOperationCommand): Promise<void>
 
-  findBidCreditOperation(
-    operationId: string,
-  ): Promise<BidCreditOperationSnapshot | null>
+  findBidCreditOperation(operationId: string): Promise<BidCreditOperationSnapshot | null>
 
-  recordBidCreditFailure(
-    command: RecordBidCreditFailureCommand,
-  ): Promise<void>
+  recordBidCreditFailure(command: RecordBidCreditFailureCommand): Promise<void>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')
