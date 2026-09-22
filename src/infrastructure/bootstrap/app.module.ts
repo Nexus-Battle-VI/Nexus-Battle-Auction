@@ -9,14 +9,15 @@ import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymo
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
 import { JwtAuthGuard } from '../../adapters/inbound/http/auth/jwt-auth.guard'
 import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
-import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import {
+  UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
   UnavailableProductInventory,
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
+import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
@@ -26,6 +27,7 @@ import {
   AUCTION_REPOSITORY,
   type AuctionRepositoryPort,
 } from '../../application/ports/AuctionRepositoryPort'
+import { BID_CREDITS, type BidCreditsPort } from '../../application/ports/BidCreditsPort'
 import {
   CATALOG_PRODUCT_POLICY,
   type CatalogProductPolicyPort,
@@ -49,6 +51,7 @@ import {
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
+import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
@@ -123,7 +126,9 @@ export const INTERNAL_CALLERS: readonly string[] = []
         return createDatabase({
           connectionString: config.databaseUrl,
           onIdleError: (error) => {
-            logger.warn('postgres_idle_connection_error', { detail: describeError(error) })
+            logger.warn('postgres_idle_connection_error', {
+              detail: describeError(error),
+            })
           },
         })
       },
@@ -131,7 +136,11 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
     {
       provide: DATABASE_LIFECYCLE,
-      useFactory: (db: Kysely<Database> | null): { onModuleDestroy: () => Promise<void> } => ({
+      useFactory: (
+        db: Kysely<Database> | null,
+      ): {
+        onModuleDestroy: () => Promise<void>
+      } => ({
         onModuleDestroy: async (): Promise<void> => {
           await db?.destroy()
         },
@@ -172,6 +181,10 @@ export const INTERNAL_CALLERS: readonly string[] = []
       useFactory: (): PublicationFeePort => new UnavailablePublicationFee(),
     },
     {
+      provide: BID_CREDITS,
+      useFactory: (): BidCreditsPort => new UnavailableBidCredits(),
+    },
+    {
       provide: SELLER_SANCTIONS,
       useFactory: (): SellerSanctionPort => new UnavailableSellerSanctions(),
     },
@@ -185,6 +198,15 @@ export const INTERNAL_CALLERS: readonly string[] = []
       ): PersistAuctionPublication =>
         new PersistAuctionPublication(repository, inventory, fees, clock),
       inject: [AUCTION_REPOSITORY, PRODUCT_INVENTORY, PUBLICATION_FEE, CLOCK],
+    },
+    {
+      provide: PersistBidWithCredits,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        credits: BidCreditsPort,
+        clock: ClockPort,
+      ): PersistBidWithCredits => new PersistBidWithCredits(repository, credits, clock),
+      inject: [AUCTION_REPOSITORY, BID_CREDITS, CLOCK],
     },
     {
       provide: PublishAuction,
@@ -236,6 +258,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
       },
       inject: [APP_CONFIG, LOGGER],
     },
+
     // El orden importa: NestJS ejecuta los guards globales en el orden en que se
     // declaran. Primero la identidad, despues los roles, despues el contrato
     // interno, que solo actua sobre rutas `@InternalOnly()`.
@@ -256,7 +279,9 @@ export const INTERNAL_CALLERS: readonly string[] = []
       useFactory: (config: AppConfig, reflector: Reflector): CanActivate =>
         config.authMode === AuthMode.Jwt
           ? new RolesGuard(reflector)
-          : { canActivate: (): boolean => true },
+          : {
+              canActivate: (): boolean => true,
+            },
       inject: [APP_CONFIG, Reflector],
     },
     {
@@ -279,9 +304,14 @@ export const INTERNAL_CALLERS: readonly string[] = []
     {
       provide: READINESS_CHECKS,
       useFactory: (db: Kysely<Database> | null): readonly ReadinessCheck[] =>
-        // Con PostgreSQL la sonda va hasta el motor. En memoria no hay
-        // dependencia externa que comprobar, y no se inventa una.
-        db === null ? [] : [{ name: 'postgres', check: () => pingDatabase(db) }],
+        db === null
+          ? []
+          : [
+              {
+                name: 'postgres',
+                check: () => pingDatabase(db),
+              },
+            ],
       inject: [DATABASE],
     },
     {
