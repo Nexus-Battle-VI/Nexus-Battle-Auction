@@ -121,6 +121,40 @@ export interface RecordBidCreditFailureCommand {
   readonly occurredAt: Date
 }
 
+/**
+ * Cierre atomico de una subasta por compra inmediata (HU-64.3).
+ *
+ * `transactionId` viaja YA generado por el llamador (no aqui) para que un
+ * reintento con el mismo `operationId` devuelva la misma confirmacion que vio
+ * el comprador la primera vez, en lugar de una nueva.
+ */
+export interface CloseAuctionByBuyNowCommand {
+  readonly operationId: string
+  readonly transactionId: string
+  readonly auctionId: string
+  readonly buyerId: string
+  readonly transferId: string
+  readonly priceCredits: number
+  readonly closedAt: Date
+}
+
+export interface CloseAuctionByBuyNowResult {
+  readonly auction: AuctionSnapshot
+  readonly transactionId: string
+  readonly replayed: boolean
+}
+
+export interface RecordBuyNowFailureCommand {
+  readonly operationId: string
+  readonly auctionId: string
+  readonly buyerId: string
+  readonly stage: string
+  readonly reason: string
+  readonly transferId: string | null
+  readonly creditsReversed: boolean
+  readonly occurredAt: Date
+}
+
 export interface AuctionRepositoryPort {
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult>
 
@@ -173,6 +207,10 @@ export interface AuctionRepositoryPort {
     auctionId: string,
     excludeBidderId: string,
   ): Promise<readonly AutoBidConfigSnapshot[]>
+
+  closeByBuyNow(command: CloseAuctionByBuyNowCommand): Promise<CloseAuctionByBuyNowResult>
+
+  recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')

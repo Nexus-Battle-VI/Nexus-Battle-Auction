@@ -22,6 +22,7 @@ import * as createAuctionPublicationIntents from '../../adapters/outbound/persis
 import * as createAuctionInventorySettlementIntents from '../../adapters/outbound/persistence/migrations/010-create-auction-inventory-settlement-intents'
 import * as createAuctionSettlementWork from '../../adapters/outbound/persistence/migrations/011-create-auction-settlement-work'
 import * as allowExpiredAuctionPendingClaims from '../../adapters/outbound/persistence/migrations/012-allow-expired-auction-pending-claims'
+import * as createAuctionBuyNow from '../../adapters/outbound/persistence/migrations/013-create-auction-buy-now'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
@@ -99,6 +100,7 @@ export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '010-create-auction-inventory-settlement-intents': createAuctionInventorySettlementIntents,
   '011-create-auction-settlement-work': createAuctionSettlementWork,
   '012-allow-expired-auction-pending-claims': allowExpiredAuctionPendingClaims,
+  '013-create-auction-buy-now': createAuctionBuyNow,
 }
 
 export interface MigrationOutcome {

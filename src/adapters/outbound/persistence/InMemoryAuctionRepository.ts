@@ -6,10 +6,16 @@ import {
   IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
+import {
+  AuctionAlreadyClosedError,
+  BuyNowIdempotencyConflictError,
+} from '../../../application/errors/BuyNowTransactionError'
 import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
   BidCreditOperationSnapshot,
+  CloseAuctionByBuyNowCommand,
+  CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
@@ -17,6 +23,7 @@ import type {
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
+  RecordBuyNowFailureCommand,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
@@ -100,6 +107,17 @@ const cloneAuction = (auction: AuctionSnapshot): AuctionSnapshot => ({
       }),
 })
 
+interface BuyNowOperationRecord {
+  readonly hash: string
+  readonly auctionId: string
+  readonly transactionId: string
+}
+
+const buyNowHashOf = (command: CloseAuctionByBuyNowCommand): string =>
+  createHash('sha256')
+    .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]))
+    .digest('hex')
+
 export class InMemoryAuctionRepository
   implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
 {
@@ -120,6 +138,10 @@ export class InMemoryAuctionRepository
   private readonly leadingBidByAuction = new Map<string, string>()
 
   private readonly autoBidConfigs = new Map<string, AutoBidConfigSnapshot>()
+
+  private readonly buyNowOperations = new Map<string, BuyNowOperationRecord>()
+
+  private readonly buyNowFailures = new Map<string, RecordBuyNowFailureCommand>()
 
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     const hash = hashOf(command)
@@ -513,6 +535,65 @@ export class InMemoryAuctionRepository
         finishedAt: new Date(command.finishedAt),
       },
     })
+    return Promise.resolve()
+  }
+
+  closeByBuyNow(command: CloseAuctionByBuyNowCommand): Promise<CloseAuctionByBuyNowResult> {
+    const hash = buyNowHashOf(command)
+    const previous = this.buyNowOperations.get(command.operationId)
+
+    if (previous !== undefined) {
+      if (previous.hash !== hash) {
+        return Promise.reject(new BuyNowIdempotencyConflictError())
+      }
+
+      const auction = this.auctions.get(previous.auctionId)
+
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+
+      return Promise.resolve({
+        auction,
+        transactionId: previous.transactionId,
+        replayed: true,
+      })
+    }
+
+    const auction = this.auctions.get(command.auctionId)
+
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+
+    if (auction.status !== AuctionStatus.Active) {
+      return Promise.reject(new AuctionAlreadyClosedError(command.auctionId))
+    }
+
+    const closed: AuctionSnapshot = {
+      ...auction,
+      status: AuctionStatus.SoldByBuyNow,
+      closesAt: new Date(command.closedAt),
+    }
+
+    this.auctions.set(closed.id, closed)
+
+    this.buyNowOperations.set(command.operationId, {
+      hash,
+      auctionId: closed.id,
+      transactionId: command.transactionId,
+    })
+
+    return Promise.resolve({
+      auction: closed,
+      transactionId: command.transactionId,
+      replayed: false,
+    })
+  }
+
+  recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {
+    this.buyNowFailures.set(command.operationId, command)
+
     return Promise.resolve()
   }
 

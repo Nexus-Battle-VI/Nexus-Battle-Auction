@@ -17,12 +17,14 @@ import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpO
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
+import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
   UnavailableProductInventory,
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
+  UnavailableWallet,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
 import { UnavailableWatchlistEventPublisher } from '../../adapters/outbound/http/UnavailableWatchlistEventPublisher'
@@ -132,6 +134,7 @@ import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchli
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
+import { WALLET, type WalletPort } from '../../application/ports/WalletPort'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
@@ -145,6 +148,7 @@ import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
+import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -717,6 +721,21 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
     },
 
     {
+      provide: WALLET,
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): WalletPort =>
+        config.walletBaseUrl === null || config.internalServiceAuthSecret === null
+          ? new UnavailableWallet()
+          : new WalletHttpClient({
+              baseUrl: config.walletBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: config.walletRequestTimeoutMs,
+              logger,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
       provide: PersistAuctionPublication,
 
       useFactory: (
@@ -900,6 +919,17 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
       inject: [AUCTION_REPOSITORY, CLOCK],
     },
 
+    {
+      provide: TransactionProcessingService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        wallet: WalletPort,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): TransactionProcessingService =>
+        new TransactionProcessingService(repository, wallet, clock, identifiers),
+      inject: [AUCTION_REPOSITORY, WALLET, CLOCK, IDENTIFIER_GENERATOR],
+    },
     {
       provide: TOKEN_VERIFIER,
 

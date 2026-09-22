@@ -108,6 +108,28 @@ export interface AuctionPublicationFailureTable {
   occurred_at: Timestamp
 }
 
+export interface AuctionBuyNowOperationTable {
+  operation_id: string
+  request_hash: string
+  auction_id: string
+  buyer_id: string
+  transfer_id: string
+  price_credits: number
+  transaction_id: string
+  completed_at: Timestamp
+}
+
+export interface AuctionBuyNowFailureTable {
+  operation_id: string
+  auction_id: string
+  buyer_id: string
+  stage: string
+  reason: string
+  transfer_id: string | null
+  credits_reversed: boolean
+  occurred_at: Timestamp
+}
+
 export interface AuctionAuditLogTable {
   id: Generated<number>
   auction_id: string
@@ -137,6 +159,8 @@ export interface Database {
   auction_publication_failures: AuctionPublicationFailureTable
   auction_bid_credit_operations: AuctionBidCreditOperationTable
   auction_bid_credit_failures: AuctionBidCreditFailureTable
+  auction_buy_now_operations: AuctionBuyNowOperationTable
+  auction_buy_now_failures: AuctionBuyNowFailureTable
   auction_audit_log: AuctionAuditLogTable
   outbox_events: OutboxEventTable
   auction_settlements: AuctionSettlementTable
