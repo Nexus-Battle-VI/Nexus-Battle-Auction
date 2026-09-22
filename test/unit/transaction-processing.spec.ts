@@ -211,6 +211,17 @@ describe('TransactionProcessingService HU-64.3', () => {
     })
   })
 
+  it('si registrar la auditoria del fallo tambien falla, propaga el error ORIGINAL, no el de auditoria', async () => {
+    const { repository, service } = fixture()
+
+    repository.recordBuyNowFailure = () =>
+      Promise.reject(new Error('tambien fallo escribir la auditoria'))
+
+    await expect(service.execute(command('auction-inexistente'))).rejects.toBeInstanceOf(
+      PersistedAuctionNotFoundError,
+    )
+  })
+
   it('registra el fallo sin creditos revertidos si Wallet nunca transfirio', async () => {
     const { repository, wallet, service } = fixture()
 
