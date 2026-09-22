@@ -261,6 +261,15 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
 
     this.leadingBidByAuction.set(snapshot.auctionId, snapshot.id)
 
+    const existingAuction = this.auctions.get(snapshot.auctionId)
+    if (existingAuction) {
+      this.auctions.set(snapshot.auctionId, {
+        ...existingAuction,
+        // Si el snapshot de la subasta guarda el id de la puja líder o la última puja:
+        leadingBidId: snapshot.id,
+      } as AuctionSnapshot)
+    }
+
     if (operationId !== null) {
       const operation = this.bidCreditOperations.get(operationId)
 
