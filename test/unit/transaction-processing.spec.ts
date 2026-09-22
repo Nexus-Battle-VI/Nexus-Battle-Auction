@@ -266,6 +266,7 @@ describe('TransactionProcessingService HU-64.3', () => {
         buyerId: 'buyer-1',
         transferId: 'transfer-x',
         priceCredits: 999,
+        remainingCredits: 0,
         closedAt: NOW,
       }),
     ).rejects.toBeInstanceOf(BuyNowIdempotencyConflictError)

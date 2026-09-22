@@ -21,6 +21,8 @@ import {
   PersistedAuctionNotFoundError,
 } from '../../src/application/errors/AuctionPersistenceError'
 import { InsufficientBidCreditsError } from '../../src/application/errors/BidCreditError'
+import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
+import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
 import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
 import {
   Role,
@@ -30,12 +32,18 @@ import {
   type VerifiedIdentity,
 } from '../../src/application/ports/TokenVerifierPort'
 import { ConfigureAutoBid } from '../../src/application/use-cases/ConfigureAutoBid'
+import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
+import { ExecuteBuyNowUseCase } from '../../src/application/use-cases/ExecuteBuyNowUseCase'
 import { PublishAuction } from '../../src/application/use-cases/PublishAuction'
 import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
 import { AutoBidRuleCode, AutoBidRuleViolation } from '../../src/domain/errors/AutoBidRuleViolation'
 import { BidRuleCode, BidRuleViolation } from '../../src/domain/errors/BidRuleViolation'
-import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
+import {
+  BuyNowRuleCode,
+  BuyNowRuleViolation,
+  InsufficientCreditsViolation,
+} from '../../src/domain/errors/BuyNowRuleViolation'
 
 /**
  * Controlador SOLO de prueba. Lo que se demuestra aqui es que la proteccion
@@ -277,6 +285,63 @@ const configureAutoBidStub = {
   }),
 }
 
+const buyNowConfirmation = {
+  transactionId: 'txn-created',
+  auctionId: 'auction-buy-now',
+  buyerId: 'sujeto-jugador',
+  sellerId: 'seller-1',
+  productId: 'product-1',
+  debitedCredits: 2500,
+  remainingCredits: 2500,
+  closedAt: new Date('2026-09-21T15:00:00.000Z'),
+  replayed: false,
+}
+
+const executeBuyNowStub = {
+  execute: jest.fn((command: { auctionId: string }) => {
+    if (command.auctionId === 'auction-not-found') {
+      return Promise.reject(new AuctionNotFoundError(command.auctionId))
+    }
+    if (command.auctionId === 'auction-not-active') {
+      return Promise.reject(
+        new BuyNowRuleViolation(BuyNowRuleCode.AuctionNotActive, 'La subasta no esta activa.'),
+      )
+    }
+    if (command.auctionId === 'auction-no-price') {
+      return Promise.reject(
+        new BuyNowRuleViolation(
+          BuyNowRuleCode.BuyNowPriceUnavailable,
+          'Sin precio de compra inmediata.',
+        ),
+      )
+    }
+    if (command.auctionId === 'auction-insufficient-credits') {
+      return Promise.reject(
+        new InsufficientCreditsViolation({
+          requiredCredits: 3000,
+          availableCredits: 2500,
+          missingCredits: 500,
+        }),
+      )
+    }
+    if (command.auctionId === 'auction-own') {
+      return Promise.reject(
+        new BuyNowRuleViolation(
+          BuyNowRuleCode.SellerCannotBuyOwnAuction,
+          'El vendedor no puede comprar su propia subasta.',
+        ),
+      )
+    }
+    if (command.auctionId === 'auction-already-closed') {
+      return Promise.reject(new AuctionAlreadyClosedError(command.auctionId))
+    }
+    if (command.auctionId === 'auction-unavailable') {
+      return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+    }
+    return Promise.resolve({ ...buyNowConfirmation, auctionId: command.auctionId })
+  }),
+}
+
 const stubVerifier: TokenVerifierPort = {
   verify: (token: string): Promise<VerifiedIdentity> => {
     const identity = IDENTITIES[token]
@@ -318,6 +383,8 @@ const buildApp = async (): Promise<INestApplication> => {
     .useValue(registerBidStub)
     .overrideProvider(ConfigureAutoBid)
     .useValue(configureAutoBidStub)
+    .overrideProvider(ExecuteBuyNowUseCase)
+    .useValue(executeBuyNowStub)
     .compile()
 
   const app = moduleRef.createNestApplication()
@@ -949,6 +1016,115 @@ describe('Servicio con autenticacion activa', () => {
 
       expect(Object.keys(operation?.responses ?? {})).toEqual(
         expect.arrayContaining(['201', '400', '401', '403', '422', '503']),
+      )
+    })
+  })
+
+  describe('Compra inmediata HU-64', () => {
+    const buyNow = (
+      auctionId = 'auction-buy-now',
+      token = 'token-jugador',
+      body: Record<string, unknown> = { confirmed: true },
+      idempotencyKey: string | null = 'operation-buy-now-1',
+    ) => {
+      const req = request(app.getHttpServer())
+        .post(`/api/v1/auctions/${auctionId}/buy-now`)
+        .set('Authorization', `Bearer ${token}`)
+
+      if (idempotencyKey !== null) {
+        req.set('Idempotency-Key', idempotencyKey)
+      }
+
+      return req.send(body)
+    }
+
+    beforeEach(() => executeBuyNowStub.execute.mockClear())
+
+    it('responde 200 y usa el sujeto verificado como comprador', async () => {
+      const response = await buyNow()
+
+      expect(response.status).toBe(200)
+      expect(response.body).toMatchObject({
+        auctionId: 'auction-buy-now',
+        buyerId: 'sujeto-jugador',
+        debitedCredits: 2500,
+      })
+      expect(executeBuyNowStub.execute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buyerId: 'sujeto-jugador',
+          auctionId: 'auction-buy-now',
+          operationId: 'operation-buy-now-1',
+          confirmed: true,
+        }),
+      )
+    })
+
+    it('responde 401 sin access token', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions/auction-buy-now/buy-now')
+        .set('Idempotency-Key', 'operation-buy-now-1')
+        .send({ confirmed: true })
+      expect(response.status).toBe(401)
+    })
+
+    it('responde 403 si la identidad no tiene rol PLAYER', async () => {
+      expect((await buyNow('auction-buy-now', 'token-admin')).status).toBe(403)
+    })
+
+    it('responde 400 ante un cuerpo con campos desconocidos o sin clave idempotente', async () => {
+      const unknownField = await buyNow('auction-buy-now', 'token-jugador', {
+        confirmed: true,
+        auctionId: 'otra',
+      })
+      expect(unknownField.status).toBe(400)
+      expect(unknownField.body).toMatchObject({ code: 'INVALID_REQUEST' })
+
+      const missingKey = await buyNow('auction-buy-now', 'token-jugador', { confirmed: true }, null)
+      expect(missingKey.status).toBe(400)
+      expect(missingKey.body).toMatchObject({ code: 'INVALID_IDEMPOTENCY_KEY' })
+    })
+
+    it.each([
+      ['auction-not-found', 404, 'AUCTION_NOT_FOUND'],
+      ['auction-not-active', 409, BuyNowRuleCode.AuctionNotActive],
+      ['auction-already-closed', 409, 'BUY_NOW_CONFLICT'],
+      ['auction-no-price', 422, BuyNowRuleCode.BuyNowPriceUnavailable],
+      ['auction-insufficient-credits', 422, BuyNowRuleCode.InsufficientCredits],
+      ['auction-own', 403, BuyNowRuleCode.SellerCannotBuyOwnAuction],
+      ['auction-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
+    ])('mapea %s a HTTP %i con codigo estable', async (auctionId, status, code) => {
+      const response = await buyNow(auctionId)
+      expect(response.status).toBe(status)
+      expect(response.body).toMatchObject({ statusCode: status, code })
+    })
+
+    it('CA-04: reenvia la casilla de confirmacion sin marcar tal como llego', async () => {
+      await buyNow('auction-buy-now', 'token-jugador', { confirmed: false })
+
+      expect(executeBuyNowStub.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmed: false }),
+      )
+    })
+
+    it('incluye el detalle de creditos faltantes en la respuesta de CA-02', async () => {
+      const response = await buyNow('auction-insufficient-credits')
+
+      expect(response.body).toMatchObject({
+        details: { requiredCredits: 3000, availableCredits: 2500, missingCredits: 500 },
+      })
+    })
+
+    it('publica en OpenAPI la operacion, seguridad y respuestas estables', () => {
+      const document = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().addBearerAuth().build(),
+      )
+      const operation = document.paths['/api/v1/auctions/{auctionId}/buy-now']?.post
+
+      expect(operation).toBeDefined()
+      expect(operation?.security).toEqual([{ bearer: [] }])
+      expect(Object.keys(operation?.responses ?? {})).toEqual(
+        expect.arrayContaining(['200', '400', '401', '403', '404', '409', '422', '503']),
       )
     })
   })

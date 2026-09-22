@@ -18,6 +18,7 @@ import type {
   ActiveAuctionList,
   BidCreditOperationSnapshot,
   BidCreditOperationStatus,
+  BuyNowOperationRecord,
   CloseAuctionByBuyNowCommand,
   CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
@@ -920,6 +921,7 @@ export class PostgresAuctionRepository
           buyer_id: command.buyerId,
           transfer_id: command.transferId,
           price_credits: command.priceCredits,
+          remaining_credits: command.remainingCredits,
           transaction_id: command.transactionId,
           completed_at: command.closedAt,
         })
@@ -999,5 +1001,33 @@ export class PostgresAuctionRepository
         }),
       )
       .execute()
+  }
+
+  async findBuyNowOperation(operationId: string): Promise<BuyNowOperationRecord | null> {
+    const operation = await this.db
+      .selectFrom('auction_buy_now_operations')
+      .selectAll()
+      .where('operation_id', '=', operationId)
+      .executeTakeFirst()
+
+    if (operation === undefined) {
+      return null
+    }
+
+    const auction = await findAuction(this.db, operation.auction_id)
+
+    if (auction === null) {
+      throw new PersistedAuctionNotFoundError(operation.auction_id)
+    }
+
+    return {
+      auction,
+      transactionId: operation.transaction_id,
+      buyerId: operation.buyer_id,
+      transferId: operation.transfer_id,
+      priceCredits: operation.price_credits,
+      remainingCredits: operation.remaining_credits,
+      completedAt: new Date(operation.completed_at),
+    }
   }
 }

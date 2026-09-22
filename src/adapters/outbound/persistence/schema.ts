@@ -115,6 +115,7 @@ export interface AuctionBuyNowOperationTable {
   buyer_id: string
   transfer_id: string
   price_credits: number
+  remaining_credits: number
   transaction_id: string
   completed_at: Timestamp
 }

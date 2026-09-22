@@ -1748,6 +1748,7 @@ describe('Persistencia PostgreSQL', () => {
         buyerId: 'buyer-1',
         transferId: `transfer-${auctionId}`,
         priceCredits: 20,
+        remainingCredits: 80,
         closedAt: new Date('2026-09-21T15:00:00.000Z'),
         ...overrides,
       })
@@ -1897,6 +1898,32 @@ describe('Persistencia PostgreSQL', () => {
         const operations = await db.selectFrom('auction_buy_now_operations').selectAll().execute()
 
         expect(operations).toHaveLength(1)
+      })
+
+      it('findBuyNowOperation reconstruye la confirmacion sin volver a evaluar la subasta', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await repository.publish(publication('auction-buy-now-lookup'))
+
+        await expect(repository.findBuyNowOperation('operation-inexistente')).resolves.toBeNull()
+
+        await repository.closeByBuyNow(closeCommand('auction-buy-now-lookup'))
+
+        const found = await repository.findBuyNowOperation(
+          'operation-buy-now-auction-buy-now-lookup',
+        )
+
+        expect(found).toMatchObject({
+          transactionId: 'txn-auction-buy-now-lookup',
+          buyerId: 'buyer-1',
+          transferId: 'transfer-auction-buy-now-lookup',
+          priceCredits: 20,
+          remainingCredits: 80,
+          auction: expect.objectContaining({
+            id: 'auction-buy-now-lookup',
+            status: AuctionStatus.SoldByBuyNow,
+          }),
+        })
       })
 
       it('registra y actualiza de forma idempotente un fallo de compra inmediata', async () => {

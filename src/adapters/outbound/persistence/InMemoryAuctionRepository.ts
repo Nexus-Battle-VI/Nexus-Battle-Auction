@@ -14,6 +14,7 @@ import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
   BidCreditOperationSnapshot,
+  BuyNowOperationRecord,
   CloseAuctionByBuyNowCommand,
   CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
@@ -107,10 +108,15 @@ const cloneAuction = (auction: AuctionSnapshot): AuctionSnapshot => ({
       }),
 })
 
-interface BuyNowOperationRecord {
+interface BuyNowOperationEntry {
   readonly hash: string
   readonly auctionId: string
   readonly transactionId: string
+  readonly buyerId: string
+  readonly transferId: string
+  readonly priceCredits: number
+  readonly remainingCredits: number
+  readonly completedAt: Date
 }
 
 const buyNowHashOf = (command: CloseAuctionByBuyNowCommand): string =>
@@ -139,7 +145,7 @@ export class InMemoryAuctionRepository
 
   private readonly autoBidConfigs = new Map<string, AutoBidConfigSnapshot>()
 
-  private readonly buyNowOperations = new Map<string, BuyNowOperationRecord>()
+  private readonly buyNowOperations = new Map<string, BuyNowOperationEntry>()
 
   private readonly buyNowFailures = new Map<string, RecordBuyNowFailureCommand>()
 
@@ -582,6 +588,11 @@ export class InMemoryAuctionRepository
       hash,
       auctionId: closed.id,
       transactionId: command.transactionId,
+      buyerId: command.buyerId,
+      transferId: command.transferId,
+      priceCredits: command.priceCredits,
+      remainingCredits: command.remainingCredits,
+      completedAt: new Date(command.closedAt),
     })
 
     return Promise.resolve({
@@ -595,6 +606,30 @@ export class InMemoryAuctionRepository
     this.buyNowFailures.set(command.operationId, command)
 
     return Promise.resolve()
+  }
+
+  findBuyNowOperation(operationId: string): Promise<BuyNowOperationRecord | null> {
+    const entry = this.buyNowOperations.get(operationId)
+
+    if (entry === undefined) {
+      return Promise.resolve(null)
+    }
+
+    const auction = this.auctions.get(entry.auctionId)
+
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(entry.auctionId))
+    }
+
+    return Promise.resolve({
+      auction,
+      transactionId: entry.transactionId,
+      buyerId: entry.buyerId,
+      transferId: entry.transferId,
+      priceCredits: entry.priceCredits,
+      remainingCredits: entry.remainingCredits,
+      completedAt: new Date(entry.completedAt),
+    })
   }
 
   private count(sellerId: string): number {
