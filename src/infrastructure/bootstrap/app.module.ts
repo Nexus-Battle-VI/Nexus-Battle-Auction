@@ -17,6 +17,7 @@ import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
+  UnavailableEarlyClosureNotification,
   UnavailableProductInventory,
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
@@ -31,7 +32,9 @@ import {
   type WatchlistRepositoryPort,
 } from '../../application/ports/WatchlistRepositoryPort'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
+import { InMemoryEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
+import { PostgresEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/PostgresEarlyClosureNotificationRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 import { SystemClock } from '../../adapters/outbound/system/SystemClock'
 import { UuidGenerator } from '../../adapters/outbound/system/UuidGenerator'
@@ -46,9 +49,14 @@ import {
 } from '../../application/ports/CatalogProductPolicyPort'
 import { CLOCK, type ClockPort } from '../../application/ports/ClockPort'
 import {
+  EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+  type EarlyClosureNotificationRepositoryPort,
+} from '../../application/ports/EarlyClosureNotificationRepositoryPort'
+import {
   IDENTIFIER_GENERATOR,
   type IdentifierGeneratorPort,
 } from '../../application/ports/IdentifierGeneratorPort'
+import { NOTIFICATION, type NotificationPort } from '../../application/ports/NotificationPort'
 import {
   OUTBID_NOTIFICATION,
   type OutbidNotificationPort,
@@ -77,6 +85,7 @@ import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
+import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
 import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
@@ -316,6 +325,18 @@ export const INTERNAL_CALLERS: readonly string[] = []
       inject: [APP_CONFIG, LOGGER, CLOCK],
     },
     {
+      provide: NOTIFICATION,
+      useFactory: (): NotificationPort => new UnavailableEarlyClosureNotification(),
+    },
+    {
+      provide: EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): EarlyClosureNotificationRepositoryPort =>
+        db === null
+          ? new InMemoryEarlyClosureNotificationRepository()
+          : new PostgresEarlyClosureNotificationRepository(db),
+      inject: [DATABASE],
+    },
+    {
       provide: PersistAuctionPublication,
 
       useFactory: (
@@ -461,20 +482,47 @@ export const INTERNAL_CALLERS: readonly string[] = []
       useFactory: (): BuyNowDomainService => new BuyNowDomainService(),
     },
     {
+      provide: EarlyClosureNotificationService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        notifications: EarlyClosureNotificationRepositoryPort,
+        credits: BidCreditsPort,
+        notifier: NotificationPort,
+        clock: ClockPort,
+      ): EarlyClosureNotificationService =>
+        new EarlyClosureNotificationService(repository, notifications, credits, notifier, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+        BID_CREDITS,
+        NOTIFICATION,
+        CLOCK,
+      ],
+    },
+    {
       provide: ExecuteBuyNowUseCase,
       useFactory: (
         repository: AuctionRepositoryPort,
         wallet: WalletPort,
         domainService: BuyNowDomainService,
         transactions: TransactionProcessingService,
+        earlyClosure: EarlyClosureNotificationService,
         clock: ClockPort,
       ): ExecuteBuyNowUseCase =>
-        new ExecuteBuyNowUseCase(repository, wallet, domainService, transactions, clock),
+        new ExecuteBuyNowUseCase(
+          repository,
+          wallet,
+          domainService,
+          transactions,
+          earlyClosure,
+          clock,
+        ),
       inject: [
         AUCTION_REPOSITORY,
         WALLET,
         BuyNowDomainService,
         TransactionProcessingService,
+        EarlyClosureNotificationService,
         CLOCK,
       ],
     },

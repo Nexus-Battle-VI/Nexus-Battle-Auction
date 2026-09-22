@@ -1,12 +1,25 @@
 import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
+import { InMemoryEarlyClosureNotificationRepository } from '../../src/adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
 import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
 import type { AuctionRepositoryPort } from '../../src/application/ports/AuctionRepositoryPort'
+import type {
+  BidCreditBalance,
+  BidCreditReservation,
+  BidCreditsPort,
+  ReserveBidCreditsCommand,
+} from '../../src/application/ports/BidCreditsPort'
+import type {
+  NotificationDispatch,
+  NotificationPort,
+  NotifyAuctionClosedEarlyCommand,
+} from '../../src/application/ports/NotificationPort'
 import type {
   BuyNowCreditTransfer,
   BuyNowCreditTransferCommand,
   WalletPort,
 } from '../../src/application/ports/WalletPort'
+import { EarlyClosureNotificationService } from '../../src/application/services/EarlyClosureNotificationService'
 import { TransactionProcessingService } from '../../src/application/services/TransactionProcessingService'
 import {
   ExecuteBuyNowUseCase,
@@ -15,6 +28,38 @@ import {
 import { Auction } from '../../src/domain/entities/Auction'
 import { BuyNowRuleCode, BuyNowRuleViolation } from '../../src/domain/errors/BuyNowRuleViolation'
 import { BuyNowDomainService } from '../../src/domain/services/BuyNowDomainService'
+
+/**
+ * No hay pujas en ninguno de estos escenarios: `EarlyClosureNotificationService`
+ * no tiene a nadie que liberar ni notificar, asi que estos dobles nunca se
+ * invocan de verdad. Se dejan fail-closed por consistencia con produccion.
+ */
+class UnreachableBidCredits implements BidCreditsPort {
+  getAvailableCredits(bidderId: string): Promise<BidCreditBalance> {
+    void bidderId
+    return Promise.reject(new Error('no deberia consultarse en estas pruebas'))
+  }
+
+  reserve(command: ReserveBidCreditsCommand): Promise<BidCreditReservation> {
+    void command
+    return Promise.reject(new Error('no deberia reservarse en estas pruebas'))
+  }
+
+  release(operationId: string, reservationId: string): Promise<void> {
+    void operationId
+    void reservationId
+    return Promise.reject(new Error('no deberia liberarse en estas pruebas'))
+  }
+}
+
+class UnreachableNotification implements NotificationPort {
+  notifyAuctionClosedEarly(
+    command: NotifyAuctionClosedEarlyCommand,
+  ): Promise<NotificationDispatch> {
+    void command
+    return Promise.reject(new Error('no deberia notificarse en estas pruebas'))
+  }
+}
 
 const PUBLISHED_AT = new Date('2026-09-20T12:00:00.000Z')
 const NOW = new Date('2026-09-21T15:00:00.000Z')
@@ -86,7 +131,21 @@ const fixture = () => {
   const identifiers = { generate: () => `txn-${String(++sequence)}` }
   const domainService = new BuyNowDomainService()
   const transactions = new TransactionProcessingService(repository, wallet, clock, identifiers)
-  const useCase = new ExecuteBuyNowUseCase(repository, wallet, domainService, transactions, clock)
+  const earlyClosure = new EarlyClosureNotificationService(
+    repository,
+    new InMemoryEarlyClosureNotificationRepository(),
+    new UnreachableBidCredits(),
+    new UnreachableNotification(),
+    clock,
+  )
+  const useCase = new ExecuteBuyNowUseCase(
+    repository,
+    wallet,
+    domainService,
+    transactions,
+    earlyClosure,
+    clock,
+  )
 
   return { repository, wallet, clock, useCase }
 }
