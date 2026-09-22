@@ -1,4 +1,4 @@
-import { Auction, AuctionStatus } from '../../src/domain/entities/Auction'
+import { Auction, AuctionClosingOutcome, AuctionStatus } from '../../src/domain/entities/Auction'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
 import { AuctionCurrency } from '../../src/domain/value-objects/AuctionPricing'
 
@@ -148,5 +148,126 @@ describe('Dominio de publicacion de subasta HU-62', () => {
     const second = auction.snapshot()
     expect(second.publishedAt).toEqual(publishedAt)
     expect(second.closesAt).toEqual(new Date('2026-09-22T12:00:00.000Z'))
+  })
+})
+
+describe('Dominio de finalizacion de subasta HU-65', () => {
+  const closesAt = new Date('2026-09-22T12:00:00.000Z')
+
+  function activeAuction(): Auction {
+    return Auction.publish(validInput())
+  }
+
+  function leader(
+    overrides: Partial<{
+      auctionId: string
+      bidId: string
+      bidderId: string
+      amountCredits: number
+    }> = {},
+  ) {
+    return {
+      auctionId: 'auction-62-1',
+      bidId: 'bid-63-2',
+      bidderId: 'bidder-2',
+      amountCredits: 35,
+      ...overrides,
+    }
+  }
+
+  it('rechaza finalizar 1 ms antes del vencimiento', () => {
+    expectRule(AuctionRuleCode.AuctionNotExpired, () =>
+      activeAuction().finish({
+        finishedAt: new Date(closesAt.getTime() - 1),
+        leadingBid: null,
+      }),
+    )
+  })
+
+  it.each([closesAt, new Date(closesAt.getTime() + 1)])(
+    'permite finalizar desde el vencimiento: %s',
+    (finishedAt) => {
+      const result = activeAuction().finish({ finishedAt, leadingBid: null })
+
+      expect(result.outcome).toBe(AuctionClosingOutcome.WithoutBids)
+    },
+  )
+
+  it('finaliza con el ganador y el importe de la oferta lider autoritativa', () => {
+    const result = activeAuction().finish({
+      finishedAt: closesAt,
+      leadingBid: leader(),
+    })
+
+    expect(result.snapshot()).toEqual({
+      outcome: AuctionClosingOutcome.WithWinner,
+      finishedAt: closesAt,
+      winnerId: 'bidder-2',
+      winningBidId: 'bid-63-2',
+      finalAmountCredits: 35,
+    })
+  })
+
+  it('usa exclusivamente la oferta lider vigente, aunque existan pujas anteriores mayores', () => {
+    const result = activeAuction().finish({
+      finishedAt: closesAt,
+      leadingBid: leader({ bidId: 'bid-63-actual', bidderId: 'bidder-actual', amountCredits: 40 }),
+    })
+
+    expect(result.winningBidId?.value).toBe('bid-63-actual')
+    expect(result.winnerId?.value).toBe('bidder-actual')
+    expect(result.finalAmount?.value).toBe(40)
+  })
+
+  it('finaliza sin ganador cuando no hay oferta lider', () => {
+    const result = activeAuction().finish({ finishedAt: closesAt, leadingBid: null })
+
+    expect(result.snapshot()).toEqual({
+      outcome: AuctionClosingOutcome.WithoutBids,
+      finishedAt: closesAt,
+      winnerId: null,
+      winningBidId: null,
+      finalAmountCredits: null,
+    })
+  })
+
+  it('rechaza que una puja de otra subasta se convierta en ganadora', () => {
+    expectRule(AuctionRuleCode.LeadingBidDoesNotBelongToAuction, () =>
+      activeAuction().finish({
+        finishedAt: closesAt,
+        leadingBid: leader({ auctionId: 'another-auction' }),
+      }),
+    )
+  })
+
+  it('rechaza el segundo intento de finalizar', () => {
+    const auction = activeAuction()
+    auction.finish({ finishedAt: closesAt, leadingBid: null })
+
+    expectRule(AuctionRuleCode.AuctionAlreadyFinished, () =>
+      auction.finish({ finishedAt: new Date(closesAt.getTime() + 1), leadingBid: null }),
+    )
+  })
+
+  it('representa la finalizacion en el snapshot posterior', () => {
+    const auction = activeAuction()
+    auction.finish({ finishedAt: closesAt, leadingBid: leader() })
+
+    expect(auction.snapshot()).toMatchObject({
+      status: AuctionStatus.Finished,
+      completion: {
+        outcome: AuctionClosingOutcome.WithWinner,
+        finishedAt: closesAt,
+        winnerId: 'bidder-2',
+        winningBidId: 'bid-63-2',
+        finalAmountCredits: 35,
+      },
+    })
+  })
+
+  it('rechaza una fecha externa de finalizacion invalida', () => {
+    expectRule(AuctionRuleCode.InvalidFinalizationDate, () =>
+      activeAuction().finish({ finishedAt: new Date(Number.NaN), leadingBid: null }),
+    )
   })
 })
