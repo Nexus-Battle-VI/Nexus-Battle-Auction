@@ -29,6 +29,7 @@ export interface RecordPublicationFailureCommand {
 export interface PersistBidResult {
   readonly bid: BidSnapshot
   readonly previousLeader: BidSnapshot | null
+  readonly previousLeaderReservationId: string | null
 }
 
 export type BidCreditOperationStatus =
@@ -38,6 +39,13 @@ export type BidCreditOperationStatus =
   | 'COMPENSATION_PENDING'
   | 'COMPENSATED'
   | 'COMPLETED'
+
+export type BidCreditFailureStage =
+  | 'CHECKING_BALANCE'
+  | 'RESERVING_CREDITS'
+  | 'PERSISTING_BID'
+  | 'RELEASING_NEW_RESERVATION'
+  | 'RELEASING_PREVIOUS_RESERVATION'
 
 export interface BidCreditOperationSnapshot {
   readonly operationId: string
@@ -52,6 +60,37 @@ export interface BidCreditOperationSnapshot {
   readonly updatedAt: Date
 }
 
+export interface CreateBidCreditOperationCommand {
+  readonly operationId: string
+  readonly bidId: string
+  readonly auctionId: string
+  readonly bidderId: string
+  readonly amountCredits: number
+  readonly createdAt: Date
+}
+
+export interface UpdateBidCreditOperationCommand {
+  readonly operationId: string
+  readonly status: BidCreditOperationStatus
+  readonly reservationId: string | null
+  readonly previousReservationId: string | null
+  readonly updatedAt: Date
+}
+
+export interface RecordBidCreditFailureCommand {
+  readonly operationId: string
+  readonly bidId: string
+  readonly auctionId: string
+  readonly bidderId: string
+  readonly stage: BidCreditFailureStage
+  readonly reason: string
+  readonly newReservationId: string | null
+  readonly previousReservationId: string | null
+  readonly newReservationReleased: boolean
+  readonly previousReservationReleased: boolean
+  readonly occurredAt: Date
+}
+
 export interface AuctionRepositoryPort {
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult>
 
@@ -61,7 +100,11 @@ export interface AuctionRepositoryPort {
 
   countActiveBySeller(sellerId: string): Promise<number>
 
-  persistBid(bid: Bid): Promise<PersistBidResult>
+  persistBid(
+      bid: Bid,
+      reservationId?: string,
+      operationId?: string,
+    ): Promise<PersistBidResult>
 
   findLeadingBid(auctionId: string): Promise<BidSnapshot | null>
 
