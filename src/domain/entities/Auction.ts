@@ -6,9 +6,13 @@ import {
   AuctionPricing,
   type AuctionPricingInput,
 } from '../value-objects/AuctionPricing'
+import { AuctionClosingResult, type AuctionClosingResultSnapshot } from './AuctionClosingResult'
+
+export { AuctionClosingOutcome } from './AuctionClosingResult'
 
 export enum AuctionStatus {
   Active = 'ACTIVE',
+  Finished = 'FINISHED',
 }
 
 export const MAX_ACTIVE_AUCTIONS_PER_SELLER = 10
@@ -44,6 +48,19 @@ export interface AuctionSnapshot {
   status: AuctionStatus
   publishedAt: Date
   closesAt: Date
+  completion?: AuctionClosingResultSnapshot
+}
+
+export interface LeadingBidForClosing {
+  readonly auctionId: string
+  readonly bidId: string
+  readonly bidderId: string
+  readonly amountCredits: number
+}
+
+export interface FinishAuctionInput {
+  readonly finishedAt: Date
+  readonly leadingBid: LeadingBidForClosing | null
 }
 
 export class Auction {
@@ -53,10 +70,15 @@ export class Auction {
     readonly productId: ProductId,
     readonly duration: AuctionDuration,
     readonly pricing: AuctionPricing,
-    readonly status: AuctionStatus,
+    private currentStatus: AuctionStatus,
     readonly publishedAt: Date,
     readonly closesAt: Date,
+    private completion: AuctionClosingResult | null = null,
   ) {}
+
+  get status(): AuctionStatus {
+    return this.currentStatus
+  }
 
   static publish(input: PublishAuctionInput): Auction {
     Auction.assertPublicationDate(input.publishedAt)
@@ -82,7 +104,7 @@ export class Auction {
   }
 
   snapshot(): AuctionSnapshot {
-    return {
+    const snapshot: AuctionSnapshot = {
       id: this.id.value,
       sellerId: this.sellerId.value,
       productId: this.productId.value,
@@ -90,10 +112,54 @@ export class Auction {
       publicationFeeCredits: this.duration.publicationFee.value,
       minimumBidCredits: this.pricing.minimumBid.value,
       buyNowCredits: this.pricing.buyNow?.value ?? null,
-      status: this.status,
+      status: this.currentStatus,
       publishedAt: new Date(this.publishedAt),
       closesAt: new Date(this.closesAt),
     }
+
+    return this.completion === null
+      ? snapshot
+      : { ...snapshot, completion: this.completion.snapshot() }
+  }
+
+  finish(input: FinishAuctionInput): AuctionClosingResult {
+    Auction.assertFinalizationDate(input.finishedAt)
+
+    if (this.currentStatus === AuctionStatus.Finished) {
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.AuctionAlreadyFinished,
+        'Una subasta finalizada no puede finalizarse nuevamente.',
+      )
+    }
+
+    if (input.finishedAt.getTime() < this.closesAt.getTime()) {
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.AuctionNotExpired,
+        'La subasta solo puede finalizar desde su fecha de vencimiento.',
+      )
+    }
+
+    if (input.leadingBid !== null && input.leadingBid.auctionId !== this.id.value) {
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.LeadingBidDoesNotBelongToAuction,
+        'La oferta lider debe pertenecer a la subasta que se finaliza.',
+      )
+    }
+
+    const completion =
+      input.leadingBid === null
+        ? AuctionClosingResult.withoutBids(input.finishedAt)
+        : AuctionClosingResult.withWinner({
+            finishedAt: input.finishedAt,
+            bidderId: input.leadingBid.bidderId,
+            bidId: input.leadingBid.bidId,
+            amountCredits: input.leadingBid.amountCredits,
+          })
+
+    this.currentStatus = AuctionStatus.Finished
+    this.completion = completion
+
+    return completion
   }
 
   private static assertPublicationDate(publishedAt: Date): void {
@@ -101,6 +167,15 @@ export class Auction {
       throw new AuctionRuleViolation(
         AuctionRuleCode.InvalidPublicationDate,
         'La fecha de publicacion debe ser valida.',
+      )
+    }
+  }
+
+  private static assertFinalizationDate(finishedAt: Date): void {
+    if (Number.isNaN(finishedAt.getTime())) {
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.InvalidFinalizationDate,
+        'La fecha de finalizacion debe ser valida.',
       )
     }
   }

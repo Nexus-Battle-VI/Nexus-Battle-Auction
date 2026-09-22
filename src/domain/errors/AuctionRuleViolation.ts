@@ -12,6 +12,10 @@ export enum AuctionRuleCode {
   SellerSanctioned = 'SELLER_SANCTIONED',
   ActiveAuctionLimitReached = 'ACTIVE_AUCTION_LIMIT_REACHED',
   InvalidPublicationDate = 'INVALID_PUBLICATION_DATE',
+  InvalidFinalizationDate = 'INVALID_FINALIZATION_DATE',
+  AuctionNotExpired = 'AUCTION_NOT_EXPIRED',
+  AuctionAlreadyFinished = 'AUCTION_ALREADY_FINISHED',
+  LeadingBidDoesNotBelongToAuction = 'LEADING_BID_DOES_NOT_BELONG_TO_AUCTION',
 }
 
 export class AuctionRuleViolation extends DomainError {
