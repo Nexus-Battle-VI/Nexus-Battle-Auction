@@ -1,3 +1,4 @@
+import type { BidCreditsPort } from '../../../application/ports/BidCreditsPort'
 import { ExternalDependencyUnavailableError } from '../../../application/errors/ExternalDependencyError'
 import type {
   CatalogProductPolicy,
@@ -64,5 +65,30 @@ export class UnavailableSellerSanctions implements SellerSanctionPort {
   hasActiveSanctions(sellerId: string): Promise<boolean> {
     void sellerId
     return Promise.reject(new ExternalDependencyUnavailableError('account'))
+  }
+}
+
+export class UnavailableBidCredits implements BidCreditsPort {
+  getAvailableCredits(bidderId: string): Promise<{ readonly availableCredits: number }> {
+    void bidderId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  reserve(command: {
+    readonly operationId: string
+    readonly bidderId: string
+    readonly bidId: string
+    readonly auctionId: string
+    readonly amount: number
+    readonly expiresAt: Date
+  }): Promise<{ readonly reservationId: string }> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  release(operationId: string, reservationId: string): Promise<void> {
+    void operationId
+    void reservationId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
   }
 }
