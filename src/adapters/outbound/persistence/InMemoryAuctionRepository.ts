@@ -7,14 +7,10 @@ import {
 } from '../../../application/errors/AuctionPersistenceError'
 import type {
   AuctionRepositoryPort,
-  BidCreditOperationSnapshot,
-  CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
   PersistBidResult,
-  RecordBidCreditFailureCommand,
   RecordPublicationFailureCommand,
-  UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
 import {
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
@@ -25,11 +21,6 @@ import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 interface OperationRecord {
   readonly hash: string
   readonly auctionId: string
-}
-
-interface StoredBid {
-  readonly snapshot: BidSnapshot
-  readonly creditReservationId: string | null
 }
 
 const hashOf = (command: PersistAuctionPublicationCommand): string => {
@@ -55,14 +46,6 @@ const cloneBid = (bid: BidSnapshot): BidSnapshot => ({
   placedAt: new Date(bid.placedAt),
 })
 
-const cloneBidCreditOperation = (
-  operation: BidCreditOperationSnapshot,
-): BidCreditOperationSnapshot => ({
-  ...operation,
-  createdAt: new Date(operation.createdAt),
-  updatedAt: new Date(operation.updatedAt),
-})
-
 export class InMemoryAuctionRepository implements AuctionRepositoryPort {
   private readonly auctions = new Map<string, AuctionSnapshot>()
 
@@ -70,11 +53,7 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
 
   private readonly failures = new Map<string, RecordPublicationFailureCommand>()
 
-  private readonly bidCreditFailures = new Map<string, RecordBidCreditFailureCommand>()
-
-  private readonly bidCreditOperations = new Map<string, BidCreditOperationSnapshot>()
-
-  private readonly bids = new Map<string, StoredBid>()
+  private readonly bids = new Map<string, BidSnapshot>()
 
   private readonly leadingBidByAuction = new Map<string, string>()
 
@@ -125,83 +104,6 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     return Promise.resolve()
   }
 
-  recordBidCreditFailure(command: RecordBidCreditFailureCommand): Promise<void> {
-    this.bidCreditFailures.set(command.operationId, command)
-
-    return Promise.resolve()
-  }
-
-  createBidCreditOperation(command: CreateBidCreditOperationCommand): Promise<void> {
-    const previous = this.bidCreditOperations.get(command.operationId)
-
-    if (previous !== undefined) {
-      const sameIntent =
-        previous.bidId === command.bidId &&
-        previous.auctionId === command.auctionId &&
-        previous.bidderId === command.bidderId &&
-        previous.amountCredits === command.amountCredits
-
-      if (!sameIntent) {
-        return Promise.reject(new IdempotencyConflictError())
-      }
-
-      return Promise.resolve()
-    }
-
-    const operationForSameBid = [...this.bidCreditOperations.values()].find(
-      (operation) => operation.bidId === command.bidId,
-    )
-
-    if (operationForSameBid !== undefined) {
-      return Promise.reject(new IdempotencyConflictError())
-    }
-
-    const createdAt = new Date(command.createdAt)
-
-    this.bidCreditOperations.set(command.operationId, {
-      operationId: command.operationId,
-      bidId: command.bidId,
-      auctionId: command.auctionId,
-      bidderId: command.bidderId,
-      amountCredits: command.amountCredits,
-      status: 'PENDING_RESERVATION',
-      reservationId: null,
-      previousReservationId: null,
-      createdAt,
-      updatedAt: new Date(createdAt),
-    })
-
-    return Promise.resolve()
-  }
-
-  updateBidCreditOperation(command: UpdateBidCreditOperationCommand): Promise<void> {
-    const previous = this.bidCreditOperations.get(command.operationId)
-
-    if (previous === undefined) {
-      return Promise.reject(new Error(`La operacion de creditos ${command.operationId} no existe.`))
-    }
-
-    this.bidCreditOperations.set(command.operationId, {
-      ...previous,
-      status: command.status,
-      reservationId: command.reservationId,
-      previousReservationId: command.previousReservationId,
-      updatedAt: new Date(command.updatedAt),
-    })
-
-    return Promise.resolve()
-  }
-
-  findBidCreditOperation(operationId: string): Promise<BidCreditOperationSnapshot | null> {
-    const operation = this.bidCreditOperations.get(operationId)
-
-    if (operation === undefined) {
-      return Promise.resolve(null)
-    }
-
-    return Promise.resolve(cloneBidCreditOperation(operation))
-  }
-
   findById(auctionId: string): Promise<AuctionSnapshot | null> {
     return Promise.resolve(this.auctions.get(auctionId) ?? null)
   }
@@ -210,11 +112,7 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     return Promise.resolve(this.count(sellerId))
   }
 
-  persistBid(
-    bid: Bid,
-    creditReservationId: string | null = null,
-    operationId: string | null = null,
-  ): Promise<PersistBidResult> {
+  persistBid(bid: Bid): Promise<PersistBidResult> {
     const snapshot = bid.snapshot()
 
     if (!this.auctions.has(snapshot.auctionId)) {
@@ -227,58 +125,18 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
 
     const previousLeaderId = this.leadingBidByAuction.get(snapshot.auctionId)
 
-    const previousStored =
+    const previousLeader =
       previousLeaderId === undefined ? null : (this.bids.get(previousLeaderId) ?? null)
 
-    const previousLeader = previousStored === null ? null : cloneBid(previousStored.snapshot)
+    const stored = cloneBid(snapshot)
 
-    const previousLeaderReservationId =
-      previousStored === null ? null : previousStored.creditReservationId
+    this.bids.set(stored.id, stored)
 
-    if (operationId !== null) {
-      const operation = this.bidCreditOperations.get(operationId)
-
-      if (operation === undefined) {
-        return Promise.reject(new Error(`La operacion de creditos ${operationId} no existe.`))
-      }
-
-      if (
-        operation.bidId !== snapshot.id ||
-        operation.auctionId !== snapshot.auctionId ||
-        operation.bidderId !== snapshot.bidderId ||
-        operation.amountCredits !== snapshot.amountCredits
-      ) {
-        return Promise.reject(new IdempotencyConflictError())
-      }
-    }
-
-    const stored: StoredBid = {
-      snapshot: cloneBid(snapshot),
-      creditReservationId,
-    }
-
-    this.bids.set(snapshot.id, stored)
-
-    this.leadingBidByAuction.set(snapshot.auctionId, snapshot.id)
-
-    if (operationId !== null) {
-      const operation = this.bidCreditOperations.get(operationId)
-
-      if (operation !== undefined) {
-        this.bidCreditOperations.set(operationId, {
-          ...operation,
-          status: 'BID_PERSISTED',
-          reservationId: creditReservationId,
-          previousReservationId: previousLeaderReservationId,
-          updatedAt: new Date(snapshot.placedAt),
-        })
-      }
-    }
+    this.leadingBidByAuction.set(stored.auctionId, stored.id)
 
     return Promise.resolve({
-      bid: cloneBid(stored.snapshot),
-      previousLeader,
-      previousLeaderReservationId,
+      bid: cloneBid(stored),
+      previousLeader: previousLeader === null ? null : cloneBid(previousLeader),
     })
   }
 
@@ -289,18 +147,17 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
       return Promise.resolve(null)
     }
 
-    const stored = this.bids.get(bidId)
+    const bid = this.bids.get(bidId)
 
-    if (stored === undefined) {
+    if (bid === undefined) {
       return Promise.resolve(null)
     }
 
-    return Promise.resolve(cloneBid(stored.snapshot))
+    return Promise.resolve(cloneBid(bid))
   }
 
   findBidHistory(auctionId: string): Promise<readonly BidSnapshot[]> {
     const history = [...this.bids.values()]
-      .map((stored) => stored.snapshot)
       .filter((bid) => bid.auctionId === auctionId)
       .sort((left, right) => left.placedAt.getTime() - right.placedAt.getTime())
       .map(cloneBid)
