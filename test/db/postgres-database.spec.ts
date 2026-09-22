@@ -1797,6 +1797,10 @@ describe('Persistencia PostgreSQL', () => {
           aggregate_id: 'auction-buy-now-1',
           published_at: null,
         })
+        expect(outbox[0]?.payload).toMatchObject({
+          auctionId: 'auction-buy-now-1',
+          productId: 'product-auction-buy-now-1',
+        })
       })
 
       it('reintentar el mismo operationId devuelve la misma confirmacion sin duplicar efectos', async () => {
