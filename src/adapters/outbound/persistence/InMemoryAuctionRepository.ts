@@ -4,6 +4,7 @@ import {
   ActiveAuctionLimitExceededError,
   BidAlreadyExistsError,
   IdempotencyConflictError,
+  PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
 import type {
   AuctionRepositoryPort,
@@ -20,6 +21,7 @@ import {
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
+import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 
 interface OperationRecord {
@@ -63,6 +65,13 @@ const cloneBidCreditOperation = (
   updatedAt: new Date(operation.updatedAt),
 })
 
+const cloneAutoBidConfig = (config: AutoBidConfigSnapshot): AutoBidConfigSnapshot => ({
+  ...config,
+  configuredAt: new Date(config.configuredAt),
+})
+
+const autoBidKey = (auctionId: string, bidderId: string): string => `${auctionId}:${bidderId}`
+
 export class InMemoryAuctionRepository implements AuctionRepositoryPort {
   private readonly auctions = new Map<string, AuctionSnapshot>()
 
@@ -77,6 +86,8 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
   private readonly bids = new Map<string, StoredBid>()
 
   private readonly leadingBidByAuction = new Map<string, string>()
+
+  private readonly autoBidConfigs = new Map<string, AutoBidConfigSnapshot>()
 
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     const hash = hashOf(command)
@@ -332,6 +343,40 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
       .filter((stored): stored is StoredBid => stored?.snapshot.bidderId === bidderId).length
 
     return Promise.resolve(activeBidCount)
+  }
+
+  saveAutoBidConfig(config: AutoBidConfig): Promise<AutoBidConfigSnapshot> {
+    const snapshot = config.snapshot()
+
+    if (!this.auctions.has(snapshot.auctionId)) {
+      return Promise.reject(new PersistedAuctionNotFoundError(snapshot.auctionId))
+    }
+
+    const stored = cloneAutoBidConfig(snapshot)
+
+    this.autoBidConfigs.set(autoBidKey(snapshot.auctionId, snapshot.bidderId), stored)
+
+    return Promise.resolve(cloneAutoBidConfig(stored))
+  }
+
+  findAutoBidConfig(auctionId: string, bidderId: string): Promise<AutoBidConfigSnapshot | null> {
+    const stored = this.autoBidConfigs.get(autoBidKey(auctionId, bidderId))
+
+    return Promise.resolve(stored === undefined ? null : cloneAutoBidConfig(stored))
+  }
+
+  findActiveAutoBidsForAuction(
+    auctionId: string,
+    excludeBidderId: string,
+  ): Promise<readonly AutoBidConfigSnapshot[]> {
+    const configs = [...this.autoBidConfigs.values()]
+      .filter(
+        (config) =>
+          config.auctionId === auctionId && config.isActive && config.bidderId !== excludeBidderId,
+      )
+      .map(cloneAutoBidConfig)
+
+    return Promise.resolve(configs)
   }
 
   private count(sellerId: string): number {
