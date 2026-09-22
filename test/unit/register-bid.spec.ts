@@ -7,6 +7,10 @@ import type {
   BidCreditOperationSnapshot,
   PersistBidResult,
 } from '../../src/application/ports/AuctionRepositoryPort'
+import type {
+  OutbidNotification,
+  OutbidNotificationPort,
+} from '../../src/application/ports/OutbidNotificationPort'
 import type { PersistBidWithCredits } from '../../src/application/use-cases/PersistBidWithCredits'
 import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { AuctionStatus, type AuctionSnapshot } from '../../src/domain/entities/Auction'
@@ -79,6 +83,22 @@ const dependencies = () => {
     }),
   } as unknown as jest.Mocked<PersistBidWithCredits>
 
+  /*
+   * El parametro explicito es importante.
+   *
+   * OutbidNotificationPort.publish recibe exactamente un
+   * OutbidNotification. Sin este parametro TypeScript inferiria
+   * jest.Mock<Promise<void>, []> y perderia compatibilidad con
+   * el puerto real.
+   */
+  const notifications: jest.Mocked<OutbidNotificationPort> = {
+    publish: jest.fn((notification: OutbidNotification): Promise<void> => {
+      void notification
+
+      return Promise.resolve()
+    }),
+  }
+
   const clock = {
     now: (): Date => new Date(now),
   }
@@ -87,17 +107,18 @@ const dependencies = () => {
     generate: jest.fn(() => 'bid-generated'),
   }
 
-  const useCase = new RegisterBid(repository, persistence, clock, identifiers)
+  const useCase = new RegisterBid(repository, persistence, clock, identifiers, notifications)
 
   return {
     repository,
     persistence,
+    notifications,
     identifiers,
     useCase,
   }
 }
 
-describe('RegisterBid HU-63.4', () => {
+describe('RegisterBid HU-63.4 / HU-63.5', () => {
   it('construye la puja con la identidad autenticada y delega la persistencia con creditos', async () => {
     const { repository, persistence, identifiers, useCase } = dependencies()
 
@@ -147,8 +168,49 @@ describe('RegisterBid HU-63.4', () => {
     })
   })
 
+  it('notifica al lider desplazado con usuario, subasta y puja correctos', async () => {
+    const { persistence, notifications, useCase } = dependencies()
+
+    await expect(
+      useCase.execute({
+        operationId: 'operation-outbid',
+        auctionId: auction.id,
+        bidderId: 'bidder-2',
+        amountCredits: 30,
+      }),
+    ).resolves.toMatchObject({
+      id: 'bid-generated',
+      bidderId: 'bidder-2',
+      amountCredits: 30,
+    })
+
+    expect(notifications.publish).toHaveBeenCalledTimes(1)
+
+    expect(notifications.publish).toHaveBeenCalledWith({
+      notificationId: 'operation-outbid:outbid',
+      operationId: 'operation-outbid',
+      recipientPlayerId: 'bidder-leading',
+      auctionId: auction.id,
+      outbidBidId: 'bid-leading',
+      winningBidId: 'bid-generated',
+      winningBidderId: 'bidder-2',
+      winningAmountCredits: 30,
+      occurredAt: now,
+    })
+
+    const persistenceOrder = persistence.execute.mock.invocationCallOrder[0]
+
+    const notificationOrder = notifications.publish.mock.invocationCallOrder[0]
+
+    expect(persistenceOrder).toBeDefined()
+
+    expect(notificationOrder).toBeDefined()
+
+    expect(persistenceOrder).toBeLessThan(notificationOrder ?? Number.MAX_SAFE_INTEGER)
+  })
+
   it('rechaza una subasta inexistente antes de crear o persistir la puja', async () => {
-    const { repository, persistence, identifiers, useCase } = dependencies()
+    const { repository, persistence, notifications, identifiers, useCase } = dependencies()
 
     repository.findById.mockResolvedValue(null)
 
@@ -170,10 +232,12 @@ describe('RegisterBid HU-63.4', () => {
     expect(repository.countActiveBidsByBidder).not.toHaveBeenCalled()
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza una puja cuando la subasta ya alcanzo su fecha de cierre', async () => {
-    const { repository, persistence, useCase } = dependencies()
+  it('rechaza una puja cuando la subasta ya alcanzo su fecha de cierre sin notificar', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
 
     repository.findById.mockResolvedValue({
       ...auction,
@@ -192,10 +256,12 @@ describe('RegisterBid HU-63.4', () => {
     })
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza que el vendedor puje en su propia subasta', async () => {
-    const { persistence, useCase } = dependencies()
+  it('rechaza que el vendedor puje en su propia subasta sin notificar', async () => {
+    const { persistence, notifications, useCase } = dependencies()
 
     await expect(
       useCase.execute({
@@ -209,10 +275,12 @@ describe('RegisterBid HU-63.4', () => {
     })
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza una oferta que no supera la oferta actual', async () => {
-    const { persistence, useCase } = dependencies()
+  it('rechaza una oferta que no supera la oferta actual sin notificar', async () => {
+    const { persistence, notifications, useCase } = dependencies()
 
     await expect(
       useCase.execute({
@@ -226,10 +294,12 @@ describe('RegisterBid HU-63.4', () => {
     })
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza una oferta que no cumple el incremento minimo', async () => {
-    const { persistence, useCase } = dependencies()
+  it('rechaza una oferta que no cumple el incremento minimo sin notificar', async () => {
+    const { persistence, notifications, useCase } = dependencies()
 
     await expect(
       useCase.execute({
@@ -243,10 +313,12 @@ describe('RegisterBid HU-63.4', () => {
     })
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza una segunda puja durante el cooldown del jugador', async () => {
-    const { repository, persistence, useCase } = dependencies()
+  it('rechaza una segunda puja durante el cooldown del jugador sin notificar', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
 
     repository.findLastBidByBidder.mockResolvedValue({
       id: 'bid-previous',
@@ -268,10 +340,12 @@ describe('RegisterBid HU-63.4', () => {
     })
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza al jugador cuando ya alcanza el limite de 50 pujas activas', async () => {
-    const { repository, persistence, useCase } = dependencies()
+  it('rechaza al jugador cuando alcanza el limite de 50 pujas activas sin notificar', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
 
     repository.countActiveBidsByBidder.mockResolvedValue(50)
 
@@ -287,10 +361,12 @@ describe('RegisterBid HU-63.4', () => {
     })
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('permite la primera puja cuando no existe lider', async () => {
-    const { repository, persistence, useCase } = dependencies()
+  it('permite la primera puja y no notifica porque no existe lider anterior', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
 
     repository.findLeadingBid.mockResolvedValue(null)
 
@@ -318,10 +394,12 @@ describe('RegisterBid HU-63.4', () => {
     })
 
     expect(persistence.execute).toHaveBeenCalledTimes(1)
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('propaga los errores de creditos sin convertirlos dentro del caso de uso', async () => {
-    const { persistence, useCase } = dependencies()
+  it('un fallo de creditos no genera notificacion', async () => {
+    const { persistence, notifications, useCase } = dependencies()
 
     const creditError = new Error('credit service unavailable')
 
@@ -335,10 +413,34 @@ describe('RegisterBid HU-63.4', () => {
         amountCredits: 30,
       }),
     ).rejects.toBe(creditError)
+
+    expect(notifications.publish).not.toHaveBeenCalled()
+  })
+
+  it('un fallo temporal de Notifications no convierte una puja confirmada en fallida', async () => {
+    const { notifications, useCase } = dependencies()
+
+    notifications.publish.mockRejectedValue(new Error('notifications unavailable'))
+
+    await expect(
+      useCase.execute({
+        operationId: 'operation-notification-error',
+        auctionId: auction.id,
+        bidderId: 'bidder-2',
+        amountCredits: 30,
+      }),
+    ).resolves.toMatchObject({
+      id: 'bid-generated',
+      auctionId: auction.id,
+      bidderId: 'bidder-2',
+      amountCredits: 30,
+    })
+
+    expect(notifications.publish).toHaveBeenCalledTimes(1)
   })
 
   it('las violaciones funcionales siguen siendo errores del dominio', async () => {
-    const { useCase } = dependencies()
+    const { notifications, useCase } = dependencies()
 
     try {
       await useCase.execute({
@@ -352,6 +454,8 @@ describe('RegisterBid HU-63.4', () => {
     } catch (error: unknown) {
       expect(error).toBeInstanceOf(BidRuleViolation)
     }
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
   it('reutiliza el bidId original cuando se reintenta el mismo Idempotency-Key', async () => {
@@ -396,19 +500,52 @@ describe('RegisterBid HU-63.4', () => {
       bid: expect.anything(),
       expiresAt: auction.closesAt,
     })
-
-    const retriedCommand = persistence.execute.mock.calls[0]?.[0]
-
-    expect(retriedCommand?.bid.snapshot()).toMatchObject({
-      id: 'bid-original',
-      auctionId: auction.id,
-      bidderId: 'bidder-2',
-      amountCredits: 30,
-    })
   })
 
-  it('rechaza reutilizar Idempotency-Key con otra intencion', async () => {
-    const { repository, persistence, identifiers, useCase } = dependencies()
+  it('un reintento conserva el mismo identificador idempotente de notificacion', async () => {
+    const { repository, persistence, notifications, identifiers, useCase } = dependencies()
+
+    repository.findBidCreditOperation.mockResolvedValue(existingOperation())
+
+    persistence.execute.mockImplementation(({ bid }) =>
+      Promise.resolve({
+        bid: bid.snapshot(),
+        previousLeader: leadingBid,
+        previousLeaderReservationId: 'reservation-leading',
+      }),
+    )
+
+    await expect(
+      useCase.execute({
+        operationId: 'operation-existing',
+        auctionId: auction.id,
+        bidderId: 'bidder-2',
+        amountCredits: 30,
+      }),
+    ).resolves.toMatchObject({
+      id: 'bid-original',
+    })
+
+    expect(identifiers.generate).not.toHaveBeenCalled()
+
+    expect(notifications.publish).toHaveBeenCalledTimes(1)
+
+    expect(notifications.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        notificationId: 'operation-existing:outbid',
+        operationId: 'operation-existing',
+        recipientPlayerId: 'bidder-leading',
+        auctionId: auction.id,
+        outbidBidId: 'bid-leading',
+        winningBidId: 'bid-original',
+        winningBidderId: 'bidder-2',
+        winningAmountCredits: 30,
+      }),
+    )
+  })
+
+  it('rechaza reutilizar Idempotency-Key con otra intencion sin notificar', async () => {
+    const { repository, persistence, identifiers, notifications, useCase } = dependencies()
 
     repository.findBidCreditOperation.mockResolvedValue(existingOperation())
 
@@ -426,10 +563,12 @@ describe('RegisterBid HU-63.4', () => {
     expect(repository.findById).not.toHaveBeenCalled()
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza reutilizar Idempotency-Key para otra subasta', async () => {
-    const { repository, persistence, useCase } = dependencies()
+  it('rechaza reutilizar Idempotency-Key para otra subasta sin notificar', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
 
     repository.findBidCreditOperation.mockResolvedValue(existingOperation())
 
@@ -443,10 +582,12 @@ describe('RegisterBid HU-63.4', () => {
     ).rejects.toBeInstanceOf(IdempotencyConflictError)
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('rechaza reutilizar Idempotency-Key para otro jugador', async () => {
-    const { repository, persistence, useCase } = dependencies()
+  it('rechaza reutilizar Idempotency-Key para otro jugador sin notificar', async () => {
+    const { repository, persistence, notifications, useCase } = dependencies()
 
     repository.findBidCreditOperation.mockResolvedValue(existingOperation())
 
@@ -460,9 +601,11 @@ describe('RegisterBid HU-63.4', () => {
     ).rejects.toBeInstanceOf(IdempotencyConflictError)
 
     expect(persistence.execute).not.toHaveBeenCalled()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 
-  it('reanuda una operacion durable sin volver a evaluar cooldown ni limite de pujas', async () => {
+  it('reanuda una operacion durable sin volver a evaluar cooldown ni limite', async () => {
     const { repository, persistence, identifiers, useCase } = dependencies()
 
     repository.findBidCreditOperation.mockResolvedValue(
@@ -501,5 +644,31 @@ describe('RegisterBid HU-63.4', () => {
     expect(repository.countActiveBidsByBidder).not.toHaveBeenCalled()
 
     expect(persistence.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('no notifica al mismo jugador si el lider anterior pertenece al mismo postor', async () => {
+    const { persistence, notifications, useCase } = dependencies()
+
+    persistence.execute.mockImplementation(({ bid }) =>
+      Promise.resolve({
+        bid: bid.snapshot(),
+        previousLeader: {
+          ...leadingBid,
+          bidderId: 'bidder-2',
+        },
+        previousLeaderReservationId: 'reservation-leading',
+      }),
+    )
+
+    await expect(
+      useCase.execute({
+        operationId: 'operation-self-outbid',
+        auctionId: auction.id,
+        bidderId: 'bidder-2',
+        amountCredits: 30,
+      }),
+    ).resolves.toBeDefined()
+
+    expect(notifications.publish).not.toHaveBeenCalled()
   })
 })
