@@ -38,6 +38,35 @@ export interface AuctionBidTable {
   amount_credits: number
   placed_at: Timestamp
   is_leader: boolean
+  credit_reservation_id: string | null
+}
+
+export interface AuctionBidCreditOperationTable {
+  operation_id: string
+  bid_id: string
+  auction_id: string
+  bidder_id: string
+  amount_credits: number
+  status: string
+  reservation_id: string | null
+  previous_reservation_id: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+export interface AuctionBidCreditFailureTable {
+  id: Generated<number>
+  operation_id: string
+  bid_id: string
+  auction_id: string
+  bidder_id: string
+  stage: string
+  reason: string
+  new_reservation_id: string | null
+  previous_reservation_id: string | null
+  new_reservation_released: boolean
+  previous_reservation_released: boolean
+  occurred_at: Timestamp
 }
 
 export interface AuctionPublicationOperationTable {
@@ -85,6 +114,8 @@ export interface Database {
   auction_bids: AuctionBidTable
   auction_publication_operations: AuctionPublicationOperationTable
   auction_publication_failures: AuctionPublicationFailureTable
+  auction_bid_credit_operations: AuctionBidCreditOperationTable
+  auction_bid_credit_failures: AuctionBidCreditFailureTable
   auction_audit_log: AuctionAuditLogTable
   outbox_events: OutboxEventTable
 }

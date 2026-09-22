@@ -113,6 +113,22 @@ export interface AuctionRepositoryPort {
   findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null>
 
   countActiveBidsByBidder(bidderId: string): Promise<number>
+
+  createBidCreditOperation(
+    command: CreateBidCreditOperationCommand,
+  ): Promise<void>
+
+  updateBidCreditOperation(
+    command: UpdateBidCreditOperationCommand,
+  ): Promise<void>
+
+  findBidCreditOperation(
+    operationId: string,
+  ): Promise<BidCreditOperationSnapshot | null>
+
+  recordBidCreditFailure(
+    command: RecordBidCreditFailureCommand,
+  ): Promise<void>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')
