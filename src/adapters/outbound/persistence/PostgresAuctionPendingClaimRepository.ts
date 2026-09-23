@@ -4,7 +4,7 @@ import type {
   AuctionPendingClaimSnapshot,
   CreateAuctionPendingClaimInput,
 } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
-import { AuctionPendingClaim } from '../../../domain/entities/AuctionPendingClaim'
+import { AuctionPendingClaim, CLAIM_PERIOD_MS } from '../../../domain/entities/AuctionPendingClaim'
 import {
   AuctionPendingClaimRuleCode,
   AuctionPendingClaimRuleViolation,
@@ -101,5 +101,69 @@ export class PostgresAuctionPendingClaimRepository implements AuctionPendingClai
         'El producto ya fue reclamado.',
       )
     return claimed
+  }
+  async findExpirablePending(
+    now: Date,
+    limit: number,
+  ): Promise<readonly AuctionPendingClaimSnapshot[]> {
+    const cutoff = new Date(now.getTime() - CLAIM_PERIOD_MS)
+    return (
+      await this.db
+        .selectFrom('auction_pending_claims')
+        .selectAll()
+        .where('claim_status', '=', 'PENDING')
+        .where('settled_at', '<', cutoff)
+        .orderBy('settled_at')
+        .orderBy('auction_id')
+        .limit(limit)
+        .execute()
+    ).map(toSnapshot)
+  }
+  async markExpired(auctionId: string, expiredAt: Date): Promise<AuctionPendingClaimSnapshot> {
+    const current = await this.findByAuctionId(auctionId)
+    if (current === null) throw new Error(`No existe pending-claim para ${auctionId}.`)
+    // Aplica la regla de dominio (estado + plazo vencido) antes de escribir;
+    // el guard `claim_status = 'PENDING'` de abajo cubre la carrera entre esta
+    // lectura y el UPDATE.
+    const expired = AuctionPendingClaim.restore(current).expire(expiredAt)
+    return this.db.transaction().execute(async (transaction) => {
+      const result = await transaction
+        .updateTable('auction_pending_claims')
+        .set({
+          claim_status: expired.claimStatus,
+          claimed_at: expired.claimedAt,
+          updated_at: expired.updatedAt,
+        })
+        .where('auction_id', '=', auctionId)
+        .where('claim_status', '=', 'PENDING')
+        .executeTakeFirst()
+      if (result.numUpdatedRows === 0n)
+        throw new Error(
+          `El pending-claim ${auctionId} ya no admite expiracion (cambio de estado concurrentemente).`,
+        )
+      // Trazabilidad del vencimiento (HU-69.6): mismo patron de auditoria que
+      // ya usa completeSettlement para AUCTION_SETTLED, sin outbox_events
+      // porque el issue no pide publicar un evento externo, solo historial.
+      await transaction
+        .insertInto('auction_audit_log')
+        .values({
+          auction_id: auctionId,
+          operation_id: `auction:${auctionId}:pending-claim:expire`,
+          action: 'AUCTION_PENDING_CLAIM_EXPIRED',
+          actor_id: expired.winnerId,
+          occurred_at: expiredAt,
+          details: {
+            auctionId,
+            winnerId: expired.winnerId,
+            productId: expired.productId,
+            winningBidId: expired.winningBidId,
+            finalAmountCredits: expired.finalAmountCredits,
+            settledAt: expired.settledAt.toISOString(),
+            claimDeadline: expired.claimDeadline.toISOString(),
+          },
+        })
+        .execute()
+      return expired
+    })
   }
 }

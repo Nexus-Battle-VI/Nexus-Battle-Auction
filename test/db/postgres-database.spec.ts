@@ -1836,6 +1836,99 @@ describe('Persistencia PostgreSQL', () => {
           .execute(),
       ).rejects.toThrow()
     })
+
+    describe('findExpirablePending / markExpired (HU-69.6)', () => {
+      it('el limite exacto del dia 7 no expira; 1 ms despues si, y registra auditoria', async () => {
+        const boundaryId = 'claim-expire-boundary'
+        const pastId = 'claim-expire-past'
+        await persistAuctionForClaim(boundaryId)
+        await persistAuctionForClaim(pastId)
+        const repository = new PostgresAuctionPendingClaimRepository(db)
+        const settledAt = new Date('2026-01-03T00:00:00.000Z')
+        await repository.createIfAbsent({ ...input(boundaryId), settledAt, createdAt: settledAt })
+        await repository.createIfAbsent({ ...input(pastId), settledAt, createdAt: settledAt })
+        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000
+        const deadline = new Date(settledAt.getTime() + sevenDaysMs)
+        const pastDeadline = new Date(deadline.getTime() + 1)
+
+        const atDeadline = await repository.findExpirablePending(deadline, 1_000)
+        expect(atDeadline.map((c) => c.auctionId)).not.toEqual(
+          expect.arrayContaining([boundaryId, pastId]),
+        )
+        // boundaryId y pastId comparten settledAt: en pastDeadline (1ms despues
+        // del limite) ambos ya vencieron su propio claimDeadline y son
+        // candidatos legitimos. La distincion real "limite exacto vs vencido"
+        // se prueba comparando el resultado en `deadline` (ninguno) contra
+        // `pastDeadline` (ambos), y con markExpired(boundaryId, deadline) abajo.
+        const candidates = await repository.findExpirablePending(pastDeadline, 1_000)
+        expect(candidates.map((c) => c.auctionId)).toEqual(
+          expect.arrayContaining([boundaryId, pastId]),
+        )
+
+        await expect(repository.markExpired(boundaryId, deadline)).rejects.toThrow()
+        await expect(repository.markExpired(pastId, pastDeadline)).resolves.toMatchObject({
+          claimStatus: 'EXPIRED',
+          claimedAt: null,
+        })
+        await expect(repository.findByAuctionId(boundaryId)).resolves.toMatchObject({
+          claimStatus: 'PENDING',
+        })
+
+        const audit = await db
+          .selectFrom('auction_audit_log')
+          .selectAll()
+          .where('auction_id', '=', pastId)
+          .where('action', '=', 'AUCTION_PENDING_CLAIM_EXPIRED')
+          .executeTakeFirst()
+        expect(audit).toMatchObject({ actor_id: 'winner' })
+      })
+
+      it('no permite expirar un pending-claim ya CLAIMED ni reclamar uno ya EXPIRED', async () => {
+        const claimedId = 'claim-expire-already-claimed'
+        await persistAuctionForClaim(claimedId)
+        const repository = new PostgresAuctionPendingClaimRepository(db)
+        const settledAt = new Date('2026-01-03T00:00:00.000Z')
+        await repository.createIfAbsent({ ...input(claimedId), settledAt, createdAt: settledAt })
+        await repository.markClaimed(claimedId, new Date(settledAt.getTime() + 1000))
+        const farFuture = new Date('2026-02-01T00:00:00.000Z')
+
+        await expect(repository.markExpired(claimedId, farFuture)).rejects.toThrow()
+
+        const expiredId = 'claim-expire-then-claim'
+        await persistAuctionForClaim(expiredId)
+        await repository.createIfAbsent({ ...input(expiredId), settledAt, createdAt: settledAt })
+        await repository.markExpired(expiredId, farFuture)
+
+        await expect(repository.markClaimed(expiredId, farFuture)).rejects.toThrow()
+        await expect(repository.markExpired(expiredId, farFuture)).rejects.toThrow()
+      })
+
+      it('procesa varios vencidos en una misma ejecucion y respeta el limite del batch', async () => {
+        const ids = ['claim-batch-a', 'claim-batch-b', 'claim-batch-c']
+        for (const id of ids) {
+          await persistAuctionForClaim(id)
+        }
+        const repository = new PostgresAuctionPendingClaimRepository(db)
+        // settledAt propio y mas reciente que el resto de fixtures del describe,
+        // para poder distinguir "mis" candidatos del limite exacto devuelto.
+        const settledAt = new Date('2026-01-05T00:00:00.000Z')
+        for (const id of ids) {
+          await repository.createIfAbsent({ ...input(id), settledAt, createdAt: settledAt })
+        }
+        const farFuture = new Date('2026-02-01T00:00:00.000Z')
+
+        const limited = await repository.findExpirablePending(farFuture, 2)
+        expect(limited.length).toBeLessThanOrEqual(2)
+        const own = limited.filter((c) => ids.includes(c.auctionId))
+        for (const candidate of own) {
+          await repository.markExpired(candidate.auctionId, farFuture)
+        }
+        const remainingOwn = (await repository.findExpirablePending(farFuture, 1_000)).filter((c) =>
+          ids.includes(c.auctionId),
+        )
+        expect(remainingOwn).toHaveLength(ids.length - own.length)
+      })
+    })
   })
 
   describe('completion atomica HU-65.3', () => {

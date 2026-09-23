@@ -46,6 +46,12 @@ describe('Configuracion del servicio', () => {
       auctionSettlementQueueUrl: null,
 
       auctionSettlementEventDispatchBatchSize: 25,
+
+      auctionPendingClaimExpirationSchedulerEnabled: false,
+
+      auctionPendingClaimExpirationPollIntervalMs: 60_000,
+
+      auctionPendingClaimExpirationBatchSize: 100,
     })
   })
 
@@ -323,6 +329,35 @@ describe('Configuracion del servicio', () => {
         AUCTION_SETTLEMENT_CONCURRENCY: '3',
       }),
     ).toThrow(/CONCURRENCY/)
+  })
+
+  it('lee la configuracion del scheduler de vencimiento de pending-claims (HU-69.6)', () => {
+    expect(
+      loadConfig({
+        AUCTION_PENDING_CLAIM_EXPIRATION_SCHEDULER_ENABLED: 'true',
+        AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS: '120000',
+        AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE: '50',
+      }),
+    ).toMatchObject({
+      auctionPendingClaimExpirationSchedulerEnabled: true,
+      auctionPendingClaimExpirationPollIntervalMs: 120_000,
+      auctionPendingClaimExpirationBatchSize: 50,
+    })
+  })
+
+  it('no exige postgres ni Wallet/Inventory para habilitar el scheduler de vencimiento', () => {
+    expect(() =>
+      loadConfig({ AUCTION_PENDING_CLAIM_EXPIRATION_SCHEDULER_ENABLED: 'true' }),
+    ).not.toThrow()
+  })
+
+  it.each([
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS', '999'],
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS', '3600001'],
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE', '0'],
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE', '1001'],
+  ])('rechaza %s fuera de rango', (key, value) => {
+    expect(() => loadConfig({ [key]: value })).toThrow(ConfigurationError)
   })
 
   it.each(['true', 'false'])('lee scheduler enabled estricto: %s', (enabled) => {

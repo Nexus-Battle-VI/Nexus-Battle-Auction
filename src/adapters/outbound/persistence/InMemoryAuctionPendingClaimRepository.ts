@@ -58,4 +58,29 @@ export class InMemoryAuctionPendingClaimRepository implements AuctionPendingClai
     this.claims.set(auctionId, claimed)
     return clone(claimed)
   }
+  findExpirablePending(now: Date, limit: number): Promise<readonly AuctionPendingClaimSnapshot[]> {
+    return Promise.resolve(
+      [...this.claims.values()]
+        .filter(
+          (claim) =>
+            claim.claimStatus === 'PENDING' && claim.claimDeadline.getTime() < now.getTime(),
+        )
+        .sort(
+          (a, b) =>
+            a.claimDeadline.getTime() - b.claimDeadline.getTime() ||
+            a.auctionId.localeCompare(b.auctionId),
+        )
+        .slice(0, limit)
+        .map(clone),
+    )
+  }
+  // async (sin await): mismo motivo que markClaimed.
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async markExpired(auctionId: string, expiredAt: Date): Promise<AuctionPendingClaimSnapshot> {
+    const existing = this.claims.get(auctionId)
+    if (existing === undefined) throw new Error(`No existe pending-claim para ${auctionId}.`)
+    const expired = AuctionPendingClaim.restore(existing).expire(expiredAt)
+    this.claims.set(auctionId, expired)
+    return clone(expired)
+  }
 }
