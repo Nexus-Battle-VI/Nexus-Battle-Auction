@@ -22,6 +22,8 @@ import {
   UnavailableSellerSanctions,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
+import { SqsAuctionSettlementEventPublisher } from '../../adapters/outbound/messaging/SqsAuctionSettlementEventPublisher'
+import { UnavailableAuctionSettlementEventPublisher } from '../../adapters/outbound/messaging/UnavailableAuctionSettlementEventPublisher'
 import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
 import { InMemoryWatchlistRepository } from '../../adapters/outbound/persistence/InMemoryWatchlistRepository'
 import { PostgresWatchlistRepository } from '../../adapters/outbound/persistence/PostgresWatchlistRepository'
@@ -34,6 +36,7 @@ import { InMemoryAuctionPublicationIntentRepository } from '../../adapters/outbo
 import { InMemoryAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
 import { InMemoryAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
 import { InMemoryAuctionSettlementRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementRepository'
+import { InMemoryAuctionSettlementOutboxRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementOutboxRepository'
 import { InMemoryAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementWorkRepository'
 import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
@@ -41,6 +44,7 @@ import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbo
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
 import { PostgresAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
 import { PostgresAuctionSettlementRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementRepository'
+import { PostgresAuctionSettlementOutboxRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementOutboxRepository'
 import { PostgresAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementWorkRepository'
 import { PostgresBidCreditOperationReader } from '../../adapters/outbound/persistence/PostgresBidCreditOperationReader'
 import type { Database } from '../../adapters/outbound/persistence/schema'
@@ -86,6 +90,14 @@ import {
   type AuctionSettlementRepositoryPort,
 } from '../../application/ports/AuctionSettlementRepositoryPort'
 import {
+  AUCTION_SETTLEMENT_OUTBOX_REPOSITORY,
+  type AuctionSettlementOutboxRepositoryPort,
+} from '../../application/ports/AuctionSettlementOutboxRepositoryPort'
+import {
+  AUCTION_SETTLEMENT_EVENT_PUBLISHER,
+  type AuctionSettlementEventPublisherPort,
+} from '../../application/ports/AuctionSettlementEventPublisherPort'
+import {
   AUCTION_SETTLEMENT_WORK_REPOSITORY,
   type AuctionSettlementCandidateReaderPort,
   type AuctionSettlementWorkRepositoryPort,
@@ -116,6 +128,7 @@ import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
+import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -264,6 +277,57 @@ export const INTERNAL_CALLERS: readonly string[] = []
           ? new InMemoryAuctionSettlementRepository()
           : new PostgresAuctionSettlementRepository(db),
       inject: [DATABASE],
+    },
+
+    {
+      provide: AUCTION_SETTLEMENT_OUTBOX_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): AuctionSettlementOutboxRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionSettlementOutboxRepository()
+          : new PostgresAuctionSettlementOutboxRepository(db),
+      inject: [DATABASE],
+    },
+
+    {
+      provide: AUCTION_SETTLEMENT_EVENT_PUBLISHER,
+      useFactory: (config: AppConfig): AuctionSettlementEventPublisherPort => {
+        if (!config.auctionSettlementEventDispatchEnabled) {
+          return new UnavailableAuctionSettlementEventPublisher()
+        }
+        if (config.auctionSettlementQueueUrl === null) {
+          throw new Error('La cola de settlement no esta configurada.')
+        }
+        return new SqsAuctionSettlementEventPublisher({
+          queueUrl: config.auctionSettlementQueueUrl,
+        })
+      },
+      inject: [APP_CONFIG],
+    },
+
+    {
+      provide: AuctionSettlementOutboxDispatcher,
+      useFactory: (
+        outbox: AuctionSettlementOutboxRepositoryPort,
+        publisher: AuctionSettlementEventPublisherPort,
+        clock: ClockPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionSettlementOutboxDispatcher =>
+        new AuctionSettlementOutboxDispatcher(
+          outbox,
+          publisher,
+          clock,
+          logger,
+          config.auctionSettlementEventDispatchBatchSize,
+          config.auctionSettlementEventDispatchEnabled,
+        ),
+      inject: [
+        AUCTION_SETTLEMENT_OUTBOX_REPOSITORY,
+        AUCTION_SETTLEMENT_EVENT_PUBLISHER,
+        CLOCK,
+        LOGGER,
+        APP_CONFIG,
+      ],
     },
 
     {

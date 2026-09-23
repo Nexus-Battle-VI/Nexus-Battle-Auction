@@ -86,6 +86,12 @@ export interface AppConfig {
   readonly auctionSettlementSchedulerEnabled: boolean
 
   readonly auctionSettlementPollIntervalMs: number
+
+  readonly auctionSettlementEventDispatchEnabled: boolean
+
+  readonly auctionSettlementQueueUrl: string | null
+
+  readonly auctionSettlementEventDispatchBatchSize: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -278,6 +284,31 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     1_000,
     300_000,
   )
+  const auctionSettlementEventDispatchEnabled = readBoolean(
+    env,
+    'AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED',
+    false,
+  )
+  const auctionSettlementQueueUrl = readString(env, 'AUCTION_SETTLEMENT_QUEUE_URL', '')
+  const auctionSettlementEventDispatchBatchSize = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_EVENT_DISPATCH_BATCH_SIZE',
+    25,
+    1,
+    100,
+  )
+  if (auctionSettlementEventDispatchEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED=true.',
+      )
+    }
+    if (auctionSettlementQueueUrl === '') {
+      throw new ConfigurationError(
+        'AUCTION_SETTLEMENT_QUEUE_URL es obligatorio cuando AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED=true.',
+      )
+    }
+  }
 
   if (walletBaseUrl !== '') {
     try {
@@ -390,5 +421,11 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionSettlementSchedulerEnabled,
 
     auctionSettlementPollIntervalMs,
+
+    auctionSettlementEventDispatchEnabled,
+
+    auctionSettlementQueueUrl: auctionSettlementQueueUrl === '' ? null : auctionSettlementQueueUrl,
+
+    auctionSettlementEventDispatchBatchSize,
   }
 }

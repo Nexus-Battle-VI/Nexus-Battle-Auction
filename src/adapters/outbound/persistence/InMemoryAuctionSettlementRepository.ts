@@ -9,6 +9,7 @@ import {
   type CreateAuctionSettlementReleaseInput,
   type CompleteAuctionSettlementInput,
 } from '../../../application/ports/AuctionSettlementRepositoryPort'
+import { serializeAuctionSettledEventV1 } from '../../../domain/events/AuctionSettledEventV1'
 import { InMemoryAuctionPendingClaimRepository } from './InMemoryAuctionPendingClaimRepository'
 
 const cloneSettlement = (snapshot: AuctionSettlementSnapshot): AuctionSettlementSnapshot => ({
@@ -211,6 +212,7 @@ export class InMemoryAuctionSettlementRepository implements AuctionSettlementRep
   async completeSettlement(
     input: CompleteAuctionSettlementInput,
   ): Promise<AuctionSettlementSnapshot> {
+    serializeAuctionSettledEventV1(input.event)
     const auctionId = input.auctionId
     const settlement = this.requireSettlement(auctionId)
     if (settlement.status === AuctionSettlementStatus.Completed) return cloneSettlement(settlement)

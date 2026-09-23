@@ -5,6 +5,8 @@ import { InMemoryAuctionPendingClaimRepository } from '../../src/adapters/outbou
 import { InMemoryBidCreditOperationReader } from '../../src/adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { Auction } from '../../src/domain/entities/Auction'
 import { Bid } from '../../src/domain/entities/Bid'
+import type { BidSnapshot } from '../../src/domain/entities/Bid'
+import { AuctionSettledEventPayloadTooLargeError } from '../../src/domain/events/AuctionSettledEventV1'
 import { SettleAuction } from '../../src/application/use-cases/SettleAuction'
 import {
   ExternalContractError,
@@ -455,6 +457,37 @@ describe('SettleAuction', () => {
     expect(wallet.captureHold).not.toHaveBeenCalled()
     expect(wallet.releaseHold).not.toHaveBeenCalled()
     await expect(settlements.getByAuctionId(auctionId)).resolves.toBeNull()
+  })
+
+  it('rechaza preflight oversize antes de Wallet, Inventory y completion', async () => {
+    const wallet = new FakeAuctionWallet()
+    const inventory = new FakeProductInventory()
+    const { auctions, settlements, inventoryIntents, useCase } = setup(wallet, [], inventory)
+    const auctionId = 'auction-oversized-settlement-event'
+    await publish(auctions, auctionId)
+    await persistLeadingBid(auctions, auctionId, 'hold-oversized')
+    const oversizedHistory: readonly BidSnapshot[] = Array.from({ length: 500 }, (_, index) => ({
+      id: `bid-loser-${String(index)}`,
+      auctionId,
+      bidderId: `loser-${String(index)}-${'\u00e1'.repeat(80)}`,
+      amountCredits: 20,
+      placedAt: now,
+      creditReservationId: `hold-loser-${String(index)}`,
+    }))
+    jest.spyOn(auctions, 'findBidHistory').mockResolvedValue(oversizedHistory)
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+    const getOrCreateIntent = jest.spyOn(inventoryIntents, 'getOrCreate')
+
+    await expect(useCase.execute({ auctionId })).rejects.toBeInstanceOf(
+      AuctionSettledEventPayloadTooLargeError,
+    )
+
+    expect(wallet.captureHold).not.toHaveBeenCalled()
+    expect(wallet.releaseHold).not.toHaveBeenCalled()
+    expect(inventory.release).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).not.toHaveBeenCalled()
+    expect(getOrCreateIntent).not.toHaveBeenCalled()
+    expect(completeSettlement).not.toHaveBeenCalled()
   })
 
   it('persiste capture RETRYABLE sin completar ni liberar holds', async () => {
@@ -1314,6 +1347,7 @@ describe('SettleAuction', () => {
     await persistLeadingBid(auctions, auctionId, 'hold-winner-order')
     const markConfirmed = jest.spyOn(inventoryIntents, 'markConfirmed')
     const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+    const findBidHistory = jest.spyOn(auctions, 'findBidHistory')
 
     await useCase.execute({ auctionId })
     await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
@@ -1326,6 +1360,9 @@ describe('SettleAuction', () => {
       firstInvocation(completeSettlement.mock.invocationCallOrder),
     ]
     expect(calls).toEqual([...calls].sort((left, right) => left - right))
+    expect(firstInvocation(findBidHistory.mock.invocationCallOrder)).toBeLessThan(
+      firstInvocation(wallet.captureHold.mock.invocationCallOrder),
+    )
   })
 
   it('respeta el orden Inventory release, confirmacion y completion WITHOUT_BIDS', async () => {
