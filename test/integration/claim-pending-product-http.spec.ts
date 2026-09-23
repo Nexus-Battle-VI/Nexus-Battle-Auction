@@ -28,7 +28,11 @@ import {
   AUCTION_WALLET,
   type AuctionWalletPort,
 } from '../../src/application/ports/AuctionWalletPort'
-import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
+import {
+  ExternalContractError,
+  ExternalDependencyUnavailableError,
+  ExternalResourceNotFoundError,
+} from '../../src/application/errors/ExternalDependencyError'
 import { Auction } from '../../src/domain/entities/Auction'
 import { CLAIM_PERIOD_MS } from '../../src/domain/entities/AuctionPendingClaim'
 import { AppModule } from '../../src/infrastructure/bootstrap/app.module'
@@ -59,6 +63,7 @@ class SpyWallet implements AuctionWalletPort {
 
 class StubInventory implements ProductInventoryPort {
   confirmClaimShouldFail = false
+  confirmClaimError: Error = new ExternalDependencyUnavailableError('player-inventory')
 
   inspect(): Promise<never> {
     return Promise.reject(new Error('not used'))
@@ -83,8 +88,7 @@ class StubInventory implements ProductInventoryPort {
     winnerId: string
     applied: boolean
   }> {
-    if (this.confirmClaimShouldFail)
-      return Promise.reject(new ExternalDependencyUnavailableError('player-inventory'))
+    if (this.confirmClaimShouldFail) return Promise.reject(this.confirmClaimError)
     return Promise.resolve({
       operationId: command.operationId,
       commitmentId: command.commitmentId,
@@ -187,6 +191,7 @@ describe('POST reclamar producto ganado pendiente HU-69.3', () => {
 
   afterEach(() => {
     inventory.confirmClaimShouldFail = false
+    inventory.confirmClaimError = new ExternalDependencyUnavailableError('player-inventory')
   })
 
   it('responde 200, confirma el reclamo y no toca creditos (Wallet)', async () => {
@@ -288,6 +293,41 @@ describe('POST reclamar producto ganado pendiente HU-69.3', () => {
     const auctionId = 'auction-http-claim-inventory-down'
     await seed(auctionId)
     inventory.confirmClaimShouldFail = true
+
+    const response = await request(app.getHttpServer())
+      .post(`/api/v1/auctions/me/pending-claims/${auctionId}/claim`)
+      .set('Authorization', 'Bearer token-winner')
+
+    expect(response.status).toBe(503)
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toMatchObject({
+      claimStatus: 'PENDING',
+    })
+  })
+
+  it('responde 422 cuando Player-Inventory no reconoce el producto/item (HU-69.5)', async () => {
+    const auctionId = 'auction-http-claim-item-not-found'
+    await seed(auctionId)
+    inventory.confirmClaimShouldFail = true
+    inventory.confirmClaimError = new ExternalResourceNotFoundError('player-inventory', auctionId)
+
+    const response = await request(app.getHttpServer())
+      .post(`/api/v1/auctions/me/pending-claims/${auctionId}/claim`)
+      .set('Authorization', 'Bearer token-winner')
+
+    expect(response.status).toBe(422)
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toMatchObject({
+      claimStatus: 'PENDING',
+    })
+  })
+
+  it('responde 503 cuando Player-Inventory devuelve una respuesta invalida (HU-69.5)', async () => {
+    const auctionId = 'auction-http-claim-invalid-response'
+    await seed(auctionId)
+    inventory.confirmClaimShouldFail = true
+    inventory.confirmClaimError = new ExternalContractError(
+      'player-inventory',
+      'Respuesta invalida al confirmar el reclamo.',
+    )
 
     const response = await request(app.getHttpServer())
       .post(`/api/v1/auctions/me/pending-claims/${auctionId}/claim`)
