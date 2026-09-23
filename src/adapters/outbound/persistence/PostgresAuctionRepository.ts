@@ -9,16 +9,23 @@ import {
   IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
+import {
+  AuctionAlreadyClosedError,
+  BuyNowIdempotencyConflictError,
+} from '../../../application/errors/BuyNowTransactionError'
 import type {
   AuctionRepositoryPort,
   BidCreditOperationSnapshot,
   BidCreditOperationStatus,
+  CloseAuctionByBuyNowCommand,
+  CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
+  RecordBuyNowFailureCommand,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
@@ -150,6 +157,11 @@ const findAuctionAggregate = async (
 
   return row === undefined ? null : toAuction(row)
 }
+
+const buyNowRequestHash = (command: CloseAuctionByBuyNowCommand): string =>
+  createHash('sha256')
+    .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]), 'utf8')
+    .digest('hex')
 
 const findLeadingBid = async (
   db: AuctionDatabase,
@@ -738,5 +750,158 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
       .execute()
 
     return rows.map(toAutoBidConfigSnapshot)
+  }
+
+  closeByBuyNow(command: CloseAuctionByBuyNowCommand): Promise<CloseAuctionByBuyNowResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const hash = buyNowRequestHash(command)
+
+      // Serializa reintentos de la misma operacion.
+      await sql`
+          select pg_advisory_xact_lock(
+            hashtext(${command.operationId})
+          )
+        `.execute(transaction)
+
+      const previousOperation = await transaction
+        .selectFrom('auction_buy_now_operations')
+        .select(['request_hash', 'auction_id', 'transaction_id'])
+        .where('operation_id', '=', command.operationId)
+        .executeTakeFirst()
+
+      if (previousOperation !== undefined) {
+        if (previousOperation.request_hash !== hash) {
+          throw new BuyNowIdempotencyConflictError()
+        }
+
+        const auction = await findAuction(transaction, previousOperation.auction_id)
+
+        if (auction === null) {
+          throw new PersistedAuctionNotFoundError(previousOperation.auction_id)
+        }
+
+        return {
+          auction,
+          transactionId: previousOperation.transaction_id,
+          replayed: true,
+        }
+      }
+
+      // Serializa cualquier otra compra inmediata (o cierre) que compita por
+      // la MISMA subasta: solo una gana la carrera.
+      await sql`
+          select pg_advisory_xact_lock(
+            hashtext(${command.auctionId})
+          )
+        `.execute(transaction)
+
+      const auctionRow = await transaction
+        .selectFrom('auctions')
+        .selectAll()
+        .where('id', '=', command.auctionId)
+        .executeTakeFirst()
+
+      if (auctionRow === undefined) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      if (auctionRow.status !== (AuctionStatus.Active as string)) {
+        throw new AuctionAlreadyClosedError(command.auctionId)
+      }
+
+      await transaction
+        .updateTable('auctions')
+        .set({ status: AuctionStatus.SoldByBuyNow, closes_at: command.closedAt })
+        .where('id', '=', command.auctionId)
+        .execute()
+
+      await transaction
+        .insertInto('auction_buy_now_operations')
+        .values({
+          operation_id: command.operationId,
+          request_hash: hash,
+          auction_id: command.auctionId,
+          buyer_id: command.buyerId,
+          transfer_id: command.transferId,
+          price_credits: command.priceCredits,
+          transaction_id: command.transactionId,
+          completed_at: command.closedAt,
+        })
+        .execute()
+
+      await transaction
+        .insertInto('auction_audit_log')
+        .values({
+          auction_id: command.auctionId,
+          operation_id: command.operationId,
+          action: 'AUCTION_CLOSED_BY_BUY_NOW',
+          actor_id: command.buyerId,
+          occurred_at: command.closedAt,
+          details: {
+            transferId: command.transferId,
+            priceCredits: command.priceCredits,
+            transactionId: command.transactionId,
+          },
+        })
+        .execute()
+
+      // HU-64.5 consume este evento para notificar a los demas participantes y
+      // liberar los creditos reservados de sus pujas perdedoras.
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: randomUUID(),
+          aggregate_id: command.auctionId,
+          event_type: 'auction.closed_by_buy_now.v1',
+          payload: {
+            auctionId: command.auctionId,
+            sellerId: auctionRow.seller_id,
+            buyerId: command.buyerId,
+            priceCredits: command.priceCredits,
+            transactionId: command.transactionId,
+            closedAt: command.closedAt,
+          },
+          occurred_at: command.closedAt,
+          published_at: null,
+        })
+        .execute()
+
+      const auction = await findAuction(transaction, command.auctionId)
+
+      if (auction === null) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      return {
+        auction,
+        transactionId: command.transactionId,
+        replayed: false,
+      }
+    })
+  }
+
+  async recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {
+    await this.db
+      .insertInto('auction_buy_now_failures')
+      .values({
+        operation_id: command.operationId,
+        auction_id: command.auctionId,
+        buyer_id: command.buyerId,
+        stage: command.stage,
+        reason: command.reason,
+        transfer_id: command.transferId,
+        credits_reversed: command.creditsReversed,
+        occurred_at: command.occurredAt,
+      })
+      .onConflict((conflict) =>
+        conflict.column('operation_id').doUpdateSet({
+          stage: command.stage,
+          reason: command.reason,
+          transfer_id: command.transferId,
+          credits_reversed: command.creditsReversed,
+          occurred_at: command.occurredAt,
+        }),
+      )
+      .execute()
   }
 }

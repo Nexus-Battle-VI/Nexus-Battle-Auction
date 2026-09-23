@@ -16,6 +16,11 @@ import type {
   PublicationFeePort,
 } from '../../../application/ports/PublicationFeePort'
 import type { SellerSanctionPort } from '../../../application/ports/SellerSanctionPort'
+import type {
+  BuyNowCreditTransfer,
+  BuyNowCreditTransferCommand,
+  WalletPort,
+} from '../../../application/ports/WalletPort'
 
 /**
  * Adaptadores deliberadamente cerrados mientras los servicios propietarios no
@@ -89,6 +94,29 @@ export class UnavailableBidCredits implements BidCreditsPort {
   release(operationId: string, reservationId: string): Promise<void> {
     void operationId
     void reservationId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+}
+
+/**
+ * Wallet (HU-64) todavia no publica ningun contrato HTTP de negocio: solo
+ * andamiaje. Fallar cerrado evita simular un saldo o una transferencia que
+ * nadie respalda.
+ */
+export class UnavailableWallet implements WalletPort {
+  getAvailableCredits(buyerId: string): Promise<number> {
+    void buyerId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  transferBuyNowCredits(command: BuyNowCreditTransferCommand): Promise<BuyNowCreditTransfer> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  reverseBuyNowCredits(operationId: string, transferId: string): Promise<void> {
+    void operationId
+    void transferId
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
   }
 }
