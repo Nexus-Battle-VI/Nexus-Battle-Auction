@@ -1,4 +1,5 @@
 import type { Auction, AuctionSnapshot } from '../../domain/entities/Auction'
+import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../domain/entities/Bid'
 
 export interface PersistAuctionPublicationCommand {
@@ -117,6 +118,23 @@ export interface AuctionRepositoryPort {
   findBidCreditOperation(operationId: string): Promise<BidCreditOperationSnapshot | null>
 
   recordBidCreditFailure(command: RecordBidCreditFailureCommand): Promise<void>
+
+  /**
+   * Crea o reconfigura (upsert) la puja automatica de un jugador en una
+   * subasta. Solo puede existir una configuracion por (auctionId, bidderId).
+   */
+  saveAutoBidConfig(config: AutoBidConfig): Promise<AutoBidConfigSnapshot>
+
+  findAutoBidConfig(auctionId: string, bidderId: string): Promise<AutoBidConfigSnapshot | null>
+
+  /**
+   * Configuraciones activas de OTROS jugadores en la subasta, candidatas a
+   * reaccionar ante una puja rival (HU-67.2).
+   */
+  findActiveAutoBidsForAuction(
+    auctionId: string,
+    excludeBidderId: string,
+  ): Promise<readonly AutoBidConfigSnapshot[]>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')

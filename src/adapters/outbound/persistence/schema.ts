@@ -112,6 +112,7 @@ export interface Database {
   auction_watchlist: AuctionWatchlistTable
   auctions: AuctionTable
   auction_bids: AuctionBidTable
+  auction_auto_bids: AuctionAutoBidTable
   auction_publication_operations: AuctionPublicationOperationTable
   auction_publication_failures: AuctionPublicationFailureTable
   auction_bid_credit_operations: AuctionBidCreditOperationTable
@@ -125,4 +126,14 @@ export interface AuctionWatchlistTable {
   player_id: string
   auction_id: string
   followed_at: Timestamp
+}
+
+/** Clave primaria compuesta (auction_id, bidder_id): a lo sumo una fila por jugador y subasta. */
+export interface AuctionAutoBidTable {
+  auction_id: string
+  bidder_id: string
+  max_amount_credits: number
+  is_active: boolean
+  created_at: Timestamp
+  updated_at: Timestamp
 }

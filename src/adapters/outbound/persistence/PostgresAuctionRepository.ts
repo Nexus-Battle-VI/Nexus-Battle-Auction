@@ -26,6 +26,7 @@ import {
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
+import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 import type { Database } from './schema'
 
@@ -34,6 +35,8 @@ type AuctionRow = Selectable<Database['auctions']>
 type AuctionBidRow = Selectable<Database['auction_bids']>
 
 type BidCreditOperationRow = Selectable<Database['auction_bid_credit_operations']>
+
+type AutoBidConfigRow = Selectable<Database['auction_auto_bids']>
 
 type AuctionDatabase = Kysely<Database> | Transaction<Database>
 
@@ -75,6 +78,15 @@ const toBidSnapshot = (row: AuctionBidRow): BidSnapshot => ({
   bidderId: row.bidder_id,
   amountCredits: row.amount_credits,
   placedAt: new Date(row.placed_at),
+})
+
+/** configuredAt refleja la ultima reconfiguracion (updated_at), no la primera (created_at). */
+const toAutoBidConfigSnapshot = (row: AutoBidConfigRow): AutoBidConfigSnapshot => ({
+  auctionId: row.auction_id,
+  bidderId: row.bidder_id,
+  maxAmountCredits: row.max_amount_credits,
+  configuredAt: new Date(row.updated_at),
+  isActive: row.is_active,
 })
 
 const toBidCreditOperationSnapshot = (row: BidCreditOperationRow): BidCreditOperationSnapshot => ({
@@ -595,5 +607,71 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
       .executeTakeFirstOrThrow()
 
     return row.amount
+  }
+
+  async saveAutoBidConfig(config: AutoBidConfig): Promise<AutoBidConfigSnapshot> {
+    const snapshot = config.snapshot()
+
+    try {
+      const row = await this.db
+        .insertInto('auction_auto_bids')
+        .values({
+          auction_id: snapshot.auctionId,
+          bidder_id: snapshot.bidderId,
+          max_amount_credits: snapshot.maxAmountCredits,
+          is_active: snapshot.isActive,
+          created_at: snapshot.configuredAt,
+          updated_at: snapshot.configuredAt,
+        })
+        .onConflict((conflict) =>
+          conflict.columns(['auction_id', 'bidder_id']).doUpdateSet({
+            max_amount_credits: snapshot.maxAmountCredits,
+            is_active: snapshot.isActive,
+            updated_at: snapshot.configuredAt,
+          }),
+        )
+        .returningAll()
+        .executeTakeFirstOrThrow()
+
+      return toAutoBidConfigSnapshot(row)
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && 'constraint' in error) {
+        if (error.code === '23503' && error.constraint === 'auction_auto_bids_auction_fk') {
+          throw new PersistedAuctionNotFoundError(snapshot.auctionId)
+        }
+      }
+
+      throw error
+    }
+  }
+
+  async findAutoBidConfig(
+    auctionId: string,
+    bidderId: string,
+  ): Promise<AutoBidConfigSnapshot | null> {
+    const row = await this.db
+      .selectFrom('auction_auto_bids')
+      .selectAll()
+      .where('auction_id', '=', auctionId)
+      .where('bidder_id', '=', bidderId)
+      .executeTakeFirst()
+
+    return row === undefined ? null : toAutoBidConfigSnapshot(row)
+  }
+
+  async findActiveAutoBidsForAuction(
+    auctionId: string,
+    excludeBidderId: string,
+  ): Promise<readonly AutoBidConfigSnapshot[]> {
+    const rows = await this.db
+      .selectFrom('auction_auto_bids')
+      .selectAll()
+      .where('auction_id', '=', auctionId)
+      .where('is_active', '=', true)
+      .where('bidder_id', '!=', excludeBidderId)
+      .orderBy('bidder_id', 'asc')
+      .execute()
+
+    return rows.map(toAutoBidConfigSnapshot)
   }
 }
