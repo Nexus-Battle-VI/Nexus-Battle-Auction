@@ -217,4 +217,31 @@ describe('Configuracion del servicio', () => {
   ])('rechaza %s', (_caso, env) => {
     expect(() => loadConfig(env)).toThrow(ConfigurationError)
   })
+
+  it.each(['1', '5000'])('acepta timeout Wallet valido %s', (timeout) => {
+    expect(
+      loadConfig({
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        WALLET_BASE_URL: 'https://wallet.example.com/',
+        WALLET_REQUEST_TIMEOUT_MS: timeout,
+      }),
+    ).toMatchObject({
+      walletBaseUrl: 'https://wallet.example.com/',
+      walletRequestTimeoutMs: Number(timeout),
+    })
+  })
+
+  it.each(['0', '60001', 'abc', ''])('rechaza timeout Wallet invalido %s', (timeout) => {
+    expect(() => loadConfig({ WALLET_REQUEST_TIMEOUT_MS: timeout })).toThrow(ConfigurationError)
+  })
+
+  it('valida URL y secreto Wallet opcional', () => {
+    expect(loadConfig({}).walletBaseUrl).toBeNull()
+    expect(() =>
+      loadConfig({ WALLET_BASE_URL: 'not-url', INTERNAL_SERVICE_AUTH_SECRET: 'secret' }),
+    ).toThrow(ConfigurationError)
+    expect(() => loadConfig({ WALLET_BASE_URL: 'https://wallet.example.com' })).toThrow(
+      /INTERNAL_SERVICE_AUTH_SECRET/,
+    )
+  })
 })

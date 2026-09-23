@@ -30,6 +30,7 @@ export interface BidSnapshot {
   bidderId: string
   amountCredits: number
   placedAt: Date
+  creditReservationId?: string | null
 }
 
 export class Bid {
