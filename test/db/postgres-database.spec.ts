@@ -2087,6 +2087,10 @@ describe('Persistencia PostgreSQL', () => {
   })
 
   describe('outbox settlement HU-65.6', () => {
+    beforeEach(async () => {
+      await db.deleteFrom('outbox_events').execute()
+    })
+
     it('lee pendientes en orden estable y marca solo el evento settlement sin publicar', async () => {
       const older = createAuctionSettledEventV1({
         auctionId: 'outbox-older',
