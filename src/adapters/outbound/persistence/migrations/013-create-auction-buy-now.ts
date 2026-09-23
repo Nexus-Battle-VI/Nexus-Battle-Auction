@@ -4,7 +4,7 @@ export const up = async (db: Kysely<unknown>): Promise<void> => {
   await sql`alter table auctions drop constraint auctions_status_valid`.execute(db)
   await sql`
     alter table auctions
-    add constraint auctions_status_valid check (status in ('ACTIVE', 'SOLD'))
+    add constraint auctions_status_valid check (status in ('ACTIVE', 'FINISHED', 'SOLD'))
   `.execute(db)
 
   await db.schema
@@ -52,6 +52,6 @@ export const down = async (db: Kysely<unknown>): Promise<void> => {
   await sql`alter table auctions drop constraint auctions_status_valid`.execute(db)
   await sql`
     alter table auctions
-    add constraint auctions_status_valid check (status in ('ACTIVE'))
+    add constraint auctions_status_valid check (status in ('ACTIVE', 'FINISHED'))
   `.execute(db)
 }
