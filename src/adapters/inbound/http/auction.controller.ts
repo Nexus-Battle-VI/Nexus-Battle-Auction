@@ -32,6 +32,7 @@ import type { AuctionPendingClaimSnapshot } from '../../../application/ports/Auc
 import { CLOCK, type ClockPort } from '../../../application/ports/ClockPort'
 import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVerifierPort'
 import { ClaimPendingProduct } from '../../../application/use-cases/ClaimPendingProduct'
+import { ClaimPendingProductsBatch } from '../../../application/use-cases/ClaimPendingProductsBatch'
 import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
 import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
@@ -43,6 +44,9 @@ import {
   AuctionResponseDto,
   AutoBidConfigResponseDto,
   BidResponseDto,
+  ClaimPendingProductsBatchItemResponseDto,
+  ClaimPendingProductsBatchRequestDto,
+  ClaimPendingProductsBatchResponseDto,
   ConfigureAutoBidRequestDto,
   PendingClaimResponseDto,
   PublishAuctionRequestDto,
@@ -64,6 +68,7 @@ export class AuctionController {
     private readonly configureAutoBid: ConfigureAutoBid,
     private readonly getPendingClaims: GetPendingClaims,
     private readonly claimPendingProduct: ClaimPendingProduct,
+    private readonly claimPendingProductsBatch: ClaimPendingProductsBatch,
     @Inject(CLOCK)
     private readonly clock: ClockPort,
   ) {}
@@ -158,6 +163,53 @@ export class AuctionController {
       return this.toPendingClaimResponse(claim, this.clock.now())
     } catch (error: unknown) {
       throw toAuctionHttpException(error)
+    }
+  }
+
+  /**
+   * HU-69.4.
+   *
+   * Nunca falla en bloque por un item individual: la respuesta siempre es
+   * 200 con un resultado por auctionId (ver ClaimPendingProductsBatch). Solo
+   * una solicitud invalida (sin autenticar, sin rol) da un error HTTP global.
+   */
+  @Post('me/pending-claims/claim-batch')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Role.Player)
+  @ApiOperation({
+    summary: 'Reclamar en bloque los productos ganados pendientes del titular autenticado',
+  })
+  @ApiOkResponse({
+    type: ClaimPendingProductsBatchResponseDto,
+    description: 'Un resultado por auctionId solicitado (o por cada pendiente, con claimAll).',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Access token ausente o invalido.',
+  })
+  @ApiForbiddenResponse({
+    description: 'La identidad no posee el rol requerido.',
+  })
+  async claimPendingProductsBatchAction(
+    @CurrentIdentity()
+    identity: VerifiedIdentity,
+
+    @Body()
+    request: ClaimPendingProductsBatchRequestDto,
+  ): Promise<ClaimPendingProductsBatchResponseDto> {
+    const result = await this.claimPendingProductsBatch.execute(
+      request.claimAll === true
+        ? { winnerId: identity.subject, claimAll: true }
+        : { winnerId: identity.subject, auctionIds: request.auctionIds ?? [] },
+    )
+    const now = this.clock.now()
+
+    return {
+      results: result.results.map((item): ClaimPendingProductsBatchItemResponseDto => ({
+        auctionId: item.auctionId,
+        status: item.status,
+        claim: item.claim === null ? null : this.toPendingClaimResponse(item.claim, now),
+        message: item.message,
+      })),
     }
   }
 
