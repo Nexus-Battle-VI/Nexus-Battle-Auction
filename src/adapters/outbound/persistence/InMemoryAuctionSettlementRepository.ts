@@ -7,12 +7,15 @@ import {
   type AuctionSettlementSnapshot,
   type CreateAuctionSettlementInput,
   type CreateAuctionSettlementReleaseInput,
+  type CompleteAuctionSettlementInput,
 } from '../../../application/ports/AuctionSettlementRepositoryPort'
+import { InMemoryAuctionPendingClaimRepository } from './InMemoryAuctionPendingClaimRepository'
 
 const cloneSettlement = (snapshot: AuctionSettlementSnapshot): AuctionSettlementSnapshot => ({
   ...snapshot,
   createdAt: new Date(snapshot.createdAt),
   updatedAt: new Date(snapshot.updatedAt),
+  settledAt: snapshot.settledAt === null ? null : new Date(snapshot.settledAt),
 })
 
 const cloneRelease = (
@@ -26,6 +29,8 @@ const cloneRelease = (
 export class InMemoryAuctionSettlementRepository implements AuctionSettlementRepositoryPort {
   private readonly settlements = new Map<string, AuctionSettlementSnapshot>()
   private readonly releases = new Map<string, AuctionSettlementReleaseSnapshot>()
+
+  constructor(readonly pendingClaims = new InMemoryAuctionPendingClaimRepository()) {}
 
   getByAuctionId(auctionId: string): Promise<AuctionSettlementSnapshot | null> {
     const settlement = this.settlements.get(auctionId)
@@ -53,6 +58,7 @@ export class InMemoryAuctionSettlementRepository implements AuctionSettlementRep
       lastError: null,
       createdAt: new Date(input.createdAt),
       updatedAt: new Date(input.createdAt),
+      settledAt: null,
     }
     this.settlements.set(snapshot.auctionId, snapshot)
     return Promise.resolve(cloneSettlement(snapshot))
@@ -202,8 +208,12 @@ export class InMemoryAuctionSettlementRepository implements AuctionSettlementRep
     })
   }
 
-  async markCompleted(auctionId: string, updatedAt: Date): Promise<void> {
+  async completeSettlement(
+    input: CompleteAuctionSettlementInput,
+  ): Promise<AuctionSettlementSnapshot> {
+    const auctionId = input.auctionId
     const settlement = this.requireSettlement(auctionId)
+    if (settlement.status === AuctionSettlementStatus.Completed) return cloneSettlement(settlement)
     const releases = await this.listReleaseTasks(auctionId)
     const capturesReady =
       settlement.resultType === 'WITHOUT_BIDS'
@@ -212,6 +222,35 @@ export class InMemoryAuctionSettlementRepository implements AuctionSettlementRep
     if (!capturesReady || releases.some((release) => release.status !== ReleaseStatus.Released)) {
       throw new Error('El settlement aun tiene trabajo obligatorio pendiente.')
     }
+    if (input.resultType === 'WITH_WINNER') {
+      await this.pendingClaims.createIfAbsent({
+        auctionId,
+        winnerId: input.winnerId,
+        productId: input.productId,
+        winningBidId: input.winningBidId,
+        finalAmountCredits: input.finalAmountCredits,
+        settledAt: input.settledAt,
+        createdAt: input.settledAt,
+      })
+    }
+    const completed = {
+      ...settlement,
+      status: AuctionSettlementStatus.Completed,
+      updatedAt: new Date(input.settledAt),
+      settledAt: new Date(input.settledAt),
+    }
+    this.settlements.set(auctionId, completed)
+    return cloneSettlement(completed)
+  }
+  async markCompleted(auctionId: string, updatedAt: Date): Promise<void> {
+    const settlement = this.requireSettlement(auctionId)
+    const releases = await this.listReleaseTasks(auctionId)
+    if (
+      (settlement.captureStatus !== CaptureStatus.NotRequired &&
+        settlement.captureStatus !== CaptureStatus.Confirmed) ||
+      releases.some((release) => release.status !== ReleaseStatus.Released)
+    )
+      throw new Error('El settlement aun tiene trabajo obligatorio pendiente.')
     this.settlements.set(auctionId, {
       ...settlement,
       status: AuctionSettlementStatus.Completed,

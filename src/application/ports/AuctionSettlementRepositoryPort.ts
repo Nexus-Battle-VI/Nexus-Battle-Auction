@@ -37,7 +37,24 @@ export interface AuctionSettlementSnapshot {
   readonly lastError: string | null
   readonly createdAt: Date
   readonly updatedAt: Date
+  readonly settledAt: Date | null
 }
+export type CompleteAuctionSettlementInput =
+  | {
+      readonly auctionId: string
+      readonly productId: string
+      readonly settledAt: Date
+      readonly resultType: 'WITHOUT_BIDS'
+    }
+  | {
+      readonly auctionId: string
+      readonly productId: string
+      readonly settledAt: Date
+      readonly resultType: 'WITH_WINNER'
+      readonly winnerId: string
+      readonly winningBidId: string
+      readonly finalAmountCredits: number
+    }
 
 export interface AuctionSettlementReleaseSnapshot {
   readonly auctionId: string
@@ -109,6 +126,7 @@ export interface AuctionSettlementRepositoryPort {
     error: string,
     updatedAt: Date,
   ): Promise<void>
+  completeSettlement(input: CompleteAuctionSettlementInput): Promise<AuctionSettlementSnapshot>
   markCompleted(auctionId: string, updatedAt: Date): Promise<void>
 }
 

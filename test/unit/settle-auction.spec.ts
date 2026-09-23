@@ -1016,7 +1016,7 @@ describe('SettleAuction', () => {
     await persistLeadingBid(auctions, auctionId, 'hold-winner-completion-released')
     await useCase.execute({ auctionId })
     await settlements.markReleaseConfirmed(auctionId, loserBidId, now)
-    const complete = jest.spyOn(settlements, 'markCompleted')
+    const complete = jest.spyOn(settlements, 'completeSettlement')
     wallet.releaseHold.mockClear()
     await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
     expect(complete).toHaveBeenCalledTimes(1)

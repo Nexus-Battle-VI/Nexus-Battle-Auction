@@ -67,7 +67,12 @@ export class SettleAuction {
       createdAt: this.clock.now(),
     })
     if (settlement.status !== AuctionSettlementStatus.Completed)
-      await this.settlements.markCompleted(input.auctionId, this.clock.now())
+      await this.settlements.completeSettlement({
+        auctionId: input.auctionId,
+        productId: closed.productId.value,
+        resultType: 'WITHOUT_BIDS',
+        settledAt: this.clock.now(),
+      })
     const completed = await this.settlements.getByAuctionId(input.auctionId)
     if (completed === null) throw new Error('El settlement durable no existe.')
     return completed
@@ -115,6 +120,7 @@ export class SettleAuction {
     if (settlement.captureStatus === CaptureStatus.Confirmed)
       return this.prepareLoserReleases(
         auctionId,
+        auction.productId.value,
         closing,
         settlement.status === AuctionSettlementStatus.LoserReleasesPending,
       )
@@ -148,12 +154,13 @@ export class SettleAuction {
     const persisted = await this.settlements.getByAuctionId(auctionId)
     if (persisted === null) throw new Error('El settlement durable no existe.')
     return persisted.captureStatus === CaptureStatus.Confirmed
-      ? this.prepareLoserReleases(auctionId, closing, false)
+      ? this.prepareLoserReleases(auctionId, auction.productId.value, closing, false)
       : persisted
   }
 
   private async prepareLoserReleases(
     auctionId: string,
+    productId: string,
     closing: AuctionClosingResultSnapshot,
     executeReleases: boolean,
   ): Promise<AuctionSettlementSnapshot> {
@@ -174,11 +181,13 @@ export class SettleAuction {
     }
     const persisted = await this.settlements.getByAuctionId(auctionId)
     if (persisted === null) throw new Error('El settlement durable no existe.')
-    return this.completeIfReady(auctionId, persisted)
+    return this.completeIfReady(auctionId, productId, closing, persisted)
   }
 
   private async completeIfReady(
     auctionId: string,
+    productId: string,
+    closing: AuctionClosingResultSnapshot,
     settlement: AuctionSettlementSnapshot,
   ): Promise<AuctionSettlementSnapshot> {
     if (
@@ -190,10 +199,21 @@ export class SettleAuction {
     }
     const releases = await this.settlements.listReleaseTasks(auctionId)
     if (releases.some((release) => release.status !== ReleaseStatus.Released)) return settlement
-    await this.settlements.markCompleted(auctionId, this.clock.now())
-    const completed = await this.settlements.getByAuctionId(auctionId)
-    if (completed === null) throw new Error('El settlement durable no existe.')
-    return completed
+    if (
+      closing.winnerId === null ||
+      closing.winningBidId === null ||
+      closing.finalAmountCredits === null
+    )
+      throw new Error('El cierre durable es invalido.')
+    return this.settlements.completeSettlement({
+      auctionId,
+      productId,
+      resultType: 'WITH_WINNER',
+      winnerId: closing.winnerId,
+      winningBidId: closing.winningBidId,
+      finalAmountCredits: closing.finalAmountCredits,
+      settledAt: this.clock.now(),
+    })
   }
 
   private async executePendingReleases(auctionId: string): Promise<void> {
