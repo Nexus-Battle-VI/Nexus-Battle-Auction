@@ -8,6 +8,7 @@ import type {
   PersistBidResult,
 } from '../../src/application/ports/AuctionRepositoryPort'
 import type {
+  AutoBidLimitReachedNotification,
   OutbidNotification,
   OutbidNotificationPort,
 } from '../../src/application/ports/OutbidNotificationPort'
@@ -98,6 +99,14 @@ const dependencies = () => {
 
       return Promise.resolve()
     }),
+
+    publishAutoBidLimitReached: jest.fn(
+      (notification: AutoBidLimitReachedNotification): Promise<void> => {
+        void notification
+
+        return Promise.resolve()
+      },
+    ),
   }
 
   const clock = {
