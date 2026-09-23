@@ -198,7 +198,7 @@ export interface AuctionPendingClaimTable {
   winning_bid_id: string
   final_amount_credits: string | number
   settled_at: Timestamp
-  claim_status: 'PENDING' | 'CLAIMED'
+  claim_status: 'PENDING' | 'CLAIMED' | 'EXPIRED'
   claimed_at: Timestamp | null
   created_at: Timestamp
   updated_at: Timestamp

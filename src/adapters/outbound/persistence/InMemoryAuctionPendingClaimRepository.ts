@@ -3,9 +3,12 @@ import type {
   AuctionPendingClaimSnapshot,
   CreateAuctionPendingClaimInput,
 } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
+import { AuctionPendingClaim } from '../../../domain/entities/AuctionPendingClaim'
+
 const clone = (claim: AuctionPendingClaimSnapshot): AuctionPendingClaimSnapshot => ({
   ...claim,
   settledAt: new Date(claim.settledAt),
+  claimDeadline: new Date(claim.claimDeadline),
   claimedAt: claim.claimedAt === null ? null : new Date(claim.claimedAt),
   createdAt: new Date(claim.createdAt),
   updatedAt: new Date(claim.updatedAt),
@@ -25,14 +28,7 @@ export class InMemoryAuctionPendingClaimRepository implements AuctionPendingClai
         return Promise.reject(new Error(`Conflicto de intent para claim ${input.auctionId}.`))
       return Promise.resolve(clone(existing))
     }
-    const claim: AuctionPendingClaimSnapshot = {
-      ...input,
-      claimStatus: 'PENDING',
-      claimedAt: null,
-      settledAt: new Date(input.settledAt),
-      createdAt: new Date(input.createdAt),
-      updatedAt: new Date(input.createdAt),
-    }
+    const claim = AuctionPendingClaim.create(input).snapshot()
     this.claims.set(input.auctionId, claim)
     return Promise.resolve(clone(claim))
   }

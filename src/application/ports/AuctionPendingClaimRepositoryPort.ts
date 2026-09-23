@@ -1,16 +1,10 @@
-export type AuctionPendingClaimStatus = 'PENDING' | 'CLAIMED'
-export interface AuctionPendingClaimSnapshot {
-  readonly auctionId: string
-  readonly winnerId: string
-  readonly productId: string
-  readonly winningBidId: string
-  readonly finalAmountCredits: number
-  readonly settledAt: Date
-  readonly claimStatus: AuctionPendingClaimStatus
-  readonly claimedAt: Date | null
-  readonly createdAt: Date
-  readonly updatedAt: Date
-}
+import type {
+  AuctionPendingClaimSnapshot,
+  AuctionPendingClaimStatus,
+} from '../../domain/entities/AuctionPendingClaim'
+
+export type { AuctionPendingClaimSnapshot, AuctionPendingClaimStatus }
+
 export interface CreateAuctionPendingClaimInput {
   readonly auctionId: string
   readonly winnerId: string
