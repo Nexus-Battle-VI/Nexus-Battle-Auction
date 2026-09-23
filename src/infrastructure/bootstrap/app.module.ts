@@ -66,6 +66,7 @@ import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
+import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
@@ -351,6 +352,27 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: ReactToRivalBid,
+
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        persistence: PersistBidWithCredits,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+        notifications: OutbidNotificationPort,
+      ): ReactToRivalBid =>
+        new ReactToRivalBid(repository, persistence, clock, identifiers, notifications),
+
+      inject: [
+        AUCTION_REPOSITORY,
+        PersistBidWithCredits,
+        CLOCK,
+        IDENTIFIER_GENERATOR,
+        OUTBID_NOTIFICATION,
+      ],
+    },
+
+    {
       provide: RegisterBid,
 
       useFactory: (
@@ -359,7 +381,9 @@ export const INTERNAL_CALLERS: readonly string[] = []
         clock: ClockPort,
         identifiers: IdentifierGeneratorPort,
         notifications: OutbidNotificationPort,
-      ): RegisterBid => new RegisterBid(repository, persistence, clock, identifiers, notifications),
+        autoBidReactor: ReactToRivalBid,
+      ): RegisterBid =>
+        new RegisterBid(repository, persistence, clock, identifiers, notifications, autoBidReactor),
 
       inject: [
         AUCTION_REPOSITORY,
@@ -367,6 +391,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
         CLOCK,
         IDENTIFIER_GENERATOR,
         OUTBID_NOTIFICATION,
+        ReactToRivalBid,
       ],
     },
 
