@@ -22,6 +22,10 @@ import type {
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
+import type {
+  AuctionSettlementCandidate,
+  AuctionSettlementCandidateReaderPort,
+} from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
 import type { AuctionClosingOutcome } from '../../../domain/entities/Auction'
 import {
   Auction,
@@ -165,7 +169,9 @@ const findLeadingBid = async (
   return row === undefined ? null : toBidSnapshot(row)
 }
 
-export class PostgresAuctionRepository implements AuctionRepositoryPort {
+export class PostgresAuctionRepository
+  implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
+{
   constructor(private readonly db: Kysely<Database>) {}
   async finishAuction(command: FinishAuctionCommand): Promise<void> {
     const result = command.closingResult.snapshot()
@@ -591,6 +597,23 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
 
   findById(auctionId: string): Promise<AuctionSnapshot | null> {
     return findAuction(this.db, auctionId)
+  }
+
+  async findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
+    const rows = await this.db
+      .selectFrom('auctions')
+      .select(['id', 'status', 'closes_at'])
+      .where('closes_at', '<=', now)
+      .where('status', 'in', [AuctionStatus.Active, AuctionStatus.Finished])
+      .orderBy('closes_at', 'asc')
+      .orderBy('id', 'asc')
+      .execute()
+
+    return rows.map((row) => ({
+      auctionId: row.id,
+      status: row.status as AuctionStatus,
+      closesAt: new Date(row.closes_at),
+    }))
   }
 
   findAuctionAggregate(auctionId: string): Promise<Auction | null> {

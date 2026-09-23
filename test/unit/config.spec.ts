@@ -28,6 +28,18 @@ describe('Configuracion del servicio', () => {
       notificationsBaseUrl: null,
 
       notificationsTimeoutMs: 3_000,
+
+      auctionSettlementBatchSize: 25,
+
+      auctionSettlementConcurrency: 4,
+
+      auctionSettlementLeaseMs: 300_000,
+
+      auctionSettlementRetryDelayMs: 30_000,
+
+      auctionSettlementSchedulerEnabled: false,
+
+      auctionSettlementPollIntervalMs: 5_000,
     })
   })
 
@@ -270,5 +282,87 @@ describe('Configuracion del servicio', () => {
     expect(() => loadConfig({ INVENTORY_BASE_URL: 'https://inventory.example.com' })).toThrow(
       /INTERNAL_SERVICE_AUTH_SECRET/,
     )
+  })
+
+  it('lee la configuracion del worker de settlement', () => {
+    expect(
+      loadConfig({
+        AUCTION_SETTLEMENT_BATCH_SIZE: '40',
+        AUCTION_SETTLEMENT_CONCURRENCY: '8',
+        AUCTION_SETTLEMENT_LEASE_MS: '60000',
+        AUCTION_SETTLEMENT_RETRY_DELAY_MS: '5000',
+      }),
+    ).toMatchObject({
+      auctionSettlementBatchSize: 40,
+      auctionSettlementConcurrency: 8,
+      auctionSettlementLeaseMs: 60_000,
+      auctionSettlementRetryDelayMs: 5_000,
+    })
+  })
+
+  it.each([
+    ['AUCTION_SETTLEMENT_BATCH_SIZE', '0'],
+    ['AUCTION_SETTLEMENT_BATCH_SIZE', '101'],
+    ['AUCTION_SETTLEMENT_CONCURRENCY', '17'],
+    ['AUCTION_SETTLEMENT_LEASE_MS', '29999'],
+    ['AUCTION_SETTLEMENT_RETRY_DELAY_MS', '999'],
+  ])('rechaza %s fuera de rango', (key, value) => {
+    expect(() => loadConfig({ [key]: value })).toThrow(ConfigurationError)
+  })
+
+  it('rechaza concurrencia mayor al batch', () => {
+    expect(() =>
+      loadConfig({
+        AUCTION_SETTLEMENT_BATCH_SIZE: '2',
+        AUCTION_SETTLEMENT_CONCURRENCY: '3',
+      }),
+    ).toThrow(/CONCURRENCY/)
+  })
+
+  it.each(['true', 'false'])('lee scheduler enabled estricto: %s', (enabled) => {
+    const common =
+      enabled === 'true'
+        ? {
+            PERSISTENCE_DRIVER: 'postgres',
+            DATABASE_URL: 'postgres://db/auction',
+            INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+            WALLET_BASE_URL: 'http://wallet:3004',
+            INVENTORY_BASE_URL: 'http://inventory:3006',
+          }
+        : {}
+    expect(
+      loadConfig({ ...common, AUCTION_SETTLEMENT_SCHEDULER_ENABLED: enabled })
+        .auctionSettlementSchedulerEnabled,
+    ).toBe(enabled === 'true')
+  })
+
+  it('rechaza scheduler enabled ambiguo', () => {
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_SCHEDULER_ENABLED: 'yes' })).toThrow(
+      ConfigurationError,
+    )
+  })
+
+  it.each(['1000', '5000', '300000'])('acepta poll interval valido %s', (interval) => {
+    expect(loadConfig({ AUCTION_SETTLEMENT_POLL_INTERVAL_MS: interval })).toMatchObject({
+      auctionSettlementPollIntervalMs: Number(interval),
+    })
+  })
+
+  it.each(['999', '300001'])('rechaza poll interval fuera de rango %s', (interval) => {
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_POLL_INTERVAL_MS: interval })).toThrow(
+      ConfigurationError,
+    )
+  })
+
+  it('falla cerrado si el scheduler no tiene persistencia o dependencias externas', () => {
+    const enabled = { AUCTION_SETTLEMENT_SCHEDULER_ENABLED: 'true' }
+    expect(() => loadConfig(enabled)).toThrow(/PERSISTENCE_DRIVER/)
+    expect(() =>
+      loadConfig({
+        ...enabled,
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+      }),
+    ).toThrow(/WALLET_BASE_URL/)
   })
 })

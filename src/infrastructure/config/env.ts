@@ -74,6 +74,18 @@ export interface AppConfig {
   readonly inventoryBaseUrl: string | null
 
   readonly inventoryRequestTimeoutMs: number
+
+  readonly auctionSettlementBatchSize: number
+
+  readonly auctionSettlementConcurrency: number
+
+  readonly auctionSettlementLeaseMs: number
+
+  readonly auctionSettlementRetryDelayMs: number
+
+  readonly auctionSettlementSchedulerEnabled: boolean
+
+  readonly auctionSettlementPollIntervalMs: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -233,6 +245,40 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     60_000,
   )
 
+  const auctionSettlementBatchSize = readInteger(env, 'AUCTION_SETTLEMENT_BATCH_SIZE', 25, 1, 100)
+  const auctionSettlementConcurrency = readInteger(env, 'AUCTION_SETTLEMENT_CONCURRENCY', 4, 1, 16)
+  if (auctionSettlementConcurrency > auctionSettlementBatchSize) {
+    throw new ConfigurationError(
+      'AUCTION_SETTLEMENT_CONCURRENCY no puede superar AUCTION_SETTLEMENT_BATCH_SIZE.',
+    )
+  }
+  const auctionSettlementLeaseMs = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_LEASE_MS',
+    300_000,
+    30_000,
+    900_000,
+  )
+  const auctionSettlementRetryDelayMs = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_RETRY_DELAY_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionSettlementSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_SETTLEMENT_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionSettlementPollIntervalMs = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_POLL_INTERVAL_MS',
+    5_000,
+    1_000,
+    300_000,
+  )
+
   if (walletBaseUrl !== '') {
     try {
       new URL(walletBaseUrl)
@@ -259,6 +305,19 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     throw new ConfigurationError(
       'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando INVENTORY_BASE_URL esta configurado.',
     )
+  }
+
+  if (auctionSettlementSchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_SETTLEMENT_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (walletBaseUrl === '' || inventoryBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'WALLET_BASE_URL, INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_SETTLEMENT_SCHEDULER_ENABLED=true.',
+      )
+    }
   }
 
   /*
@@ -319,5 +378,17 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     inventoryBaseUrl: inventoryBaseUrl === '' ? null : inventoryBaseUrl,
 
     inventoryRequestTimeoutMs,
+
+    auctionSettlementBatchSize,
+
+    auctionSettlementConcurrency,
+
+    auctionSettlementLeaseMs,
+
+    auctionSettlementRetryDelayMs,
+
+    auctionSettlementSchedulerEnabled,
+
+    auctionSettlementPollIntervalMs,
   }
 }

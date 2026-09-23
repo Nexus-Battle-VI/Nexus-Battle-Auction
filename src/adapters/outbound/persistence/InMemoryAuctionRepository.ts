@@ -18,6 +18,10 @@ import type {
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
+import type {
+  AuctionSettlementCandidate,
+  AuctionSettlementCandidateReaderPort,
+} from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
 import {
   Auction,
   AuctionStatus,
@@ -94,7 +98,9 @@ const cloneAuction = (auction: AuctionSnapshot): AuctionSnapshot => ({
       }),
 })
 
-export class InMemoryAuctionRepository implements AuctionRepositoryPort {
+export class InMemoryAuctionRepository
+  implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
+{
   private readonly auctions = new Map<string, AuctionSnapshot>()
 
   private readonly inventoryCommitmentIds = new Map<string, string>()
@@ -242,6 +248,23 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     const auction = this.auctions.get(auctionId)
 
     return Promise.resolve(auction === undefined ? null : cloneAuction(auction))
+  }
+
+  findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
+    return Promise.resolve(
+      [...this.auctions.values()]
+        .filter((auction) => auction.closesAt.getTime() <= now.getTime())
+        .map((auction) => ({
+          auctionId: auction.id,
+          status: auction.status,
+          closesAt: new Date(auction.closesAt),
+        }))
+        .sort(
+          (left, right) =>
+            left.closesAt.getTime() - right.closesAt.getTime() ||
+            left.auctionId.localeCompare(right.auctionId),
+        ),
+    )
   }
 
   findAuctionAggregate(auctionId: string): Promise<Auction | null> {
