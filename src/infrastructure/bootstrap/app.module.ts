@@ -124,6 +124,7 @@ import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWit
 import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
 import { ClassifyAuctionLoserCredits } from '../../application/use-cases/ClassifyAuctionLoserCredits'
 import { PrepareAuctionLoserReleaseTasks } from '../../application/use-cases/PrepareAuctionLoserReleaseTasks'
+import { ExpirePendingClaims } from '../../application/use-cases/ExpirePendingClaims'
 import { ProcessExpiredAuctions } from '../../application/use-cases/ProcessExpiredAuctions'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
@@ -135,6 +136,7 @@ import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
 import { createLogger, type Logger } from '../observability/logger'
 import { createDatabase, pingDatabase } from '../persistence/database'
+import { AuctionPendingClaimExpirationScheduler } from '../scheduling/AuctionPendingClaimExpirationScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
 import {
   NodeSchedulerTimer,
@@ -569,6 +571,35 @@ export const INTERNAL_CALLERS: readonly string[] = []
           pollIntervalMs: config.auctionSettlementPollIntervalMs,
         }),
       inject: [ProcessExpiredAuctions, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+
+    {
+      provide: ExpirePendingClaims,
+      useFactory: (
+        pendingClaims: AuctionPendingClaimRepositoryPort,
+        clock: ClockPort,
+        logger: Logger,
+        config: AppConfig,
+      ): ExpirePendingClaims =>
+        new ExpirePendingClaims(pendingClaims, clock, logger, {
+          batchSize: config.auctionPendingClaimExpirationBatchSize,
+        }),
+      inject: [AUCTION_PENDING_CLAIM_REPOSITORY, CLOCK, LOGGER, APP_CONFIG],
+    },
+
+    {
+      provide: AuctionPendingClaimExpirationScheduler,
+      useFactory: (
+        worker: ExpirePendingClaims,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionPendingClaimExpirationScheduler =>
+        new AuctionPendingClaimExpirationScheduler(worker, timer, logger, {
+          enabled: config.auctionPendingClaimExpirationSchedulerEnabled,
+          pollIntervalMs: config.auctionPendingClaimExpirationPollIntervalMs,
+        }),
+      inject: [ExpirePendingClaims, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
     },
 
     {

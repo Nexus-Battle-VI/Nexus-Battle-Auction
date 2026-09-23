@@ -92,6 +92,12 @@ export interface AppConfig {
   readonly auctionSettlementQueueUrl: string | null
 
   readonly auctionSettlementEventDispatchBatchSize: number
+
+  readonly auctionPendingClaimExpirationSchedulerEnabled: boolean
+
+  readonly auctionPendingClaimExpirationPollIntervalMs: number
+
+  readonly auctionPendingClaimExpirationBatchSize: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -351,6 +357,29 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  const auctionPendingClaimExpirationSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_PENDING_CLAIM_EXPIRATION_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionPendingClaimExpirationPollIntervalMs = readInteger(
+    env,
+    'AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS',
+    60_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionPendingClaimExpirationBatchSize = readInteger(
+    env,
+    'AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE',
+    100,
+    1,
+    1_000,
+  )
+  // Sin dependencias externas (Wallet/Inventory): a diferencia del scheduler
+  // de settlement, no exige postgres -- una instancia en memoria puede
+  // expirar sus propios pending-claims igual de bien para desarrollo local.
+
   /*
    * Si se configura Notifications, una llamada sin firma no
    * serviria: Notifications la rechazaria con 401.
@@ -427,5 +456,11 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionSettlementQueueUrl: auctionSettlementQueueUrl === '' ? null : auctionSettlementQueueUrl,
 
     auctionSettlementEventDispatchBatchSize,
+
+    auctionPendingClaimExpirationSchedulerEnabled,
+
+    auctionPendingClaimExpirationPollIntervalMs,
+
+    auctionPendingClaimExpirationBatchSize,
   }
 }

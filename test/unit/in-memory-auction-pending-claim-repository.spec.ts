@@ -119,4 +119,86 @@ describe('InMemoryAuctionPendingClaimRepository', () => {
       ).rejects.toThrow('No existe pending-claim')
     })
   })
+
+  describe('findExpirablePending / markExpired (HU-69.6)', () => {
+    it('el limite exacto del dia 7 NO es candidato a expirar', async () => {
+      const repository = new InMemoryAuctionPendingClaimRepository()
+      const settledAt = at('2026-10-01T12:00:00.000Z')
+      await repository.createIfAbsent(claim('auction-1', { settledAt }))
+      const deadline = new Date(settledAt.getTime() + CLAIM_PERIOD_MS)
+
+      await expect(repository.findExpirablePending(deadline, 10)).resolves.toEqual([])
+    })
+
+    it('1 ms despues del limite ya es candidato, y markExpired lo transiciona', async () => {
+      const repository = new InMemoryAuctionPendingClaimRepository()
+      const settledAt = at('2026-10-01T12:00:00.000Z')
+      await repository.createIfAbsent(claim('auction-1', { settledAt }))
+      const pastDeadline = new Date(settledAt.getTime() + CLAIM_PERIOD_MS + 1)
+
+      await expect(repository.findExpirablePending(pastDeadline, 10)).resolves.toEqual([
+        expect.objectContaining({ auctionId: 'auction-1', claimStatus: 'PENDING' }),
+      ])
+      await expect(repository.markExpired('auction-1', pastDeadline)).resolves.toMatchObject({
+        claimStatus: 'EXPIRED',
+        claimedAt: null,
+      })
+      await expect(repository.findExpirablePending(pastDeadline, 10)).resolves.toEqual([])
+    })
+
+    it('ordena candidatos por claimDeadline ascendente y respeta el limite', async () => {
+      const repository = new InMemoryAuctionPendingClaimRepository()
+      await repository.createIfAbsent(
+        claim('auction-newer', { settledAt: at('2026-10-02T00:00:00.000Z') }),
+      )
+      await repository.createIfAbsent(
+        claim('auction-older', { settledAt: at('2026-10-01T00:00:00.000Z') }),
+      )
+      const now = at('2026-10-20T00:00:00.000Z')
+
+      await expect(repository.findExpirablePending(now, 1)).resolves.toEqual([
+        expect.objectContaining({ auctionId: 'auction-older' }),
+      ])
+    })
+
+    it('no incluye pendientes ya CLAIMED aunque el plazo haya vencido', async () => {
+      const repository = new InMemoryAuctionPendingClaimRepository()
+      const settledAt = at('2026-10-01T12:00:00.000Z')
+      await repository.createIfAbsent(claim('auction-1', { settledAt }))
+      await repository.markClaimed('auction-1', new Date(settledAt.getTime() + 1_000))
+      const now = at('2026-10-20T00:00:00.000Z')
+
+      await expect(repository.findExpirablePending(now, 10)).resolves.toEqual([])
+    })
+
+    it('rechaza expirar un pending-claim ya CLAIMED (no revierte un reclamo)', async () => {
+      const repository = new InMemoryAuctionPendingClaimRepository()
+      await repository.createIfAbsent(claim())
+      await repository.markClaimed('auction-1', at('2026-10-02T12:00:00.000Z'))
+
+      await expect(
+        repository.markExpired('auction-1', at('2026-10-20T00:00:00.000Z')),
+      ).rejects.toMatchObject({ code: AuctionPendingClaimRuleCode.AlreadyClaimed })
+    })
+
+    it('reintentar sobre un producto ya expirado es un no-op seguro (rechaza, no revierte)', async () => {
+      const repository = new InMemoryAuctionPendingClaimRepository()
+      const settledAt = at('2026-10-01T12:00:00.000Z')
+      await repository.createIfAbsent(claim('auction-1', { settledAt }))
+      const now = at('2026-10-20T00:00:00.000Z')
+      await repository.markExpired('auction-1', now)
+
+      await expect(repository.markExpired('auction-1', now)).rejects.toMatchObject({
+        code: AuctionPendingClaimRuleCode.AlreadyExpired,
+      })
+    })
+
+    it('rechaza expirar un auctionId sin pending-claim', async () => {
+      const repository = new InMemoryAuctionPendingClaimRepository()
+
+      await expect(
+        repository.markExpired('auction-missing', at('2026-10-20T00:00:00.000Z')),
+      ).rejects.toThrow('No existe pending-claim')
+    })
+  })
 })
