@@ -30,6 +30,7 @@ import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/A
 import { ClassifyAuctionLoserCredits } from '../../src/application/use-cases/ClassifyAuctionLoserCredits'
 import { PrepareAuctionLoserReleaseTasks } from '../../src/application/use-cases/PrepareAuctionLoserReleaseTasks'
 import { SettleAuction } from '../../src/application/use-cases/SettleAuction'
+import { PostgresAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
 import type { ClockPort } from '../../src/application/ports/ClockPort'
 import type {
   AuctionWalletPort,
@@ -38,6 +39,11 @@ import type {
   WalletHoldOutcome,
   WalletHoldResult,
 } from '../../src/application/ports/AuctionWalletPort'
+import type {
+  MarkInventoryProductPendingClaimCommand,
+  ProductInventoryPort,
+  ReleaseInventoryProductCommand,
+} from '../../src/application/ports/ProductInventoryPort'
 import {
   MIGRATIONS,
   createDatabase,
@@ -300,11 +306,49 @@ describe('Persistencia PostgreSQL', () => {
       }
     }
 
-    const createSettleAuctionForDb = (wallet = new FakeDbWallet()) => {
+    class FakeDbInventory implements ProductInventoryPort {
+      readonly releaseCalls: ReleaseInventoryProductCommand[] = []
+      readonly pendingClaimCalls: MarkInventoryProductPendingClaimCommand[] = []
+
+      inspect(): Promise<{ readonly ownedByPlayer: boolean; readonly inUse: boolean }> {
+        return Promise.resolve({ ownedByPlayer: true, inUse: false })
+      }
+
+      commit(): Promise<never> {
+        return Promise.reject(new Error('No debe invocarse commit durante settlement.'))
+      }
+
+      release(command: ReleaseInventoryProductCommand) {
+        this.releaseCalls.push(command)
+        return Promise.resolve({
+          operationId: command.operationId,
+          commitmentId: command.commitmentId,
+          status: 'RELEASED' as const,
+          applied: true,
+        })
+      }
+
+      markPendingClaim(command: MarkInventoryProductPendingClaimCommand) {
+        this.pendingClaimCalls.push(command)
+        return Promise.resolve({
+          operationId: command.operationId,
+          commitmentId: command.commitmentId,
+          status: 'PENDING_CLAIM' as const,
+          winnerId: command.winnerId,
+          applied: true,
+        })
+      }
+    }
+
+    const createSettleAuctionForDb = (
+      wallet = new FakeDbWallet(),
+      inventory = new FakeDbInventory(),
+    ) => {
       const auctions = new PostgresAuctionRepository(db)
       const settlements = new PostgresAuctionSettlementRepository(db)
       return {
         wallet,
+        inventory,
         auctions,
         settlements,
         useCase: new SettleAuction(
@@ -314,6 +358,8 @@ describe('Persistencia PostgreSQL', () => {
           wallet,
           new ClassifyAuctionLoserCredits(new PostgresBidCreditOperationReader(db)),
           new PrepareAuctionLoserReleaseTasks(settlements),
+          inventory,
+          new PostgresAuctionInventorySettlementIntentRepository(db),
         ),
       }
     }

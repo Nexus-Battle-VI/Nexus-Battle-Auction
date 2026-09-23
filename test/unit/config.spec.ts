@@ -244,4 +244,31 @@ describe('Configuracion del servicio', () => {
       /INTERNAL_SERVICE_AUTH_SECRET/,
     )
   })
+
+  it.each(['1', '5000'])('acepta timeout Inventory valido %s', (timeout) => {
+    expect(
+      loadConfig({
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        INVENTORY_BASE_URL: 'https://inventory.example.com/',
+        INVENTORY_REQUEST_TIMEOUT_MS: timeout,
+      }),
+    ).toMatchObject({
+      inventoryBaseUrl: 'https://inventory.example.com/',
+      inventoryRequestTimeoutMs: Number(timeout),
+    })
+  })
+
+  it.each(['0', '60001', 'abc', ''])('rechaza timeout Inventory invalido %s', (timeout) => {
+    expect(() => loadConfig({ INVENTORY_REQUEST_TIMEOUT_MS: timeout })).toThrow(ConfigurationError)
+  })
+
+  it('valida URL y secreto Inventory opcional', () => {
+    expect(loadConfig({}).inventoryBaseUrl).toBeNull()
+    expect(() =>
+      loadConfig({ INVENTORY_BASE_URL: 'not-url', INTERNAL_SERVICE_AUTH_SECRET: 'secret' }),
+    ).toThrow(ConfigurationError)
+    expect(() => loadConfig({ INVENTORY_BASE_URL: 'https://inventory.example.com' })).toThrow(
+      /INTERNAL_SERVICE_AUTH_SECRET/,
+    )
+  })
 })

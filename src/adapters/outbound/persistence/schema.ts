@@ -81,6 +81,20 @@ export interface AuctionPublicationOperationTable {
   completed_at: Timestamp
 }
 
+export interface AuctionPublicationIntentTable {
+  operation_id: string
+  auction_id: string
+  seller_id: string
+  product_id: string
+  closes_at: Timestamp
+  inventory_commitment_id: string | null
+  inventory_status: 'PENDING' | 'COMMITTED' | 'RELEASED'
+  publication_status: 'PENDING' | 'COMPLETED' | 'FAILED_TERMINAL'
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
 export interface AuctionPublicationFailureTable {
   operation_id: string
   auction_id: string
@@ -119,6 +133,7 @@ export interface Database {
   auction_bids: AuctionBidTable
   auction_auto_bids: AuctionAutoBidTable
   auction_publication_operations: AuctionPublicationOperationTable
+  auction_publication_intents: AuctionPublicationIntentTable
   auction_publication_failures: AuctionPublicationFailureTable
   auction_bid_credit_operations: AuctionBidCreditOperationTable
   auction_bid_credit_failures: AuctionBidCreditFailureTable
@@ -127,6 +142,22 @@ export interface Database {
   auction_settlements: AuctionSettlementTable
   auction_settlement_releases: AuctionSettlementReleaseTable
   auction_pending_claims: AuctionPendingClaimTable
+  auction_inventory_settlement_intents: AuctionInventorySettlementIntentTable
+}
+
+export interface AuctionInventorySettlementIntentTable {
+  auction_id: string
+  operation_id: string
+  action: 'RELEASE' | 'PENDING_CLAIM'
+  commitment_id: string
+  seller_id: string
+  product_id: string
+  winner_id: string | null
+  status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR'
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+  confirmed_at: Timestamp | null
 }
 
 export interface AuctionSettlementTable {

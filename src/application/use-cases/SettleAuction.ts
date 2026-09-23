@@ -3,7 +3,17 @@ import {
   type AuctionClosingResultSnapshot,
 } from '../../domain/entities/AuctionClosingResult'
 import { AuctionStatus } from '../../domain/entities/Auction'
+import {
+  ExternalContractError,
+  ExternalDependencyUnavailableError,
+  ExternalResourceNotFoundError,
+} from '../errors/ExternalDependencyError'
 import type { AuctionRepositoryPort } from '../ports/AuctionRepositoryPort'
+import type {
+  AuctionInventorySettlementIntentRepositoryPort,
+  AuctionInventorySettlementIntentSnapshot,
+  CreateAuctionInventorySettlementIntentInput,
+} from '../ports/AuctionInventorySettlementIntentRepositoryPort'
 import {
   AuctionSettlementStatus,
   CaptureStatus,
@@ -15,6 +25,11 @@ import type {
 } from '../ports/AuctionSettlementRepositoryPort'
 import type { ClockPort } from '../ports/ClockPort'
 import type { AuctionWalletPort } from '../ports/AuctionWalletPort'
+import {
+  inventoryPendingClaimOperationId,
+  inventoryReleaseOperationId,
+} from '../ports/ProductInventoryPort'
+import type { ProductInventoryPort } from '../ports/ProductInventoryPort'
 import type { ClassifyAuctionLoserCredits } from './ClassifyAuctionLoserCredits'
 import type { PrepareAuctionLoserReleaseTasks } from './PrepareAuctionLoserReleaseTasks'
 
@@ -26,6 +41,8 @@ export class SettleAuction {
     private readonly wallet: AuctionWalletPort,
     private readonly classifyLoserCredits: ClassifyAuctionLoserCredits,
     private readonly prepareLoserReleaseTasks: PrepareAuctionLoserReleaseTasks,
+    private readonly inventory: ProductInventoryPort,
+    private readonly inventoryIntents: AuctionInventorySettlementIntentRepositoryPort,
   ) {}
 
   async execute(input: { auctionId: string }): Promise<AuctionSettlementSnapshot> {
@@ -66,13 +83,25 @@ export class SettleAuction {
       sellerId: closed.sellerId.value,
       createdAt: this.clock.now(),
     })
-    if (settlement.status !== AuctionSettlementStatus.Completed)
+    if (settlement.status !== AuctionSettlementStatus.Completed) {
+      const intent = await this.getOrCreateInventoryIntent({
+        auctionId: input.auctionId,
+        operationId: inventoryReleaseOperationId(input.auctionId),
+        action: 'RELEASE',
+        commitmentId: await this.requireInventoryCommitmentId(input.auctionId),
+        sellerId: closed.sellerId.value,
+        productId: closed.productId.value,
+        createdAt: this.clock.now(),
+      })
+      const resolved = await this.resolveInventoryIntent(intent)
+      if (resolved.status !== 'CONFIRMED') return settlement
       await this.settlements.completeSettlement({
         auctionId: input.auctionId,
         productId: closed.productId.value,
         resultType: 'WITHOUT_BIDS',
         settledAt: this.clock.now(),
       })
+    }
     const completed = await this.settlements.getByAuctionId(input.auctionId)
     if (completed === null) throw new Error('El settlement durable no existe.')
     return completed
@@ -120,6 +149,7 @@ export class SettleAuction {
     if (settlement.captureStatus === CaptureStatus.Confirmed)
       return this.prepareLoserReleases(
         auctionId,
+        auction.sellerId.value,
         auction.productId.value,
         closing,
         settlement.status === AuctionSettlementStatus.LoserReleasesPending,
@@ -154,12 +184,19 @@ export class SettleAuction {
     const persisted = await this.settlements.getByAuctionId(auctionId)
     if (persisted === null) throw new Error('El settlement durable no existe.')
     return persisted.captureStatus === CaptureStatus.Confirmed
-      ? this.prepareLoserReleases(auctionId, auction.productId.value, closing, false)
+      ? this.prepareLoserReleases(
+          auctionId,
+          auction.sellerId.value,
+          auction.productId.value,
+          closing,
+          false,
+        )
       : persisted
   }
 
   private async prepareLoserReleases(
     auctionId: string,
+    sellerId: string,
     productId: string,
     closing: AuctionClosingResultSnapshot,
     executeReleases: boolean,
@@ -181,11 +218,12 @@ export class SettleAuction {
     }
     const persisted = await this.settlements.getByAuctionId(auctionId)
     if (persisted === null) throw new Error('El settlement durable no existe.')
-    return this.completeIfReady(auctionId, productId, closing, persisted)
+    return this.completeIfReady(auctionId, sellerId, productId, closing, persisted)
   }
 
   private async completeIfReady(
     auctionId: string,
+    sellerId: string,
     productId: string,
     closing: AuctionClosingResultSnapshot,
     settlement: AuctionSettlementSnapshot,
@@ -205,6 +243,18 @@ export class SettleAuction {
       closing.finalAmountCredits === null
     )
       throw new Error('El cierre durable es invalido.')
+    const intent = await this.getOrCreateInventoryIntent({
+      auctionId,
+      operationId: inventoryPendingClaimOperationId(auctionId),
+      action: 'PENDING_CLAIM',
+      commitmentId: await this.requireInventoryCommitmentId(auctionId),
+      sellerId,
+      productId,
+      winnerId: closing.winnerId,
+      createdAt: this.clock.now(),
+    })
+    const resolved = await this.resolveInventoryIntent(intent)
+    if (resolved.status !== 'CONFIRMED') return settlement
     return this.settlements.completeSettlement({
       auctionId,
       productId,
@@ -241,6 +291,62 @@ export class SettleAuction {
           this.clock.now(),
         )
       }
+    }
+  }
+
+  private async requireInventoryCommitmentId(auctionId: string): Promise<string> {
+    const commitmentId = await this.auctions.findInventoryCommitmentId(auctionId)
+    if (commitmentId === null)
+      throw new Error(`La subasta ${auctionId} no tiene un inventoryCommitmentId durable.`)
+    return commitmentId
+  }
+
+  private getOrCreateInventoryIntent(
+    input: CreateAuctionInventorySettlementIntentInput,
+  ): Promise<AuctionInventorySettlementIntentSnapshot> {
+    return this.inventoryIntents.getOrCreate(input)
+  }
+
+  private async resolveInventoryIntent(
+    intent: AuctionInventorySettlementIntentSnapshot,
+  ): Promise<AuctionInventorySettlementIntentSnapshot> {
+    if (intent.status === 'CONFIRMED' || intent.status === 'TERMINAL_ERROR') return intent
+    try {
+      if (intent.action === 'RELEASE') {
+        await this.inventory.release({
+          operationId: intent.operationId,
+          commitmentId: intent.commitmentId,
+          auctionId: intent.auctionId,
+          ownerId: intent.sellerId,
+          productId: intent.productId,
+          reason: 'AUCTION_WITHOUT_BIDS',
+        })
+      } else {
+        if (intent.winnerId === null) throw new Error('El intent PENDING_CLAIM no tiene winnerId.')
+        await this.inventory.markPendingClaim({
+          operationId: intent.operationId,
+          commitmentId: intent.commitmentId,
+          auctionId: intent.auctionId,
+          sellerId: intent.sellerId,
+          winnerId: intent.winnerId,
+          productId: intent.productId,
+        })
+      }
+      return await this.inventoryIntents.markConfirmed(intent.auctionId, this.clock.now())
+    } catch (error) {
+      if (error instanceof ExternalDependencyUnavailableError)
+        return this.inventoryIntents.markRetryable(
+          intent.auctionId,
+          error.message,
+          this.clock.now(),
+        )
+      if (error instanceof ExternalContractError || error instanceof ExternalResourceNotFoundError)
+        return this.inventoryIntents.markTerminalError(
+          intent.auctionId,
+          error.message,
+          this.clock.now(),
+        )
+      throw error
     }
   }
 }

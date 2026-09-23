@@ -18,6 +18,8 @@ import * as createBidCreditOperations from '../../adapters/outbound/persistence/
 import * as createAuctionAutoBids from '../../adapters/outbound/persistence/migrations/006-create-auction-auto-bids'
 import * as createAuctionSettlements from '../../adapters/outbound/persistence/migrations/007-create-auction-settlements'
 import * as createAuctionPendingClaims from '../../adapters/outbound/persistence/migrations/008-create-auction-pending-claims'
+import * as createAuctionPublicationIntents from '../../adapters/outbound/persistence/migrations/009-create-auction-publication-intents'
+import * as createAuctionInventorySettlementIntents from '../../adapters/outbound/persistence/migrations/010-create-auction-inventory-settlement-intents'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
@@ -91,6 +93,8 @@ export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '006-create-auction-auto-bids': createAuctionAutoBids,
   '007-create-auction-settlements': createAuctionSettlements,
   '008-create-auction-pending-claims': createAuctionPendingClaims,
+  '009-create-auction-publication-intents': createAuctionPublicationIntents,
+  '010-create-auction-inventory-settlement-intents': createAuctionInventorySettlementIntents,
 }
 
 export interface MigrationOutcome {

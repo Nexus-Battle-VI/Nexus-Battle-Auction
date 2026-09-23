@@ -1,9 +1,14 @@
 import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
 import { InMemoryAuctionSettlementRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionSettlementRepository'
+import { InMemoryAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
 import { InMemoryBidCreditOperationReader } from '../../src/adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { Auction } from '../../src/domain/entities/Auction'
 import { Bid } from '../../src/domain/entities/Bid'
 import { SettleAuction } from '../../src/application/use-cases/SettleAuction'
+import {
+  ExternalContractError,
+  ExternalDependencyUnavailableError,
+} from '../../src/application/errors/ExternalDependencyError'
 import { ClassifyAuctionLoserCredits } from '../../src/application/use-cases/ClassifyAuctionLoserCredits'
 import { PrepareAuctionLoserReleaseTasks } from '../../src/application/use-cases/PrepareAuctionLoserReleaseTasks'
 import type { ClockPort } from '../../src/application/ports/ClockPort'
@@ -15,6 +20,13 @@ import type {
   WalletHoldOutcome,
   WalletHoldResult,
 } from '../../src/application/ports/AuctionWalletPort'
+import type {
+  MarkInventoryProductPendingClaimCommand,
+  PendingClaimInventoryProductCommitment,
+  ProductInventoryPort,
+  ReleasedInventoryProductCommitment,
+  ReleaseInventoryProductCommand,
+} from '../../src/application/ports/ProductInventoryPort'
 
 const now = new Date('2026-09-23T12:00:00.000Z')
 const clock: ClockPort = { now: () => new Date(now) }
@@ -88,6 +100,45 @@ class FakeAuctionWallet implements AuctionWalletPort {
   ) {}
 }
 
+class FakeProductInventory implements ProductInventoryPort {
+  readonly release = jest.fn(
+    (command: ReleaseInventoryProductCommand): Promise<ReleasedInventoryProductCommitment> =>
+      Promise.resolve({
+        operationId: command.operationId,
+        commitmentId: command.commitmentId,
+        status: 'RELEASED',
+        applied: true,
+      }),
+  )
+
+  readonly markPendingClaim = jest.fn(
+    (
+      command: MarkInventoryProductPendingClaimCommand,
+    ): Promise<PendingClaimInventoryProductCommitment> =>
+      Promise.resolve({
+        operationId: command.operationId,
+        commitmentId: command.commitmentId,
+        status: 'PENDING_CLAIM',
+        winnerId: command.winnerId,
+        applied: true,
+      }),
+  )
+
+  inspect(): Promise<{ readonly ownedByPlayer: boolean; readonly inUse: boolean }> {
+    return Promise.resolve({ ownedByPlayer: true, inUse: false })
+  }
+
+  commit(): Promise<never> {
+    return Promise.reject(new Error('No debe invocarse commit durante settlement.'))
+  }
+}
+
+const firstInvocation = (orders: readonly number[]): number => {
+  const order = orders[0]
+  if (order === undefined) throw new Error('Se esperaba una invocacion observable.')
+  return order
+}
+
 const persistLeadingBid = async (
   repository: InMemoryAuctionRepository,
   auctionId: string,
@@ -151,25 +202,34 @@ describe('SettleAuction', () => {
   const setup = (
     wallet = new FakeAuctionWallet(),
     operations: readonly BidCreditOperationSnapshot[] = [],
+    inventory = new FakeProductInventory(),
   ) => {
     const auctions = new InMemoryAuctionRepository()
     const settlements = new InMemoryAuctionSettlementRepository()
+    const inventoryIntents = new InMemoryAuctionInventorySettlementIntentRepository()
     const classifyLoserCredits = new ClassifyAuctionLoserCredits(
       new InMemoryBidCreditOperationReader(operations),
     )
     const prepareLoserReleaseTasks = new PrepareAuctionLoserReleaseTasks(settlements)
-    return {
-      auctions,
-      settlements,
-      wallet,
-      useCase: new SettleAuction(
+    const createUseCase = (): SettleAuction =>
+      new SettleAuction(
         auctions,
         settlements,
         clock,
         wallet,
         classifyLoserCredits,
         prepareLoserReleaseTasks,
-      ),
+        inventory,
+        inventoryIntents,
+      )
+    return {
+      auctions,
+      settlements,
+      wallet,
+      inventory,
+      inventoryIntents,
+      createUseCase,
+      useCase: createUseCase(),
     }
   }
 
@@ -998,6 +1058,273 @@ describe('SettleAuction', () => {
     expect(complete).not.toHaveBeenCalled()
     expect(wallet.captureHold).not.toHaveBeenCalled()
     expect(wallet.releaseHold).not.toHaveBeenCalled()
+  })
+
+  it('libera el commitment de Inventory antes de completar WITHOUT_BIDS', async () => {
+    const { auctions, inventory, settlements, useCase } = setup()
+    const auctionId = 'auction-inventory-release'
+    await publish(auctions, auctionId)
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    expect(inventory.release).toHaveBeenCalledWith({
+      operationId: `auction:${auctionId}:inventory:release`,
+      commitmentId: `commitment-${auctionId}`,
+      auctionId,
+      ownerId: 'seller-1',
+      productId: `product-${auctionId}`,
+      reason: 'AUCTION_WITHOUT_BIDS',
+    })
+    expect(completeSettlement).toHaveBeenCalledTimes(1)
+  })
+
+  it('persiste retryable de Inventory y no completa ni invoca Wallet', async () => {
+    const { auctions, inventory, inventoryIntents, wallet, settlements, useCase } = setup()
+    const auctionId = 'auction-inventory-retryable'
+    await publish(auctions, auctionId)
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+    inventory.release.mockRejectedValueOnce(new ExternalDependencyUnavailableError('inventory'))
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'PENDING' })
+
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toMatchObject({
+      status: 'RETRYABLE',
+      operationId: `auction:${auctionId}:inventory:release`,
+    })
+    expect(completeSettlement).not.toHaveBeenCalled()
+    expect(wallet.captureHold).not.toHaveBeenCalled()
+    expect(wallet.releaseHold).not.toHaveBeenCalled()
+  })
+
+  it('persiste error terminal de Inventory y no completa WITHOUT_BIDS', async () => {
+    const { auctions, inventory, inventoryIntents, settlements, useCase } = setup()
+    const auctionId = 'auction-inventory-terminal'
+    await publish(auctions, auctionId)
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+    inventory.release.mockRejectedValueOnce(
+      new ExternalContractError('inventory', 'respuesta invalida'),
+    )
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'PENDING' })
+
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toMatchObject({
+      status: 'TERMINAL_ERROR',
+      lastError: 'respuesta invalida',
+    })
+    expect(completeSettlement).not.toHaveBeenCalled()
+
+    const terminalBeforeReplay = await inventoryIntents.getByAuctionId(auctionId)
+    inventory.release.mockClear()
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'PENDING' })
+    expect(inventory.release).not.toHaveBeenCalled()
+    expect(completeSettlement).not.toHaveBeenCalled()
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toEqual(terminalBeforeReplay)
+  })
+
+  it('no vuelve a llamar Inventory al reproducir WITHOUT_BIDS ya completado', async () => {
+    const { auctions, inventory, useCase } = setup()
+    const auctionId = 'auction-inventory-completed-replay'
+    await publish(auctions, auctionId)
+    await useCase.execute({ auctionId })
+    inventory.release.mockClear()
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    expect(inventory.release).not.toHaveBeenCalled()
+  })
+
+  it('marca PENDING_CLAIM en Inventory tras la captura Wallet del ganador', async () => {
+    const { auctions, inventory, inventoryIntents, useCase } = setup()
+    const auctionId = 'auction-inventory-pending-claim'
+    await publish(auctions, auctionId)
+    await persistLeadingBid(auctions, auctionId, 'hold-inventory-pending-claim')
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    expect(inventory.markPendingClaim).toHaveBeenCalledWith({
+      operationId: `auction:${auctionId}:inventory:pending-claim`,
+      commitmentId: `commitment-${auctionId}`,
+      auctionId,
+      sellerId: 'seller-1',
+      winnerId: 'winner-1',
+      productId: `product-${auctionId}`,
+    })
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toMatchObject({
+      action: 'PENDING_CLAIM',
+      status: 'CONFIRMED',
+    })
+  })
+
+  it('reanuda WITH_WINNER desde intent CONFIRMED tras restart sin repetir efectos externos', async () => {
+    const { auctions, settlements, wallet, inventory, inventoryIntents, createUseCase, useCase } =
+      setup()
+    const auctionId = 'auction-inventory-confirmed-restart'
+    await publish(auctions, auctionId)
+    await persistLeadingBid(auctions, auctionId, 'hold-confirmed-restart')
+    const completeSettlement = jest
+      .spyOn(settlements, 'completeSettlement')
+      .mockRejectedValueOnce(new Error('completion unavailable'))
+
+    await expect(useCase.execute({ auctionId })).rejects.toThrow('completion unavailable')
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toMatchObject({
+      status: 'CONFIRMED',
+    })
+    wallet.captureHold.mockClear()
+    wallet.releaseHold.mockClear()
+    inventory.markPendingClaim.mockClear()
+
+    await expect(createUseCase().execute({ auctionId })).resolves.toMatchObject({
+      status: 'COMPLETED',
+    })
+
+    expect(wallet.captureHold).not.toHaveBeenCalled()
+    expect(wallet.releaseHold).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).not.toHaveBeenCalled()
+    expect(completeSettlement).toHaveBeenCalledTimes(2)
+  })
+
+  it('reintenta el mismo intent cuando Inventory tuvo exito pero markConfirmed fallo', async () => {
+    const { auctions, settlements, inventory, inventoryIntents, useCase } = setup()
+    const auctionId = 'auction-inventory-confirmation-failure'
+    await publish(auctions, auctionId)
+    const markConfirmed = jest
+      .spyOn(inventoryIntents, 'markConfirmed')
+      .mockRejectedValueOnce(new Error('intent persistence unavailable'))
+    inventory.release
+      .mockResolvedValueOnce({
+        operationId: `auction:${auctionId}:inventory:release`,
+        commitmentId: `commitment-${auctionId}`,
+        status: 'RELEASED',
+        applied: true,
+      })
+      .mockResolvedValueOnce({
+        operationId: `auction:${auctionId}:inventory:release`,
+        commitmentId: `commitment-${auctionId}`,
+        status: 'RELEASED',
+        applied: false,
+      })
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+
+    await expect(useCase.execute({ auctionId })).rejects.toThrow('intent persistence unavailable')
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    expect(inventory.release).toHaveBeenCalledTimes(2)
+    expect(inventory.release.mock.calls[1]?.[0]).toEqual(inventory.release.mock.calls[0]?.[0])
+    expect(markConfirmed).toHaveBeenCalledTimes(2)
+    expect(completeSettlement).toHaveBeenCalledTimes(1)
+  })
+
+  it('no recaptura Wallet al reintentar Inventory WITH_WINNER', async () => {
+    const inventory = new FakeProductInventory()
+    inventory.markPendingClaim.mockRejectedValueOnce(
+      new ExternalDependencyUnavailableError('inventory'),
+    )
+    const { auctions, wallet, inventoryIntents, useCase } = setup(
+      new FakeAuctionWallet(),
+      [],
+      inventory,
+    )
+    const auctionId = 'auction-inventory-wallet-checkpoint'
+    await publish(auctions, auctionId)
+    await persistLeadingBid(auctions, auctionId, 'hold-wallet-checkpoint')
+
+    await expect(useCase.execute({ auctionId })).resolves.not.toMatchObject({ status: 'COMPLETED' })
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toMatchObject({
+      status: 'RETRYABLE',
+    })
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    expect(wallet.captureHold).toHaveBeenCalledTimes(1)
+    expect(wallet.releaseHold).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).toHaveBeenCalledTimes(2)
+  })
+
+  it('rechaza settlement sin inventoryCommitmentId sin efectos externos ni intent', async () => {
+    const { auctions, settlements, inventory, inventoryIntents, useCase } = setup()
+    const auctionId = 'auction-inventory-missing-commitment'
+    await publish(auctions, auctionId)
+    jest.spyOn(auctions, 'findInventoryCommitmentId').mockResolvedValue(null)
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+
+    await expect(useCase.execute({ auctionId })).rejects.toThrow('inventoryCommitmentId durable')
+
+    expect(inventory.release).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).not.toHaveBeenCalled()
+    expect(completeSettlement).not.toHaveBeenCalled()
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toBeNull()
+  })
+
+  it('propaga conflicto de intent incompatible sin Inventory ni completion', async () => {
+    const { auctions, settlements, inventory, inventoryIntents, useCase } = setup()
+    const auctionId = 'auction-inventory-conflicting-intent'
+    await publish(auctions, auctionId)
+    await inventoryIntents.getOrCreate({
+      auctionId,
+      operationId: `auction:${auctionId}:inventory:pending-claim`,
+      action: 'PENDING_CLAIM',
+      commitmentId: `commitment-${auctionId}`,
+      sellerId: 'seller-1',
+      productId: `product-${auctionId}`,
+      winnerId: 'other-winner',
+      createdAt: now,
+    })
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+
+    await expect(useCase.execute({ auctionId })).rejects.toThrow('Conflicto de intent Inventory')
+
+    expect(inventory.release).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).not.toHaveBeenCalled()
+    expect(completeSettlement).not.toHaveBeenCalled()
+    await expect(inventoryIntents.getByAuctionId(auctionId)).resolves.toMatchObject({
+      action: 'PENDING_CLAIM',
+      winnerId: 'other-winner',
+    })
+  })
+
+  it('respeta el orden Wallet, Inventory, confirmacion y completion WITH_WINNER', async () => {
+    const { auctions, settlements, wallet, inventory, inventoryIntents, useCase } = setup()
+    const auctionId = 'auction-inventory-winner-order'
+    await publish(auctions, auctionId)
+    await persistBid(auctions, {
+      auctionId,
+      bidId: `bid-loser-${auctionId}`,
+      bidderId: 'loser',
+      amountCredits: 20,
+      creditReservationId: 'hold-loser-order',
+    })
+    await persistLeadingBid(auctions, auctionId, 'hold-winner-order')
+    const markConfirmed = jest.spyOn(inventoryIntents, 'markConfirmed')
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+
+    await useCase.execute({ auctionId })
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    const calls = [
+      firstInvocation(wallet.captureHold.mock.invocationCallOrder),
+      firstInvocation(wallet.releaseHold.mock.invocationCallOrder),
+      firstInvocation(inventory.markPendingClaim.mock.invocationCallOrder),
+      firstInvocation(markConfirmed.mock.invocationCallOrder),
+      firstInvocation(completeSettlement.mock.invocationCallOrder),
+    ]
+    expect(calls).toEqual([...calls].sort((left, right) => left - right))
+  })
+
+  it('respeta el orden Inventory release, confirmacion y completion WITHOUT_BIDS', async () => {
+    const { auctions, settlements, inventory, inventoryIntents, useCase } = setup()
+    const auctionId = 'auction-inventory-release-order'
+    await publish(auctions, auctionId)
+    const markConfirmed = jest.spyOn(inventoryIntents, 'markConfirmed')
+    const completeSettlement = jest.spyOn(settlements, 'completeSettlement')
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    const calls = [
+      firstInvocation(inventory.release.mock.invocationCallOrder),
+      firstInvocation(markConfirmed.mock.invocationCallOrder),
+      firstInvocation(completeSettlement.mock.invocationCallOrder),
+    ]
+    expect(calls).toEqual([...calls].sort((left, right) => left - right))
   })
 
   it('completa cuando la task ya estaba RELEASED', async () => {
