@@ -858,7 +858,10 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
         .execute()
 
       // HU-64.5 consume este evento para notificar a los demas participantes y
-      // liberar los creditos reservados de sus pujas perdedoras.
+      // liberar los creditos reservados de sus pujas perdedoras. `productId`
+      // viaja en el payload -y no solo `auctionId`- para que un consumidor
+      // como HU-65.3/HU-69 (Nexus-Battle-Commerce, "pendientes de recoger")
+      // pueda registrar el producto ganado sin una consulta adicional.
       await transaction
         .insertInto('outbox_events')
         .values({
@@ -867,6 +870,7 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
           event_type: 'auction.closed_by_buy_now.v1',
           payload: {
             auctionId: command.auctionId,
+            productId: auctionRow.product_id,
             sellerId: auctionRow.seller_id,
             buyerId: command.buyerId,
             priceCredits: command.priceCredits,
