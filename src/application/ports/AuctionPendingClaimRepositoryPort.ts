@@ -30,10 +30,7 @@ export interface AuctionPendingClaimRepositoryPort {
    * reclamable). Ordenados por claimDeadline ascendente para procesar primero
    * los mas antiguos.
    */
-  findExpirablePending(
-    now: Date,
-    limit: number,
-  ): Promise<readonly AuctionPendingClaimSnapshot[]>
+  findExpirablePending(now: Date, limit: number): Promise<readonly AuctionPendingClaimSnapshot[]>
   /**
    * Transiciona PENDING -> EXPIRED. Aplica las mismas reglas de dominio que
    * AuctionPendingClaim.expire() (estado y plazo vencido) y lanza

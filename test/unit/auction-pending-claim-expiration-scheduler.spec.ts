@@ -1,4 +1,7 @@
-import type { ExpirePendingClaims, ExpirePendingClaimsResult } from '../../src/application/use-cases/ExpirePendingClaims'
+import type {
+  ExpirePendingClaims,
+  ExpirePendingClaimsResult,
+} from '../../src/application/use-cases/ExpirePendingClaims'
 import { AuctionPendingClaimExpirationScheduler } from '../../src/infrastructure/scheduling/AuctionPendingClaimExpirationScheduler'
 import type {
   SchedulerTimerHandle,

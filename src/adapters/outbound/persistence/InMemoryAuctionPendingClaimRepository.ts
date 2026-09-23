@@ -58,14 +58,12 @@ export class InMemoryAuctionPendingClaimRepository implements AuctionPendingClai
     this.claims.set(auctionId, claimed)
     return clone(claimed)
   }
-  findExpirablePending(
-    now: Date,
-    limit: number,
-  ): Promise<readonly AuctionPendingClaimSnapshot[]> {
+  findExpirablePending(now: Date, limit: number): Promise<readonly AuctionPendingClaimSnapshot[]> {
     return Promise.resolve(
       [...this.claims.values()]
         .filter(
-          (claim) => claim.claimStatus === 'PENDING' && claim.claimDeadline.getTime() < now.getTime(),
+          (claim) =>
+            claim.claimStatus === 'PENDING' && claim.claimDeadline.getTime() < now.getTime(),
         )
         .sort(
           (a, b) =>
