@@ -137,6 +137,44 @@ export class AuctionDetailResponseDto extends AuctionResponseDto {
   currentBid!: BidResponseDto | null
 }
 
+export class ConfigureAutoBidRequestDto {
+  @ApiProperty({
+    example: 100,
+    minimum: 1,
+    description: 'Limite maximo en creditos que el jugador autoriza a pujar automaticamente.',
+  })
+  @IsInt()
+  @Min(1)
+  maxAmountCredits!: number
+}
+
+export class AutoBidConfigResponseDto {
+  @ApiProperty({
+    example: 'auction-123',
+  })
+  auctionId!: string
+
+  @ApiProperty({
+    example: 'player-123',
+  })
+  bidderId!: string
+
+  @ApiProperty({
+    example: 100,
+    minimum: 1,
+  })
+  maxAmountCredits!: number
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  configuredAt!: Date
+
+  @ApiProperty()
+  isActive!: boolean
+}
+
 export const assertIdempotencyKey = (value: string | undefined): string => {
   if (value === undefined || value.trim().length === 0 || value.length > 128) {
     throw new Error('INVALID_IDEMPOTENCY_KEY')
