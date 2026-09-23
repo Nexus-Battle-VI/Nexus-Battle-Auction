@@ -338,6 +338,10 @@ describe('Persistencia PostgreSQL', () => {
           applied: true,
         })
       }
+
+      confirmClaim(): Promise<never> {
+        return Promise.reject(new Error('No debe invocarse confirmClaim durante settlement.'))
+      }
     }
 
     const createSettleAuctionForDb = (

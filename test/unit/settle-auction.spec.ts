@@ -132,6 +132,10 @@ class FakeProductInventory implements ProductInventoryPort {
   commit(): Promise<never> {
     return Promise.reject(new Error('No debe invocarse commit durante settlement.'))
   }
+
+  confirmClaim(): Promise<never> {
+    return Promise.reject(new Error('No debe invocarse confirmClaim durante settlement.'))
+  }
 }
 
 const firstInvocation = (orders: readonly number[]): number => {

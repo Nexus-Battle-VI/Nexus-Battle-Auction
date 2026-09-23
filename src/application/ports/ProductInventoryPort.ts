@@ -29,6 +29,14 @@ export interface MarkInventoryProductPendingClaimCommand {
   readonly productId: string
 }
 
+export interface ConfirmInventoryProductClaimCommand {
+  readonly operationId: string
+  readonly commitmentId: string
+  readonly auctionId: string
+  readonly winnerId: string
+  readonly productId: string
+}
+
 export interface InventoryProductCommitment {
   readonly operationId: string
   readonly commitmentId: string
@@ -51,6 +59,14 @@ export interface PendingClaimInventoryProductCommitment {
   readonly applied: boolean
 }
 
+export interface ClaimedInventoryProductCommitment {
+  readonly operationId: string
+  readonly commitmentId: string
+  readonly status: 'CLAIMED'
+  readonly winnerId: string
+  readonly applied: boolean
+}
+
 export interface ProductInventoryPort {
   inspect(ownerId: string, productId: string): Promise<InventoryProductEligibility>
   commit(command: CommitInventoryProductCommand): Promise<InventoryProductCommitment>
@@ -58,6 +74,10 @@ export interface ProductInventoryPort {
   markPendingClaim(
     command: MarkInventoryProductPendingClaimCommand,
   ): Promise<PendingClaimInventoryProductCommitment>
+  /** HU-69.3: entrega definitiva del producto al ganador tras el reclamo. */
+  confirmClaim(
+    command: ConfirmInventoryProductClaimCommand,
+  ): Promise<ClaimedInventoryProductCommitment>
 }
 
 export const inventoryCommitOperationId = (auctionId: string): string =>
@@ -68,5 +88,8 @@ export const inventoryReleaseOperationId = (auctionId: string): string =>
 
 export const inventoryPendingClaimOperationId = (auctionId: string): string =>
   `auction:${auctionId}:inventory:pending-claim`
+
+export const inventoryClaimOperationId = (auctionId: string): string =>
+  `auction:${auctionId}:inventory:claim`
 
 export const PRODUCT_INVENTORY = Symbol('ProductInventoryPort')

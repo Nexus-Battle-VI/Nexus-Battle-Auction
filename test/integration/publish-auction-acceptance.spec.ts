@@ -123,6 +123,10 @@ class StatefulInventory implements ProductInventoryPort {
   markPendingClaim(): Promise<never> {
     return Promise.reject(new Error('not used by publication'))
   }
+
+  confirmClaim(): Promise<never> {
+    return Promise.reject(new Error('not used by publication'))
+  }
 }
 
 const fixture = (balance = 20) => {

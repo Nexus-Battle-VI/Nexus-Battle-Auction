@@ -5,6 +5,10 @@ import type {
   CreateAuctionPendingClaimInput,
 } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
 import { AuctionPendingClaim } from '../../../domain/entities/AuctionPendingClaim'
+import {
+  AuctionPendingClaimRuleCode,
+  AuctionPendingClaimRuleViolation,
+} from '../../../domain/errors/AuctionPendingClaimRuleViolation'
 import type { Database } from './schema'
 
 type Row = Selectable<Database['auction_pending_claims']>
@@ -73,5 +77,29 @@ export class PostgresAuctionPendingClaimRepository implements AuctionPendingClai
         .orderBy('auction_id')
         .execute()
     ).map(toSnapshot)
+  }
+  async markClaimed(auctionId: string, claimedAt: Date): Promise<AuctionPendingClaimSnapshot> {
+    const current = await this.findByAuctionId(auctionId)
+    if (current === null) throw new Error(`No existe pending-claim para ${auctionId}.`)
+    // Aplica la regla de dominio (estado + plazo vigente) antes de escribir;
+    // el guard `claim_status = 'PENDING'` de abajo cubre la carrera entre esta
+    // lectura y el UPDATE.
+    const claimed = AuctionPendingClaim.restore(current).claim(claimedAt)
+    const result = await this.db
+      .updateTable('auction_pending_claims')
+      .set({
+        claim_status: claimed.claimStatus,
+        claimed_at: claimed.claimedAt,
+        updated_at: claimed.updatedAt,
+      })
+      .where('auction_id', '=', auctionId)
+      .where('claim_status', '=', 'PENDING')
+      .executeTakeFirst()
+    if (result.numUpdatedRows === 0n)
+      throw new AuctionPendingClaimRuleViolation(
+        AuctionPendingClaimRuleCode.AlreadyClaimed,
+        'El producto ya fue reclamado.',
+      )
+    return claimed
   }
 }

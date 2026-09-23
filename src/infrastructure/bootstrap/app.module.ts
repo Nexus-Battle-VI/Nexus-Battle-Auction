@@ -103,6 +103,7 @@ import {
   type SellerSanctionPort,
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
+import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
@@ -569,6 +570,19 @@ export const INTERNAL_CALLERS: readonly string[] = []
         new GetPendingClaims(pendingClaims),
 
       inject: [AUCTION_PENDING_CLAIM_REPOSITORY],
+    },
+
+    {
+      provide: ClaimPendingProduct,
+
+      useFactory: (
+        pendingClaims: AuctionPendingClaimRepositoryPort,
+        auctions: AuctionRepositoryPort,
+        inventory: ProductInventoryPort,
+        clock: ClockPort,
+      ): ClaimPendingProduct => new ClaimPendingProduct(pendingClaims, auctions, inventory, clock),
+
+      inject: [AUCTION_PENDING_CLAIM_REPOSITORY, AUCTION_REPOSITORY, PRODUCT_INVENTORY, CLOCK],
     },
 
     {
