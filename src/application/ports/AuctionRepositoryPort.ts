@@ -112,6 +112,7 @@ export interface CloseAuctionByBuyNowCommand {
   readonly buyerId: string
   readonly transferId: string
   readonly priceCredits: number
+  readonly remainingCredits: number
   readonly closedAt: Date
 }
 
@@ -119,6 +120,23 @@ export interface CloseAuctionByBuyNowResult {
   readonly auction: AuctionSnapshot
   readonly transactionId: string
   readonly replayed: boolean
+}
+
+/**
+ * Confirmacion ya persistida de una compra inmediata, reconstruible SOLO con lo
+ * guardado -sin volver a evaluar el dominio contra el estado actual de la
+ * subasta-. Es lo que permite responder a un reintento con el mismo
+ * `operationId` incluso despues de que la subasta ya cerro, cuando
+ * `BuyNowDomainService` ya no aprobaria una compra nueva (HU-64.4).
+ */
+export interface BuyNowOperationRecord {
+  readonly auction: AuctionSnapshot
+  readonly transactionId: string
+  readonly buyerId: string
+  readonly transferId: string
+  readonly priceCredits: number
+  readonly remainingCredits: number
+  readonly completedAt: Date
 }
 
 export interface RecordBuyNowFailureCommand {
@@ -181,6 +199,8 @@ export interface AuctionRepositoryPort {
   closeByBuyNow(command: CloseAuctionByBuyNowCommand): Promise<CloseAuctionByBuyNowResult>
 
   recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void>
+
+  findBuyNowOperation(operationId: string): Promise<BuyNowOperationRecord | null>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')

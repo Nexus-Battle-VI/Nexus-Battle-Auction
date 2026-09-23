@@ -239,6 +239,14 @@ describe('Servicio BuyNowDomainService HU-64', () => {
     )
   })
 
+  it('rechaza que el vendedor ejecute la compra inmediata de su propia subasta', () => {
+    const request = validRequest()
+
+    expectRule(BuyNowRuleCode.SellerCannotBuyOwnAuction, () =>
+      service.evaluate({ ...request, buyerId: request.auction.sellerId }),
+    )
+  })
+
   it('rechaza una fecha de solicitud invalida', () => {
     expectRule(BuyNowRuleCode.InvalidPurchaseDate, () =>
       service.evaluate(validRequest({ requestedAt: new Date('no-es-fecha') })),
@@ -266,6 +274,18 @@ describe('Servicio BuyNowDomainService HU-64', () => {
 
     it('con todo mal, informa primero que la subasta no esta activa', () => {
       expectRule(BuyNowRuleCode.AuctionNotActive, () => service.evaluate(failing()))
+    })
+
+    it('activa pero comprada por el propio vendedor, informa eso antes que el precio', () => {
+      const request = failing()
+
+      expectRule(BuyNowRuleCode.SellerCannotBuyOwnAuction, () =>
+        service.evaluate({
+          ...request,
+          buyerId: request.auction.sellerId,
+          auction: { ...request.auction, status: 'ACTIVE' },
+        }),
+      )
     })
 
     it('activa pero sin precio, informa el precio antes que la confirmacion y el saldo', () => {

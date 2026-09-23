@@ -1,0 +1,221 @@
+import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
+import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
+import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
+import type { AuctionRepositoryPort } from '../../src/application/ports/AuctionRepositoryPort'
+import type {
+  BuyNowCreditTransfer,
+  BuyNowCreditTransferCommand,
+  WalletPort,
+} from '../../src/application/ports/WalletPort'
+import { TransactionProcessingService } from '../../src/application/services/TransactionProcessingService'
+import {
+  ExecuteBuyNowUseCase,
+  type ExecuteBuyNowCommand,
+} from '../../src/application/use-cases/ExecuteBuyNowUseCase'
+import { Auction } from '../../src/domain/entities/Auction'
+import { BuyNowRuleCode, BuyNowRuleViolation } from '../../src/domain/errors/BuyNowRuleViolation'
+import { BuyNowDomainService } from '../../src/domain/services/BuyNowDomainService'
+
+const PUBLISHED_AT = new Date('2026-09-20T12:00:00.000Z')
+const NOW = new Date('2026-09-21T15:00:00.000Z')
+
+class ConfigurableWallet implements WalletPort {
+  balances = new Map<string, number>([
+    ['buyer-1', 5000],
+    ['buyer-2', 5000],
+  ])
+  private sequence = 0
+
+  getAvailableCredits(buyerId: string): Promise<number> {
+    return Promise.resolve(this.balances.get(buyerId) ?? 0)
+  }
+
+  transferBuyNowCredits(command: BuyNowCreditTransferCommand): Promise<BuyNowCreditTransfer> {
+    return Promise.resolve({
+      transferId: `transfer-${String(++this.sequence)}-${command.operationId}`,
+    })
+  }
+
+  reverseBuyNowCredits(): Promise<void> {
+    return Promise.resolve()
+  }
+}
+
+const seedActiveAuction = async (
+  repository: AuctionRepositoryPort,
+  overrides: {
+    auctionId?: string
+    sellerId?: string
+    buyNowCredits?: number | null
+  } = {},
+): Promise<string> => {
+  const auctionId = overrides.auctionId ?? 'auction-1'
+
+  const auction = Auction.publish({
+    auctionId,
+    sellerId: overrides.sellerId ?? 'seller-1',
+    productId: 'product-1',
+    durationHours: 24,
+    minimumBidCredits: 10,
+    buyNowCredits: overrides.buyNowCredits === undefined ? 2500 : overrides.buyNowCredits,
+    publishedAt: PUBLISHED_AT,
+    eligibility: {
+      productOwnedBySeller: true,
+      productInUse: false,
+      productTradable: true,
+      sellerHasActiveSanctions: false,
+      activeAuctionCount: 0,
+    },
+  })
+
+  await repository.publish({
+    operationId: `publish-${auctionId}`,
+    auction,
+    inventoryCommitmentId: 'commitment-1',
+    feeChargeId: 'fee-1',
+  })
+
+  return auctionId
+}
+
+const fixture = () => {
+  const repository = new InMemoryAuctionRepository()
+  const wallet = new ConfigurableWallet()
+  const clock = { now: () => new Date(NOW) }
+  let sequence = 0
+  const identifiers = { generate: () => `txn-${String(++sequence)}` }
+  const domainService = new BuyNowDomainService()
+  const transactions = new TransactionProcessingService(repository, wallet, clock, identifiers)
+  const useCase = new ExecuteBuyNowUseCase(repository, wallet, domainService, transactions, clock)
+
+  return { repository, wallet, clock, useCase }
+}
+
+const command = (
+  auctionId: string,
+  overrides: Partial<ExecuteBuyNowCommand> = {},
+): ExecuteBuyNowCommand => ({
+  operationId: 'operation-1',
+  buyerId: 'buyer-1',
+  auctionId,
+  confirmed: true,
+  ...overrides,
+})
+
+describe('ExecuteBuyNowUseCase HU-64.4', () => {
+  it('CA-01: ejecuta la compra completa a partir del id de la subasta', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    const confirmation = await useCase.execute(command(auctionId))
+
+    expect(confirmation).toMatchObject({
+      auctionId,
+      buyerId: 'buyer-1',
+      sellerId: 'seller-1',
+      debitedCredits: 2500,
+      remainingCredits: 2500,
+      replayed: false,
+    })
+  })
+
+  it('rechaza un auctionId que no existe', async () => {
+    const { useCase } = fixture()
+
+    await expect(useCase.execute(command('no-existe'))).rejects.toBeInstanceOf(AuctionNotFoundError)
+  })
+
+  it('CA-03: rechaza una subasta sin precio de compra inmediata', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository, { buyNowCredits: null })
+
+    await expect(useCase.execute(command(auctionId))).rejects.toMatchObject({
+      code: BuyNowRuleCode.BuyNowPriceUnavailable,
+    })
+  })
+
+  it('CA-04: rechaza la compra sin la casilla de confirmacion marcada', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    await expect(useCase.execute(command(auctionId, { confirmed: false }))).rejects.toMatchObject({
+      code: BuyNowRuleCode.ConfirmationRequired,
+    })
+  })
+
+  it('CA-02: rechaza la compra con saldo insuficiente y no transfiere nada', async () => {
+    const { repository, wallet, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    wallet.balances.set('buyer-1', 1000)
+
+    await expect(useCase.execute(command(auctionId))).rejects.toMatchObject({
+      code: BuyNowRuleCode.InsufficientCredits,
+      details: { requiredCredits: 2500, availableCredits: 1000, missingCredits: 1500 },
+    })
+
+    await expect(repository.findById(auctionId)).resolves.toMatchObject({ status: 'ACTIVE' })
+  })
+
+  it('rechaza que el vendedor compre su propia subasta', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    await expect(
+      useCase.execute(command(auctionId, { buyerId: 'seller-1' })),
+    ).rejects.toMatchObject({ code: BuyNowRuleCode.SellerCannotBuyOwnAuction })
+  })
+
+  it('rechaza con una NUEVA operacion una subasta que ya fue vendida', async () => {
+    // Distinto de la carrera que cubre HU-64.3 contra Postgres real (dos
+    // operaciones que llegan a la vez a `closeByBuyNow`): aqui la segunda
+    // solicitud es SECUENCIAL, con su propio `operationId`, y no encuentra
+    // ningun registro previo que reproducir. El propio dominio la rechaza -la
+    // subasta ya no esta activa- antes de acercarse siquiera a Wallet.
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    await useCase.execute(command(auctionId))
+
+    await expect(
+      useCase.execute(command(auctionId, { operationId: 'operation-2', buyerId: 'buyer-2' })),
+    ).rejects.toMatchObject({ code: BuyNowRuleCode.AuctionNotActive })
+  })
+
+  it('dos compras concurrentes por la misma subasta dejan una sola ganadora', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    const outcomes = await Promise.allSettled([
+      useCase.execute(command(auctionId, { operationId: 'operation-race-1', buyerId: 'buyer-1' })),
+      useCase.execute(command(auctionId, { operationId: 'operation-race-2', buyerId: 'buyer-2' })),
+    ])
+
+    expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+
+    const rejected = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    )
+
+    expect(rejected?.reason).toBeInstanceOf(AuctionAlreadyClosedError)
+  })
+
+  it('es idempotente ante un reintento con el mismo operationId', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    const first = await useCase.execute(command(auctionId))
+    const second = await useCase.execute(command(auctionId))
+
+    expect(second).toEqual({ ...first, replayed: true })
+  })
+
+  it('propaga un fallo de validacion de entrada como BuyNowRuleViolation', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    await expect(useCase.execute(command(auctionId, { buyerId: ' ' }))).rejects.toBeInstanceOf(
+      BuyNowRuleViolation,
+    )
+  })
+})

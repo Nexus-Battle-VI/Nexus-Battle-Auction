@@ -5,6 +5,7 @@ export enum BuyNowRuleCode {
   InvalidPurchaseDate = 'INVALID_PURCHASE_DATE',
   InvalidCreditBalance = 'INVALID_CREDIT_BALANCE',
   AuctionNotActive = 'AUCTION_NOT_ACTIVE',
+  SellerCannotBuyOwnAuction = 'SELLER_CANNOT_BUY_OWN_AUCTION',
   BuyNowPriceUnavailable = 'BUY_NOW_PRICE_UNAVAILABLE',
   InvalidBuyNowPrice = 'INVALID_BUY_NOW_PRICE',
   ConfirmationRequired = 'CONFIRMATION_REQUIRED',
