@@ -68,6 +68,7 @@ import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
+import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
@@ -412,6 +413,15 @@ export const INTERNAL_CALLERS: readonly string[] = []
         OUTBID_NOTIFICATION,
         ReactToRivalBid,
       ],
+    },
+
+    {
+      provide: ConfigureAutoBid,
+
+      useFactory: (repository: AuctionRepositoryPort, clock: ClockPort): ConfigureAutoBid =>
+        new ConfigureAutoBid(repository, clock),
+
+      inject: [AUCTION_REPOSITORY, CLOCK],
     },
 
     {

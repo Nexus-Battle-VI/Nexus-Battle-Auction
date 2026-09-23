@@ -24,6 +24,7 @@ import {
   ExternalResourceNotFoundError,
 } from '../../../application/errors/ExternalDependencyError'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../../domain/errors/AuctionRuleViolation'
+import { AutoBidRuleCode, AutoBidRuleViolation } from '../../../domain/errors/AutoBidRuleViolation'
 import { BidRuleCode, BidRuleViolation } from '../../../domain/errors/BidRuleViolation'
 
 const body = (statusCode: number, code: string, message: string) => ({
@@ -93,6 +94,21 @@ export const toAuctionHttpException = (error: unknown): HttpException => {
     }
 
     if (error.code === BidRuleCode.SellerCannotBid) {
+      return new ForbiddenException(body(403, error.code, error.message))
+    }
+
+    return new UnprocessableEntityException(body(422, error.code, error.message))
+  }
+
+  if (error instanceof AutoBidRuleViolation) {
+    if (
+      error.code === AutoBidRuleCode.InvalidIdentifier ||
+      error.code === AutoBidRuleCode.InvalidConfigurationDate
+    ) {
+      return new BadRequestException(body(400, error.code, error.message))
+    }
+
+    if (error.code === AutoBidRuleCode.SellerCannotConfigure) {
       return new ForbiddenException(body(403, error.code, error.message))
     }
 
