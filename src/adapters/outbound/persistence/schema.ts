@@ -143,6 +143,21 @@ export interface Database {
   auction_settlement_releases: AuctionSettlementReleaseTable
   auction_pending_claims: AuctionPendingClaimTable
   auction_inventory_settlement_intents: AuctionInventorySettlementIntentTable
+  auction_settlement_work: AuctionSettlementWorkTable
+}
+
+export interface AuctionSettlementWorkTable {
+  auction_id: string
+  status: 'READY' | 'LEASED' | 'RETRYABLE' | 'COMPLETED' | 'TERMINAL'
+  available_at: Timestamp
+  lease_owner: string | null
+  lease_until: Timestamp | null
+  attempts: number
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+  completed_at: Timestamp | null
+  terminal_at: Timestamp | null
 }
 
 export interface AuctionInventorySettlementIntentTable {
