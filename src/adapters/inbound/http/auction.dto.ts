@@ -1,5 +1,16 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
-import { IsIn, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator'
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Min,
+  MinLength,
+} from 'class-validator'
 
 export class PublishAuctionRequestDto {
   @ApiProperty({
@@ -235,6 +246,80 @@ export class PendingClaimResponseDto {
     description: 'Instante en que se confirmo el reclamo (HU-69.3). Null mientras esta PENDING.',
   })
   claimedAt!: Date | null
+}
+
+/**
+ * Request de HU-69.4.
+ *
+ * claimAll=true ignora auctionIds y reclama todos los pending-claims PENDING
+ * del titular autenticado. Sin claimAll, auctionIds es la lista explicita
+ * (puede llegar vacia: la respuesta es 200 con results: []).
+ */
+export class ClaimPendingProductsBatchRequestDto {
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['auction-123', 'auction-456'],
+    description:
+      'Subastas a reclamar. Se ignora si claimAll es true. Una lista vacia u omitida sin claimAll produce results: [].',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MinLength(1, { each: true })
+  @MaxLength(128, { each: true })
+  auctionIds?: string[]
+
+  @ApiPropertyOptional({
+    example: false,
+    description:
+      'Si es true, reclama todos los pending-claims PENDING del titular autenticado e ignora auctionIds.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  claimAll?: boolean
+}
+
+export class ClaimPendingProductsBatchItemResponseDto {
+  @ApiProperty({
+    example: 'auction-123',
+  })
+  auctionId!: string
+
+  @ApiProperty({
+    enum: [
+      'CLAIMED',
+      'ALREADY_CLAIMED',
+      'NOT_OWNED',
+      'NOT_FOUND',
+      'EXPIRED',
+      'INVENTORY_UNAVAILABLE',
+      'ERROR',
+    ],
+  })
+  status!: string
+
+  @ApiPropertyOptional({
+    type: PendingClaimResponseDto,
+    nullable: true,
+    description: 'Presente cuando status es CLAIMED o ALREADY_CLAIMED.',
+  })
+  claim!: PendingClaimResponseDto | null
+
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    description: 'Detalle legible cuando status representa un fallo.',
+  })
+  message!: string | null
+}
+
+export class ClaimPendingProductsBatchResponseDto {
+  @ApiProperty({
+    type: ClaimPendingProductsBatchItemResponseDto,
+    isArray: true,
+  })
+  results!: ClaimPendingProductsBatchItemResponseDto[]
 }
 
 export const assertIdempotencyKey = (value: string | undefined): string => {
