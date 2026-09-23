@@ -415,6 +415,16 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
     return row === undefined ? null : toBidCreditOperationSnapshot(row)
   }
 
+  async findBidCreditOperationByBid(bidId: string): Promise<BidCreditOperationSnapshot | null> {
+    const row = await this.db
+      .selectFrom('auction_bid_credit_operations')
+      .selectAll()
+      .where('bid_id', '=', bidId)
+      .executeTakeFirst()
+
+    return row === undefined ? null : toBidCreditOperationSnapshot(row)
+  }
+
   persistBid(
     bid: Bid,
     creditReservationId: string | null = null,

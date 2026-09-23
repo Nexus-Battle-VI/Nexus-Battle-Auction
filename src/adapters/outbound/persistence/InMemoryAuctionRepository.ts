@@ -263,6 +263,14 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     return Promise.resolve(cloneBidCreditOperation(operation))
   }
 
+  findBidCreditOperationByBid(bidId: string): Promise<BidCreditOperationSnapshot | null> {
+    const operation = [...this.bidCreditOperations.values()].find(
+      (candidate) => candidate.bidId === bidId,
+    )
+
+    return Promise.resolve(operation === undefined ? null : cloneBidCreditOperation(operation))
+  }
+
   findById(auctionId: string): Promise<AuctionSnapshot | null> {
     const auction = this.auctions.get(auctionId)
 

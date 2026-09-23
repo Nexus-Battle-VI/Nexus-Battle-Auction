@@ -2,6 +2,7 @@ import type {
   BuyNowTransactionConfirmation,
   TransactionProcessingService,
 } from '../services/TransactionProcessingService'
+import type { EarlyClosureNotificationService } from '../services/EarlyClosureNotificationService'
 import type { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
 import { AuctionNotFoundError } from '../errors/BuyNowRequestError'
 import type { AuctionRepositoryPort, BuyNowOperationRecord } from '../ports/AuctionRepositoryPort'
@@ -24,6 +25,12 @@ export interface ExecuteBuyNowCommand {
  * comprador, deja que `BuyNowDomainService` decida si la compra procede
  * (CA-02, CA-03, CA-04) y, solo si aprueba, entrega la aprobacion a
  * `TransactionProcessingService` para que la ejecute.
+ *
+ * Al completar la transaccion invoca `EarlyClosureNotificationService`
+ * (HU-64.5): esa Task declara explicitamente esta dependencia -"necesita ser
+ * invocado al completar la transaccion para liberar creditos"-, y es este
+ * caso de uso, no `TransactionProcessingService`, quien conoce el momento
+ * exacto en que la compra ya se completo de verdad.
  */
 export class ExecuteBuyNowUseCase {
   constructor(
@@ -31,6 +38,7 @@ export class ExecuteBuyNowUseCase {
     private readonly wallet: WalletPort,
     private readonly domainService: BuyNowDomainService,
     private readonly transactions: TransactionProcessingService,
+    private readonly earlyClosure: EarlyClosureNotificationService,
     private readonly clock: ClockPort,
   ) {}
 
@@ -44,7 +52,14 @@ export class ExecuteBuyNowUseCase {
     const existing = await this.repository.findBuyNowOperation(command.operationId)
 
     if (existing !== null) {
-      return ExecuteBuyNowUseCase.toReplayedConfirmation(existing)
+      const confirmation = ExecuteBuyNowUseCase.toReplayedConfirmation(existing)
+
+      // Reintentar tambien reintenta avisar del cierre: si el primer intento
+      // no llego a completar HU-64.5 -el proceso murio justo despues de
+      // pagar-, este es el unico momento en que algo lo vuelve a disparar.
+      await this.notifyEarlyClosure(confirmation)
+
+      return confirmation
     }
 
     const auction = await this.repository.findById(command.auctionId)
@@ -69,7 +84,33 @@ export class ExecuteBuyNowUseCase {
       requestedAt: this.clock.now(),
     })
 
-    return this.transactions.execute({ operationId: command.operationId, approval })
+    const confirmation = await this.transactions.execute({
+      operationId: command.operationId,
+      approval,
+    })
+
+    await this.notifyEarlyClosure(confirmation)
+
+    return confirmation
+  }
+
+  /**
+   * Best-effort: la compra YA se completo y el comprador YA pago. Un fallo al
+   * liberar creditos o notificar a los demas participantes nunca debe
+   * convertir esa compra, ya exitosa, en un error para quien la hizo -queda
+   * registrado como `FAILED` y disponible para `retryFailed` (HU-64.5)-.
+   */
+  private async notifyEarlyClosure(confirmation: BuyNowTransactionConfirmation): Promise<void> {
+    try {
+      await this.earlyClosure.processClosure({
+        auctionId: confirmation.auctionId,
+        buyerId: confirmation.buyerId,
+        transactionId: confirmation.transactionId,
+        closedAt: confirmation.closedAt,
+      })
+    } catch {
+      // Intencionalmente ignorado; ver el comentario de arriba.
+    }
   }
 
   private static toReplayedConfirmation(

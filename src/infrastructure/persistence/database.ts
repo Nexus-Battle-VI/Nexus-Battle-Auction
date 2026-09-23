@@ -20,6 +20,7 @@ import * as createAuctionSettlements from '../../adapters/outbound/persistence/m
 import * as createAuctionPendingClaims from '../../adapters/outbound/persistence/migrations/008-create-auction-pending-claims'
 import * as createAuctionBuyNow from '../../adapters/outbound/persistence/migrations/009-create-auction-buy-now'
 import * as addBuyNowRemainingCredits from '../../adapters/outbound/persistence/migrations/010-add-buy-now-remaining-credits'
+import * as createEarlyClosureNotifications from '../../adapters/outbound/persistence/migrations/011-create-early-closure-notifications'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
@@ -95,6 +96,7 @@ export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '008-create-auction-pending-claims': createAuctionPendingClaims,
   '009-create-auction-buy-now': createAuctionBuyNow,
   '010-add-buy-now-remaining-credits': addBuyNowRemainingCredits,
+  '011-create-early-closure-notifications': createEarlyClosureNotifications,
 }
 
 export interface MigrationOutcome {
