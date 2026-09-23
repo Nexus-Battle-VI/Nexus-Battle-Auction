@@ -81,7 +81,8 @@ export class AuctionController {
   @ApiOkResponse({
     type: PendingClaimResponseDto,
     isArray: true,
-    description: 'Productos ganados con reclamo aun abierto (CA-03: hasta el dia 7 desde settledAt).',
+    description:
+      'Productos ganados con reclamo aun abierto (CA-03: hasta el dia 7 desde settledAt).',
   })
   @ApiUnauthorizedResponse({
     description: 'Access token ausente o invalido.',
