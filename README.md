@@ -67,6 +67,7 @@ El dominio no importa NestJS, drivers ni adaptadores, y la aplicación depende s
 ## Verificación local
 
 La matriz y los resultados reproducibles de HU-62 están en [docs/hu-62-acceptance-evidence.md](docs/hu-62-acceptance-evidence.md).
+La identidad dedicada de UPB-COMPANY para HU-66 está definida en [docs/hu-66-game-master-identity.md](docs/hu-66-game-master-identity.md).
 
 ```bash
 npm ci

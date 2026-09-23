@@ -1043,10 +1043,8 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
 
       useFactory: (config: AppConfig, reflector: Reflector): CanActivate =>
         config.authMode === AuthMode.Jwt
-          ? new RolesGuard(reflector)
-          : {
-              canActivate: (): boolean => true,
-            },
+          ? new RolesGuard(reflector, config.gameMasterSubject)
+          : { canActivate: (): boolean => true },
 
       inject: [APP_CONFIG, Reflector],
     },

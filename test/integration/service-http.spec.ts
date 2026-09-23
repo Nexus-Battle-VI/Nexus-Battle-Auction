@@ -81,6 +81,12 @@ class ProbeController {
     }
   }
 
+  @Roles(Role.GameMaster)
+  @Get('maestro-juego')
+  maestroJuego(@CurrentIdentity() identity: VerifiedIdentity): { subject: string } {
+    return { subject: identity.subject }
+  }
+
   @InternalOnly()
   @Post('interna')
   interna(@Body() body: unknown): {
@@ -109,6 +115,16 @@ const IDENTITIES: Readonly<Record<string, VerifiedIdentity>> = {
     subject: 'sujeto-admin',
     email: null,
     roles: new Set([Role.Administrator]),
+  },
+  'token-maestro': {
+    subject: 'subject-upb-company',
+    email: null,
+    roles: new Set([Role.GameMaster]),
+  },
+  'token-maestro-ajeno': {
+    subject: 'subject-no-autorizado',
+    email: null,
+    roles: new Set([Role.GameMaster]),
   },
 }
 
@@ -410,6 +426,7 @@ describe('Servicio con autenticacion activa', () => {
       COGNITO_CLIENT_ID: 'cliente-de-pruebas',
       INTERNAL_SERVICE_AUTH_SECRET: SECRET,
       PERSISTENCE_DRIVER: 'memory',
+      GAME_MASTER_SUBJECT: 'subject-upb-company',
     })
 
     app = await buildApp()
@@ -483,6 +500,25 @@ describe('Servicio con autenticacion activa', () => {
         .set('Authorization', 'Bearer token-super')
 
       expect(response.status).toBe(200)
+    })
+
+    it('autoriza GAME_MASTER solo cuando tambien coincide el subject configurado', async () => {
+      const server = app.getHttpServer()
+      const allowed = await request(server)
+        .get('/api/probe/maestro-juego')
+        .set('Authorization', 'Bearer token-maestro')
+
+      expect(allowed.status).toBe(200)
+      expect(allowed.body).toEqual({ subject: 'subject-upb-company' })
+      for (const token of ['token-maestro-ajeno', 'token-jugador', 'token-admin', 'token-super']) {
+        expect(
+          (
+            await request(server)
+              .get('/api/probe/maestro-juego')
+              .set('Authorization', `Bearer ${token}`)
+          ).status,
+        ).toBe(403)
+      }
     })
   })
 

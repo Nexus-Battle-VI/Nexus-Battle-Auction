@@ -35,6 +35,8 @@ export const Role = {
    * esto es solo la forma en que llega, y tiene que reconocer lo que llega.
    */
   SuperAdministrator: 'SUPER_ADMINISTRATOR',
+  /** Identidad comercial dedicada de UPB-COMPANY (HU-66). */
+  GameMaster: 'GAME_MASTER',
 } as const
 
 export type Role = (typeof Role)[keyof typeof Role]
@@ -44,6 +46,7 @@ export const ALL_ROLES: readonly Role[] = [
   Role.Moderator,
   Role.Administrator,
   Role.SuperAdministrator,
+  Role.GameMaster,
 ]
 
 export const isRole = (value: string): value is Role =>
