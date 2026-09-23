@@ -126,6 +126,7 @@ export interface Database {
   outbox_events: OutboxEventTable
   auction_settlements: AuctionSettlementTable
   auction_settlement_releases: AuctionSettlementReleaseTable
+  auction_pending_claims: AuctionPendingClaimTable
 }
 
 export interface AuctionSettlementTable {
@@ -140,6 +141,19 @@ export interface AuctionSettlementTable {
   capture_operation_id: string | null
   capture_status: string
   last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+  settled_at: Timestamp | null
+}
+export interface AuctionPendingClaimTable {
+  auction_id: string
+  winner_id: string
+  product_id: string
+  winning_bid_id: string
+  final_amount_credits: string | number
+  settled_at: Timestamp
+  claim_status: 'PENDING' | 'CLAIMED'
+  claimed_at: Timestamp | null
   created_at: Timestamp
   updated_at: Timestamp
 }

@@ -10,6 +10,7 @@ import {
   type AuctionSettlementSnapshot,
   type CreateAuctionSettlementInput,
   type CreateAuctionSettlementReleaseInput,
+  type CompleteAuctionSettlementInput,
 } from '../../../application/ports/AuctionSettlementRepositoryPort'
 import type { Database } from './schema'
 
@@ -30,6 +31,7 @@ const toSettlement = (row: SettlementRow): AuctionSettlementSnapshot => ({
   lastError: row.last_error,
   createdAt: new Date(row.created_at),
   updatedAt: new Date(row.updated_at),
+  settledAt: row.settled_at === null ? null : new Date(row.settled_at),
 })
 
 const toRelease = (row: ReleaseRow): AuctionSettlementReleaseSnapshot => ({
@@ -76,6 +78,7 @@ export class PostgresAuctionSettlementRepository implements AuctionSettlementRep
         last_error: null,
         created_at: input.createdAt,
         updated_at: input.createdAt,
+        settled_at: null,
       })
       .onConflict((conflict) => conflict.column('auction_id').doNothing())
       .execute()
@@ -251,6 +254,112 @@ export class PostgresAuctionSettlementRepository implements AuctionSettlementRep
     )
   }
 
+  async completeSettlement(
+    input: CompleteAuctionSettlementInput,
+  ): Promise<AuctionSettlementSnapshot> {
+    return this.db.transaction().execute(async (transaction) => {
+      const row = await transaction
+        .selectFrom('auction_settlements')
+        .selectAll()
+        .where('auction_id', '=', input.auctionId)
+        .forUpdate()
+        .executeTakeFirst()
+      if (row === undefined) throw new Error(`El settlement ${input.auctionId} no existe.`)
+      const settlement = toSettlement(row)
+      if (settlement.status === AuctionSettlementStatus.Completed) return settlement
+      if (settlement.resultType !== input.resultType)
+        throw new Error('Conflicto de resultado al completar settlement.')
+      const releases = await transaction
+        .selectFrom('auction_settlement_releases')
+        .selectAll()
+        .where('auction_id', '=', input.auctionId)
+        .execute()
+      const ready =
+        settlement.resultType === 'WITHOUT_BIDS'
+          ? settlement.captureStatus === CaptureStatus.NotRequired
+          : settlement.captureStatus === CaptureStatus.Confirmed
+      if (
+        !ready ||
+        releases.some((release) => (release.status as ReleaseStatus) !== ReleaseStatus.Released)
+      ) {
+        throw new Error('El settlement aun tiene trabajo obligatorio pendiente.')
+      }
+      if (input.resultType === 'WITH_WINNER') {
+        if (
+          settlement.winnerId !== input.winnerId ||
+          settlement.winningBidId !== input.winningBidId ||
+          settlement.finalAmountCredits !== input.finalAmountCredits
+        )
+          throw new Error('Conflicto de intent para completion.')
+        await transaction
+          .insertInto('auction_pending_claims')
+          .values({
+            auction_id: input.auctionId,
+            winner_id: input.winnerId,
+            product_id: input.productId,
+            winning_bid_id: input.winningBidId,
+            final_amount_credits: input.finalAmountCredits,
+            settled_at: input.settledAt,
+            claim_status: 'PENDING',
+            claimed_at: null,
+            created_at: input.settledAt,
+            updated_at: input.settledAt,
+          })
+          .onConflict((conflict) => conflict.column('auction_id').doNothing())
+          .execute()
+        const claim = await transaction
+          .selectFrom('auction_pending_claims')
+          .selectAll()
+          .where('auction_id', '=', input.auctionId)
+          .executeTakeFirstOrThrow()
+        if (
+          claim.winner_id !== input.winnerId ||
+          claim.product_id !== input.productId ||
+          claim.winning_bid_id !== input.winningBidId ||
+          Number(claim.final_amount_credits) !== input.finalAmountCredits ||
+          new Date(claim.settled_at).getTime() !== input.settledAt.getTime()
+        )
+          throw new Error(`Conflicto de intent para claim ${input.auctionId}.`)
+      }
+      await transaction
+        .updateTable('auction_settlements')
+        .set({
+          status: AuctionSettlementStatus.Completed,
+          updated_at: input.settledAt,
+          settled_at: input.settledAt,
+        })
+        .where('auction_id', '=', input.auctionId)
+        .execute()
+      await transaction
+        .insertInto('auction_audit_log')
+        .values({
+          auction_id: input.auctionId,
+          operation_id: `auction:${input.auctionId}:settlement`,
+          action: 'AUCTION_SETTLED',
+          actor_id: input.resultType === 'WITH_WINNER' ? input.winnerId : settlement.sellerId,
+          occurred_at: input.settledAt,
+          details: input,
+        })
+        .execute()
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: `auction:${input.auctionId}:settled`,
+          aggregate_id: input.auctionId,
+          event_type: 'auction.settled.v1',
+          payload: input,
+          occurred_at: input.settledAt,
+          published_at: null,
+        })
+        .execute()
+      const completed = await transaction
+        .selectFrom('auction_settlements')
+        .selectAll()
+        .where('auction_id', '=', input.auctionId)
+        .executeTakeFirstOrThrow()
+      return toSettlement(completed)
+    })
+  }
   async markCompleted(auctionId: string, updatedAt: Date): Promise<void> {
     const settlement = await this.getByAuctionId(auctionId)
     if (settlement === null) throw new Error(`El settlement ${auctionId} no existe.`)
@@ -259,9 +368,8 @@ export class PostgresAuctionSettlementRepository implements AuctionSettlementRep
       settlement.resultType === 'WITHOUT_BIDS'
         ? settlement.captureStatus === CaptureStatus.NotRequired
         : settlement.captureStatus === CaptureStatus.Confirmed
-    if (!ready || releases.some((release) => release.status !== ReleaseStatus.Released)) {
+    if (!ready || releases.some((release) => release.status !== ReleaseStatus.Released))
       throw new Error('El settlement aun tiene trabajo obligatorio pendiente.')
-    }
     await this.db
       .updateTable('auction_settlements')
       .set({ status: AuctionSettlementStatus.Completed, updated_at: updatedAt })
