@@ -16,6 +16,7 @@ import type {
 } from '../../src/application/ports/BidCreditsPort'
 import { PersistBidWithCredits } from '../../src/application/use-cases/PersistBidWithCredits'
 import { PostgresAuctionSettlementRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionSettlementRepository'
+import { PostgresAuctionSettlementOutboxRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionSettlementOutboxRepository'
 import { PostgresAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
 import { PostgresBidCreditOperationReader } from '../../src/adapters/outbound/persistence/PostgresBidCreditOperationReader'
 import {
@@ -27,6 +28,7 @@ import { Auction, AuctionClosingOutcome } from '../../src/domain/entities/Auctio
 import { AuctionClosingResult } from '../../src/domain/entities/AuctionClosingResult'
 import { Bid } from '../../src/domain/entities/Bid'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
+import { createAuctionSettledEventV1 } from '../../src/domain/events/AuctionSettledEventV1'
 import { ClassifyAuctionLoserCredits } from '../../src/application/use-cases/ClassifyAuctionLoserCredits'
 import { PrepareAuctionLoserReleaseTasks } from '../../src/application/use-cases/PrepareAuctionLoserReleaseTasks'
 import { SettleAuction } from '../../src/application/use-cases/SettleAuction'
@@ -1884,7 +1886,19 @@ describe('Persistencia PostgreSQL', () => {
           winnerId: 'winner',
           winningBidId: `bid-${auctionId}`,
           finalAmountCredits: 30,
+          loserBidderIds: [],
           settledAt: at,
+          event: createAuctionSettledEventV1({
+            auctionId,
+            productId: `product-${auctionId}`,
+            sellerId: 'seller',
+            resultType: 'WITH_WINNER',
+            winnerId: 'winner',
+            winningBidId: `bid-${auctionId}`,
+            finalAmountCredits: 30,
+            loserBidderIds: [],
+            settledAt: at,
+          }),
         },
       }
     }
@@ -1929,8 +1943,24 @@ describe('Persistencia PostgreSQL', () => {
       expect(outbox).toHaveLength(1)
       expect(outbox[0]).toMatchObject({ event_type: 'auction.settled.v1' })
       expect(outbox[0]?.payload).toMatchObject({
-        ...input,
-        settledAt: input.settledAt.toISOString(),
+        eventId: `auction:${input.auctionId}:settled`,
+        eventType: 'auction.settled',
+        eventVersion: 1,
+        aggregateId: input.auctionId,
+        occurredAt: input.settledAt.toISOString(),
+        producer: 'auction',
+        correlationId: `auction:${input.auctionId}:settlement`,
+        data: {
+          auctionId: input.auctionId,
+          productId: input.productId,
+          sellerId: 'seller',
+          resultType: 'WITH_WINNER',
+          winnerId: input.winnerId,
+          winningBidId: input.winningBidId,
+          finalAmountCredits: input.finalAmountCredits,
+          loserBidderIds: input.loserBidderIds,
+          settledAt: input.settledAt.toISOString(),
+        },
       })
     })
     it('completa concurrentemente una sola vez', async () => {
@@ -2037,6 +2067,13 @@ describe('Persistencia PostgreSQL', () => {
           resultType: 'WITHOUT_BIDS',
           productId: 'product-empty',
           settledAt: at,
+          event: createAuctionSettledEventV1({
+            auctionId,
+            productId: 'product-empty',
+            sellerId: 'seller',
+            resultType: 'WITHOUT_BIDS',
+            settledAt: at,
+          }),
         }),
       ).resolves.toMatchObject({ status: AuctionSettlementStatus.Completed, settledAt: at })
       await expect(
@@ -2046,6 +2083,70 @@ describe('Persistencia PostgreSQL', () => {
           .where('auction_id', '=', auctionId)
           .execute(),
       ).resolves.toHaveLength(0)
+    })
+  })
+
+  describe('outbox settlement HU-65.6', () => {
+    beforeEach(async () => {
+      await db.deleteFrom('outbox_events').execute()
+    })
+
+    it('lee pendientes en orden estable y marca solo el evento settlement sin publicar', async () => {
+      const older = createAuctionSettledEventV1({
+        auctionId: 'outbox-older',
+        productId: 'product',
+        sellerId: 'seller',
+        resultType: 'WITHOUT_BIDS',
+        settledAt: new Date('2026-01-01T00:00:00.000Z'),
+      })
+      const newer = createAuctionSettledEventV1({
+        auctionId: 'outbox-newer',
+        productId: 'product',
+        sellerId: 'seller',
+        resultType: 'WITHOUT_BIDS',
+        settledAt: new Date('2026-01-02T00:00:00.000Z'),
+      })
+      await db
+        .insertInto('outbox_events')
+        .values([
+          {
+            id: newer.eventId,
+            aggregate_id: newer.aggregateId,
+            event_type: 'auction.settled.v1',
+            payload: newer,
+            occurred_at: new Date(newer.occurredAt),
+            published_at: null,
+          },
+          {
+            id: older.eventId,
+            aggregate_id: older.aggregateId,
+            event_type: 'auction.settled.v1',
+            payload: older,
+            occurred_at: new Date(older.occurredAt),
+            published_at: null,
+          },
+        ])
+        .execute()
+      const repository = new PostgresAuctionSettlementOutboxRepository(db)
+
+      await expect(repository.findPending({ limit: 1 })).resolves.toEqual([older])
+      await repository.markPublished({
+        eventId: older.eventId,
+        publishedAt: new Date('2026-01-03'),
+      })
+      await repository.markPublished({
+        eventId: older.eventId,
+        publishedAt: new Date('2026-01-04'),
+      })
+
+      await expect(repository.findPending({ limit: 10 })).resolves.toEqual([newer])
+      await expect(
+        db
+          .selectFrom('outbox_events')
+          .select('published_at')
+          .where('id', '=', older.eventId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toMatchObject({ published_at: new Date('2026-01-03') })
     })
   })
 })

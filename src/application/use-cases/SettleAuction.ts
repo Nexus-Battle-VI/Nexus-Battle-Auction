@@ -3,6 +3,11 @@ import {
   type AuctionClosingResultSnapshot,
 } from '../../domain/entities/AuctionClosingResult'
 import { AuctionStatus } from '../../domain/entities/Auction'
+import type { BidSnapshot } from '../../domain/entities/Bid'
+import {
+  createAuctionSettledEventV1,
+  type AuctionSettledEventV1,
+} from '../../domain/events/AuctionSettledEventV1'
 import {
   ExternalContractError,
   ExternalDependencyUnavailableError,
@@ -33,6 +38,11 @@ import {
 import type { ProductInventoryPort } from '../ports/ProductInventoryPort'
 import type { ClassifyAuctionLoserCredits } from './ClassifyAuctionLoserCredits'
 import type { PrepareAuctionLoserReleaseTasks } from './PrepareAuctionLoserReleaseTasks'
+
+interface SettlementEventPreflight {
+  readonly event: AuctionSettledEventV1
+  readonly settledAt: Date
+}
 
 export class SettleAuction {
   constructor(
@@ -86,6 +96,11 @@ export class SettleAuction {
       createdAt: this.clock.now(),
     })
     if (settlement.status !== AuctionSettlementStatus.Completed) {
+      const preflight = this.preflightWithoutBids({
+        auctionId: input.auctionId,
+        productId: closed.productId.value,
+        sellerId: closed.sellerId.value,
+      })
       const intent = await this.getOrCreateInventoryIntent({
         auctionId: input.auctionId,
         operationId: inventoryReleaseOperationId(input.auctionId),
@@ -101,7 +116,8 @@ export class SettleAuction {
         auctionId: input.auctionId,
         productId: closed.productId.value,
         resultType: 'WITHOUT_BIDS',
-        settledAt: this.clock.now(),
+        settledAt: preflight.settledAt,
+        event: preflight.event,
       })
     }
     const completed = await this.settlements.getByAuctionId(input.auctionId)
@@ -148,6 +164,16 @@ export class SettleAuction {
     if (settlement.captureStatus === CaptureStatus.TerminalError) {
       return settlement
     }
+    const bids = await this.auctions.findBidHistory(auctionId)
+    const preflight = this.preflightWithWinner({
+      auctionId,
+      productId: auction.productId.value,
+      sellerId: auction.sellerId.value,
+      winnerId: closing.winnerId,
+      winningBidId: closing.winningBidId,
+      finalAmountCredits: closing.finalAmountCredits,
+      loserBidderIds: this.loserBidderIds(bids, closing.winnerId),
+    })
     if (settlement.captureStatus === CaptureStatus.Confirmed)
       return this.prepareLoserReleases(
         auctionId,
@@ -155,6 +181,8 @@ export class SettleAuction {
         auction.productId.value,
         closing,
         settlement.status === AuctionSettlementStatus.LoserReleasesPending,
+        bids,
+        preflight,
       )
     if (![CaptureStatus.Pending, CaptureStatus.Retryable].includes(settlement.captureStatus)) {
       throw new Error(`El settlement no admite captura en estado ${settlement.captureStatus}.`)
@@ -192,6 +220,8 @@ export class SettleAuction {
           auction.productId.value,
           closing,
           false,
+          bids,
+          preflight,
         )
       : persisted
   }
@@ -202,8 +232,9 @@ export class SettleAuction {
     productId: string,
     closing: AuctionClosingResultSnapshot,
     executeReleases: boolean,
+    bids: readonly BidSnapshot[],
+    preflight: SettlementEventPreflight,
   ): Promise<AuctionSettlementSnapshot> {
-    const bids = await this.auctions.findBidHistory(auctionId)
     const actions = await this.classifyLoserCredits.execute(auctionId, bids, closing.winningBidId)
     if (actions.some((action) => action.classification === 'INCONSISTENT')) {
       await this.settlements.markLoserReleasesTerminal(
@@ -220,7 +251,7 @@ export class SettleAuction {
     }
     const persisted = await this.settlements.getByAuctionId(auctionId)
     if (persisted === null) throw new Error('El settlement durable no existe.')
-    return this.completeIfReady(auctionId, sellerId, productId, closing, persisted)
+    return this.completeIfReady(auctionId, sellerId, productId, closing, persisted, preflight)
   }
 
   private async completeIfReady(
@@ -229,6 +260,7 @@ export class SettleAuction {
     productId: string,
     closing: AuctionClosingResultSnapshot,
     settlement: AuctionSettlementSnapshot,
+    preflight: SettlementEventPreflight,
   ): Promise<AuctionSettlementSnapshot> {
     if (
       settlement.status === AuctionSettlementStatus.Completed ||
@@ -257,15 +289,14 @@ export class SettleAuction {
     })
     const resolved = await this.resolveInventoryIntent(intent)
     if (resolved.status !== 'CONFIRMED') return settlement
-    const settledAt = this.clock.now()
     await this.pendingClaims.createIfAbsent({
       auctionId,
       winnerId: closing.winnerId,
       productId,
       winningBidId: closing.winningBidId,
       finalAmountCredits: closing.finalAmountCredits,
-      settledAt,
-      createdAt: settledAt,
+      settledAt: preflight.settledAt,
+      createdAt: preflight.settledAt,
     })
     return this.settlements.completeSettlement({
       auctionId,
@@ -274,7 +305,12 @@ export class SettleAuction {
       winnerId: closing.winnerId,
       winningBidId: closing.winningBidId,
       finalAmountCredits: closing.finalAmountCredits,
-      settledAt,
+      loserBidderIds:
+        preflight.event.data.resultType === 'WITH_WINNER'
+          ? preflight.event.data.loserBidderIds
+          : [],
+      settledAt: preflight.settledAt,
+      event: preflight.event,
     })
   }
 
@@ -304,6 +340,40 @@ export class SettleAuction {
         )
       }
     }
+  }
+
+  private preflightWithoutBids(input: {
+    readonly auctionId: string
+    readonly productId: string
+    readonly sellerId: string
+  }): SettlementEventPreflight {
+    const settledAt = this.clock.now()
+    return {
+      settledAt,
+      event: createAuctionSettledEventV1({ ...input, resultType: 'WITHOUT_BIDS', settledAt }),
+    }
+  }
+
+  private preflightWithWinner(input: {
+    readonly auctionId: string
+    readonly productId: string
+    readonly sellerId: string
+    readonly winnerId: string
+    readonly winningBidId: string
+    readonly finalAmountCredits: number
+    readonly loserBidderIds: readonly string[]
+  }): SettlementEventPreflight {
+    const settledAt = this.clock.now()
+    return {
+      settledAt,
+      event: createAuctionSettledEventV1({ ...input, resultType: 'WITH_WINNER', settledAt }),
+    }
+  }
+
+  private loserBidderIds(bids: readonly BidSnapshot[], winnerId: string): readonly string[] {
+    return [
+      ...new Set(bids.map((bid) => bid.bidderId).filter((bidderId) => bidderId !== winnerId)),
+    ].sort((left, right) => left.localeCompare(right))
   }
 
   private async requireInventoryCommitmentId(auctionId: string): Promise<string> {
