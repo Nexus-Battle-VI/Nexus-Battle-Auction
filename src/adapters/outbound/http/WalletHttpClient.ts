@@ -107,11 +107,7 @@ export class WalletHttpClient implements WalletPort {
     await this.send('POST', path, { operationId })
   }
 
-  private async send(
-    method: 'GET' | 'POST',
-    path: string,
-    body: unknown,
-  ): Promise<Response> {
+  private async send(method: 'GET' | 'POST', path: string, body: unknown): Promise<Response> {
     const timestamp = String(this.now().getTime())
     const signature = signInternalRequest(this.options.secret, {
       service: this.options.serviceName,
