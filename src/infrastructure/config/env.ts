@@ -66,6 +66,10 @@ export interface AppConfig {
   readonly notificationsBaseUrl: string | null
 
   readonly notificationsTimeoutMs: number
+
+  readonly walletBaseUrl: string | null
+
+  readonly walletRequestTimeoutMs: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -203,6 +207,28 @@ export const loadConfig = (env: RawEnv): AppConfig => {
 
   const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
 
+  const walletBaseUrl = readString(env, 'WALLET_BASE_URL', '')
+
+  if (env.WALLET_REQUEST_TIMEOUT_MS === '') {
+    throw new ConfigurationError('WALLET_REQUEST_TIMEOUT_MS no puede estar vacio.')
+  }
+
+  const walletRequestTimeoutMs = readInteger(env, 'WALLET_REQUEST_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  if (walletBaseUrl !== '') {
+    try {
+      new URL(walletBaseUrl)
+    } catch {
+      throw new ConfigurationError('WALLET_BASE_URL debe ser una URL valida.')
+    }
+  }
+
+  if (walletBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando WALLET_BASE_URL esta configurado.',
+    )
+  }
+
   /*
    * Si se configura Notifications, una llamada sin firma no
    * serviria: Notifications la rechazaria con 401.
@@ -253,5 +279,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
 
     notificationsTimeoutMs,
+
+    walletBaseUrl: walletBaseUrl === '' ? null : walletBaseUrl,
+
+    walletRequestTimeoutMs,
   }
 }

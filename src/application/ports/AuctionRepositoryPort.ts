@@ -1,5 +1,6 @@
 import type { Auction, AuctionSnapshot } from '../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../domain/entities/AutoBidConfig'
+import type { AuctionClosingResult } from '../../domain/entities/AuctionClosingResult'
 import type { Bid, BidSnapshot } from '../../domain/entities/Bid'
 
 export interface PersistAuctionPublicationCommand {
@@ -31,6 +32,11 @@ export interface PersistBidResult {
   readonly bid: BidSnapshot
   readonly previousLeader: BidSnapshot | null
   readonly previousLeaderReservationId: string | null
+}
+export interface FinishAuctionCommand {
+  readonly auctionId: string
+  readonly finishedAt: Date
+  readonly closingResult: AuctionClosingResult
 }
 
 export type BidCreditOperationStatus =
@@ -98,6 +104,8 @@ export interface AuctionRepositoryPort {
   recordFailure(command: RecordPublicationFailureCommand): Promise<void>
 
   findById(auctionId: string): Promise<AuctionSnapshot | null>
+  findAuctionAggregate(auctionId: string): Promise<Auction | null>
+  finishAuction(command: FinishAuctionCommand): Promise<void>
 
   countActiveBySeller(sellerId: string): Promise<number>
 

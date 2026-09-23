@@ -1,4 +1,9 @@
-import { Auction, AuctionClosingOutcome, AuctionStatus } from '../../src/domain/entities/Auction'
+import {
+  Auction,
+  AuctionClosingOutcome,
+  AuctionStatus,
+  type RehydrateAuctionInput,
+} from '../../src/domain/entities/Auction'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
 import { AuctionCurrency } from '../../src/domain/value-objects/AuctionPricing'
 
@@ -268,6 +273,115 @@ describe('Dominio de finalizacion de subasta HU-65', () => {
   it('rechaza una fecha externa de finalizacion invalida', () => {
     expectRule(AuctionRuleCode.InvalidFinalizationDate, () =>
       activeAuction().finish({ finishedAt: new Date(Number.NaN), leadingBid: null }),
+    )
+  })
+})
+
+describe('Rehidratacion durable de Auction HU-65', () => {
+  const base = () => ({
+    ...validInput(),
+    id: 'auction-62-1',
+    status: AuctionStatus.Active,
+    closesAt: new Date('2026-09-22T12:00:00.000Z'),
+    durationHours: 24 as const,
+    publicationFeeCredits: 1,
+    finishedAt: null,
+    closingResult: null,
+  })
+  const winner = () => ({
+    outcome: AuctionClosingOutcome.WithWinner,
+    finishedAt: new Date('2026-09-22T12:00:00.000Z'),
+    winnerId: 'winner',
+    winningBidId: 'bid',
+    finalAmountCredits: 35,
+  })
+  const finished = () => ({
+    ...base(),
+    status: AuctionStatus.Finished,
+    finishedAt: winner().finishedAt,
+    closingResult: winner(),
+  })
+  const expectInvalid = (input: unknown): void => {
+    expect(() => Auction.rehydrate(input as RehydrateAuctionInput)).toThrow(AuctionRuleViolation)
+  }
+  it('rehidrata ACTIVE', () => {
+    expect(Auction.rehydrate(base())).toMatchObject({
+      status: AuctionStatus.Active,
+      finishedAt: null,
+      closingResult: null,
+    })
+  })
+  it('rehidrata WITH_WINNER y conserva datos', () => {
+    expect(Auction.rehydrate(finished()).closingResult).toEqual(winner())
+  })
+  it('rehidrata WITHOUT_BIDS', () => {
+    expect(
+      Auction.rehydrate({
+        ...base(),
+        status: AuctionStatus.Finished,
+        finishedAt: new Date('2026-09-22T12:00:00.000Z'),
+        closingResult: {
+          outcome: AuctionClosingOutcome.WithoutBids,
+          finishedAt: new Date('2026-09-22T12:00:00.000Z'),
+          winnerId: null,
+          winningBidId: null,
+          finalAmountCredits: null,
+        },
+      }).closingResult?.outcome,
+    ).toBe(AuctionClosingOutcome.WithoutBids)
+  })
+  it.each([
+    { ...base(), finishedAt: new Date() },
+    { ...base(), closingResult: winner() },
+    { ...base(), status: AuctionStatus.Finished },
+    { ...finished(), closingResult: { ...winner(), winningBidId: null } },
+    { ...finished(), closingResult: { ...winner(), winnerId: null } },
+    { ...finished(), closingResult: { ...winner(), finalAmountCredits: null } },
+    { ...finished(), closingResult: { ...winner(), finalAmountCredits: 0 } },
+    { ...finished(), closingResult: { ...winner(), finalAmountCredits: -1 } },
+    {
+      ...finished(),
+      closingResult: {
+        outcome: AuctionClosingOutcome.WithoutBids,
+        finishedAt: new Date(),
+        winnerId: 'x',
+        winningBidId: null,
+        finalAmountCredits: null,
+      },
+    },
+    {
+      ...finished(),
+      closingResult: {
+        outcome: AuctionClosingOutcome.WithoutBids,
+        finishedAt: new Date(),
+        winnerId: null,
+        winningBidId: 'x',
+        finalAmountCredits: null,
+      },
+    },
+    {
+      ...finished(),
+      closingResult: {
+        outcome: AuctionClosingOutcome.WithoutBids,
+        finishedAt: new Date(),
+        winnerId: null,
+        winningBidId: null,
+        finalAmountCredits: 1,
+      },
+    },
+    { ...finished(), closingResult: { ...winner(), outcome: 'UNKNOWN' } },
+  ])('rechaza snapshot invalido', expectInvalid)
+  it('protege getters y doble cierre', () => {
+    const auction = Auction.rehydrate(finished())
+    const date = auction.finishedAt
+    if (date === null) throw new Error('Expected finished date.')
+    date.setUTCFullYear(2030)
+    const result = auction.closingResult as unknown as { winnerId: string }
+    result.winnerId = 'other'
+    expect(auction.finishedAt).toEqual(winner().finishedAt)
+    expect(auction.closingResult?.winnerId).toBe('winner')
+    expectRule(AuctionRuleCode.AuctionAlreadyFinished, () =>
+      auction.finish({ finishedAt: new Date('2026-09-23T12:00:00.000Z'), leadingBid: null }),
     )
   })
 })
