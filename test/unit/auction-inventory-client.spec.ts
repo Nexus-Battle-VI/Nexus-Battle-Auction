@@ -30,6 +30,13 @@ const pending = {
   winnerId: 'winner-1',
   productId: 'product-1',
 }
+const confirm = {
+  operationId: 'auction:auction-1:inventory:claim',
+  commitmentId: 'commitment-1',
+  auctionId: 'auction-1',
+  winnerId: 'winner-1',
+  productId: 'product-1',
+}
 
 const response = (status: number, value: unknown): Response =>
   new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
@@ -218,6 +225,108 @@ describe('HttpAuctionInventoryClient', () => {
       ExternalContractError,
     )
   })
+
+  it('confirma el reclamo (HU-69.5) con body y ruta canonicos', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(
+        response(200, {
+          operationId: confirm.operationId,
+          commitmentId: confirm.commitmentId,
+          status: 'CLAIMED',
+          winnerId: confirm.winnerId,
+          applied: true,
+        }),
+      ),
+    )
+    await expect(client(fetchImpl).confirmClaim(confirm)).resolves.toMatchObject({
+      status: 'CLAIMED',
+      winnerId: confirm.winnerId,
+      applied: true,
+    })
+    const [url, request] = fetchImpl.mock.calls[0]!
+    expect(url).toBe(
+      'https://inventory.example.com/api/internal/v1/inventory/auction-commitments/commitment-1/claim',
+    )
+    expect(JSON.parse(request?.body as string)).toEqual({
+      operationId: confirm.operationId,
+      auctionId: confirm.auctionId,
+      winnerId: confirm.winnerId,
+      productId: confirm.productId,
+    })
+  })
+
+  it('acepta replay de confirmClaim (transferencia ya completada)', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(
+        response(200, {
+          operationId: confirm.operationId,
+          commitmentId: confirm.commitmentId,
+          status: 'CLAIMED',
+          winnerId: confirm.winnerId,
+          applied: false,
+        }),
+      ),
+    )
+    await expect(client(fetchImpl).confirmClaim(confirm)).resolves.toMatchObject({ applied: false })
+  })
+
+  it.each([
+    { operationId: 'other', commitmentId: confirm.commitmentId, status: 'CLAIMED', applied: true },
+    { operationId: confirm.operationId, commitmentId: 'other', status: 'CLAIMED', applied: true },
+    {
+      operationId: confirm.operationId,
+      commitmentId: confirm.commitmentId,
+      status: 'PENDING_CLAIM',
+      applied: true,
+    },
+    {
+      operationId: confirm.operationId,
+      commitmentId: confirm.commitmentId,
+      status: 'CLAIMED',
+      winnerId: 'otro-jugador',
+      applied: true,
+    },
+  ])(
+    'rechaza respuesta confirmClaim inconsistente (prevencion de titular/producto incorrecto)',
+    async (value) => {
+      const fetchImpl = mockFetch(() =>
+        Promise.resolve(response(200, { winnerId: confirm.winnerId, ...value })),
+      )
+      await expect(client(fetchImpl).confirmClaim(confirm)).rejects.toBeInstanceOf(
+        ExternalContractError,
+      )
+    },
+  )
+
+  it.each([400, 401, 409, 422])(
+    'clasifica confirmClaim HTTP %i como terminal (respuesta invalida)',
+    async (status) => {
+      const fetchImpl = mockFetch(() => Promise.resolve(response(status, {})))
+      await expect(client(fetchImpl).confirmClaim(confirm)).rejects.toBeInstanceOf(
+        ExternalContractError,
+      )
+    },
+  )
+
+  it('clasifica confirmClaim 404 como terminal de recurso (producto/item inexistente)', async () => {
+    const fetchImpl = mockFetch(() => Promise.resolve(response(404, {})))
+    await expect(client(fetchImpl).confirmClaim(confirm)).rejects.toBeInstanceOf(
+      ExternalResourceNotFoundError,
+    )
+  })
+
+  it.each([
+    ['HTTP 503', () => Promise.resolve(response(503, {}))],
+    ['red', () => Promise.reject(new Error('network'))],
+  ])(
+    'clasifica confirmClaim %s como retryable (Player-Inventory indisponible)',
+    async (_caseName, implementation) => {
+      const fetchImpl = mockFetch(implementation)
+      await expect(client(fetchImpl).confirmClaim(confirm)).rejects.toBeInstanceOf(
+        ExternalDependencyUnavailableError,
+      )
+    },
+  )
 
   it('convierte timeout en retryable', async () => {
     const fetchImpl = jest.fn(
