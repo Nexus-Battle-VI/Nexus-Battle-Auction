@@ -13,6 +13,7 @@ import {
   type CompleteAuctionSettlementInput,
 } from '../../../application/ports/AuctionSettlementRepositoryPort'
 import type { Database } from './schema'
+import { serializeAuctionSettledEventV1 } from '../../../domain/events/AuctionSettledEventV1'
 
 type SettlementRow = Selectable<Database['auction_settlements']>
 type ReleaseRow = Selectable<Database['auction_settlement_releases']>
@@ -267,6 +268,9 @@ export class PostgresAuctionSettlementRepository implements AuctionSettlementRep
       if (row === undefined) throw new Error(`El settlement ${input.auctionId} no existe.`)
       const settlement = toSettlement(row)
       if (settlement.status === AuctionSettlementStatus.Completed) return settlement
+      // Defensa en el limite durable: el preflight del caso de uso no es la
+      // unica barrera para callers futuros del puerto.
+      serializeAuctionSettledEventV1(input.event)
       if (settlement.resultType !== input.resultType)
         throw new Error('Conflicto de resultado al completar settlement.')
       const releases = await transaction
@@ -344,10 +348,10 @@ export class PostgresAuctionSettlementRepository implements AuctionSettlementRep
       await transaction
         .insertInto('outbox_events')
         .values({
-          id: `auction:${input.auctionId}:settled`,
-          aggregate_id: input.auctionId,
+          id: input.event.eventId,
+          aggregate_id: input.event.aggregateId,
           event_type: 'auction.settled.v1',
-          payload: input,
+          payload: input.event,
           occurred_at: input.settledAt,
           published_at: null,
         })

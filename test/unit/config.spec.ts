@@ -40,6 +40,12 @@ describe('Configuracion del servicio', () => {
       auctionSettlementSchedulerEnabled: false,
 
       auctionSettlementPollIntervalMs: 5_000,
+
+      auctionSettlementEventDispatchEnabled: false,
+
+      auctionSettlementQueueUrl: null,
+
+      auctionSettlementEventDispatchBatchSize: 25,
     })
   })
 
@@ -364,5 +370,37 @@ describe('Configuracion del servicio', () => {
         DATABASE_URL: 'postgres://db/auction',
       }),
     ).toThrow(/WALLET_BASE_URL/)
+  })
+
+  it('lee el despacho de eventos de settlement y exige su cola al habilitarlo', () => {
+    expect(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED: 'true',
+        AUCTION_SETTLEMENT_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/123/auction',
+        AUCTION_SETTLEMENT_EVENT_DISPATCH_BATCH_SIZE: '100',
+      }),
+    ).toMatchObject({
+      auctionSettlementEventDispatchEnabled: true,
+      auctionSettlementQueueUrl: 'https://sqs.us-east-1.amazonaws.com/123/auction',
+      auctionSettlementEventDispatchBatchSize: 100,
+    })
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED: 'true' })).toThrow(
+      /PERSISTENCE_DRIVER/,
+    )
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED: 'true',
+      }),
+    ).toThrow(/AUCTION_SETTLEMENT_QUEUE_URL/)
+  })
+
+  it.each(['0', '101', 'invalid'])('rechaza batch de despacho invalido: %s', (batchSize) => {
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_EVENT_DISPATCH_BATCH_SIZE: batchSize })).toThrow(
+      ConfigurationError,
+    )
   })
 })

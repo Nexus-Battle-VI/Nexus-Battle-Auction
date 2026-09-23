@@ -1,3 +1,5 @@
+import type { AuctionSettledEventV1 } from '../../domain/events/AuctionSettledEventV1'
+
 export enum AuctionSettlementStatus {
   Pending = 'PENDING',
   CapturePending = 'CAPTURE_PENDING',
@@ -44,16 +46,20 @@ export type CompleteAuctionSettlementInput =
       readonly auctionId: string
       readonly productId: string
       readonly settledAt: Date
+      readonly event: AuctionSettledEventV1
       readonly resultType: 'WITHOUT_BIDS'
     }
   | {
       readonly auctionId: string
       readonly productId: string
       readonly settledAt: Date
+      readonly event: AuctionSettledEventV1
       readonly resultType: 'WITH_WINNER'
       readonly winnerId: string
       readonly winningBidId: string
       readonly finalAmountCredits: number
+      /** IDs de postores perdedores, unicos y sin el ganador. */
+      readonly loserBidderIds: readonly string[]
     }
 
 export interface AuctionSettlementReleaseSnapshot {
