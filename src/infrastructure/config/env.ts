@@ -70,6 +70,10 @@ export interface AppConfig {
   readonly walletBaseUrl: string | null
 
   readonly walletRequestTimeoutMs: number
+
+  readonly inventoryBaseUrl: string | null
+
+  readonly inventoryRequestTimeoutMs: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -215,6 +219,20 @@ export const loadConfig = (env: RawEnv): AppConfig => {
 
   const walletRequestTimeoutMs = readInteger(env, 'WALLET_REQUEST_TIMEOUT_MS', 3_000, 1, 60_000)
 
+  const inventoryBaseUrl = readString(env, 'INVENTORY_BASE_URL', '')
+
+  if (env.INVENTORY_REQUEST_TIMEOUT_MS === '') {
+    throw new ConfigurationError('INVENTORY_REQUEST_TIMEOUT_MS no puede estar vacio.')
+  }
+
+  const inventoryRequestTimeoutMs = readInteger(
+    env,
+    'INVENTORY_REQUEST_TIMEOUT_MS',
+    3_000,
+    1,
+    60_000,
+  )
+
   if (walletBaseUrl !== '') {
     try {
       new URL(walletBaseUrl)
@@ -223,9 +241,23 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  if (inventoryBaseUrl !== '') {
+    try {
+      new URL(inventoryBaseUrl)
+    } catch {
+      throw new ConfigurationError('INVENTORY_BASE_URL debe ser una URL valida.')
+    }
+  }
+
   if (walletBaseUrl !== '' && internalServiceAuthSecret === '') {
     throw new ConfigurationError(
       'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando WALLET_BASE_URL esta configurado.',
+    )
+  }
+
+  if (inventoryBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando INVENTORY_BASE_URL esta configurado.',
     )
   }
 
@@ -283,5 +315,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     walletBaseUrl: walletBaseUrl === '' ? null : walletBaseUrl,
 
     walletRequestTimeoutMs,
+
+    inventoryBaseUrl: inventoryBaseUrl === '' ? null : inventoryBaseUrl,
+
+    inventoryRequestTimeoutMs,
   }
 }

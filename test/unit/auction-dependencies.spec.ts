@@ -125,14 +125,22 @@ describe('Dependencias de HU-62 aun no publicadas', () => {
     await expect(
       inventory.commit({
         operationId: 'operation',
+        auctionId: 'auction',
         ownerId: 'seller',
         productId: 'product',
         expiresAt: fixedNow,
       }),
     ).rejects.toBeInstanceOf(ExternalDependencyUnavailableError)
-    await expect(inventory.release('operation', 'commitment')).rejects.toBeInstanceOf(
-      ExternalDependencyUnavailableError,
-    )
+    await expect(
+      inventory.release({
+        operationId: 'operation',
+        commitmentId: 'commitment',
+        auctionId: 'auction',
+        ownerId: 'seller',
+        productId: 'product',
+        reason: 'AUCTION_WITHOUT_BIDS',
+      }),
+    ).rejects.toBeInstanceOf(ExternalDependencyUnavailableError)
   })
 
   it('Wallet falla cerrado en cobro y devolucion', async () => {

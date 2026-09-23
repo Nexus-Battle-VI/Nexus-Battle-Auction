@@ -105,6 +105,7 @@ export interface AuctionRepositoryPort {
 
   findById(auctionId: string): Promise<AuctionSnapshot | null>
   findAuctionAggregate(auctionId: string): Promise<Auction | null>
+  findInventoryCommitmentId(auctionId: string): Promise<string | null>
   finishAuction(command: FinishAuctionCommand): Promise<void>
 
   countActiveBySeller(sellerId: string): Promise<number>

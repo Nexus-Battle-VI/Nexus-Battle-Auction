@@ -10,6 +10,7 @@ import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
 import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
+import { HttpAuctionInventoryClient } from '../../adapters/outbound/http/HttpAuctionInventoryClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
@@ -29,7 +30,11 @@ import {
   type WatchlistRepositoryPort,
 } from '../../application/ports/WatchlistRepositoryPort'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
+import { InMemoryAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPublicationIntentRepository'
+import { InMemoryAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
+import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
+import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 import { SystemClock } from '../../adapters/outbound/system/SystemClock'
 import { UuidGenerator } from '../../adapters/outbound/system/UuidGenerator'
@@ -52,6 +57,14 @@ import {
   type OutbidNotificationPort,
 } from '../../application/ports/OutbidNotificationPort'
 import { AUCTION_WALLET, type AuctionWalletPort } from '../../application/ports/AuctionWalletPort'
+import {
+  AUCTION_PUBLICATION_INTENT_REPOSITORY,
+  type AuctionPublicationIntentRepositoryPort,
+} from '../../application/ports/AuctionPublicationIntentRepositoryPort'
+import {
+  AUCTION_INVENTORY_SETTLEMENT_INTENT_REPOSITORY,
+  type AuctionInventorySettlementIntentRepositoryPort,
+} from '../../application/ports/AuctionInventorySettlementIntentRepositoryPort'
 import {
   PRODUCT_INVENTORY,
   type ProductInventoryPort,
@@ -181,6 +194,24 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: AUCTION_PUBLICATION_INTENT_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): AuctionPublicationIntentRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionPublicationIntentRepository()
+          : new PostgresAuctionPublicationIntentRepository(db),
+      inject: [DATABASE],
+    },
+
+    {
+      provide: AUCTION_INVENTORY_SETTLEMENT_INTENT_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): AuctionInventorySettlementIntentRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionInventorySettlementIntentRepository()
+          : new PostgresAuctionInventorySettlementIntentRepository(db),
+      inject: [DATABASE],
+    },
+
+    {
       // TASK 68.1: selecciona persistencia duradera con el mismo motor que las subastas.
       provide: WATCHLIST_REPOSITORY,
       useFactory: (
@@ -221,8 +252,18 @@ export const INTERNAL_CALLERS: readonly string[] = []
 
     {
       provide: PRODUCT_INVENTORY,
-
-      useFactory: (): ProductInventoryPort => new UnavailableProductInventory(),
+      useFactory: (config: AppConfig, clock: ClockPort): ProductInventoryPort => {
+        if (config.inventoryBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailableProductInventory()
+        }
+        return new HttpAuctionInventoryClient({
+          baseUrl: config.inventoryBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          timeoutMs: config.inventoryRequestTimeoutMs,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, CLOCK],
     },
 
     {
@@ -302,10 +343,17 @@ export const INTERNAL_CALLERS: readonly string[] = []
         inventory: ProductInventoryPort,
         fees: PublicationFeePort,
         clock: ClockPort,
+        intents: AuctionPublicationIntentRepositoryPort,
       ): PersistAuctionPublication =>
-        new PersistAuctionPublication(repository, inventory, fees, clock),
+        new PersistAuctionPublication(repository, inventory, fees, clock, intents),
 
-      inject: [AUCTION_REPOSITORY, PRODUCT_INVENTORY, PUBLICATION_FEE, CLOCK],
+      inject: [
+        AUCTION_REPOSITORY,
+        PRODUCT_INVENTORY,
+        PUBLICATION_FEE,
+        CLOCK,
+        AUCTION_PUBLICATION_INTENT_REPOSITORY,
+      ],
     },
 
     {
@@ -349,6 +397,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
         persistence: PersistAuctionPublication,
         clock: ClockPort,
         identifiers: IdentifierGeneratorPort,
+        intents: AuctionPublicationIntentRepositoryPort,
       ): PublishAuction =>
         new PublishAuction(
           repository,
@@ -358,6 +407,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
           persistence,
           clock,
           identifiers,
+          intents,
         ),
 
       inject: [
@@ -368,6 +418,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
         PersistAuctionPublication,
         CLOCK,
         IDENTIFIER_GENERATOR,
+        AUCTION_PUBLICATION_INTENT_REPOSITORY,
       ],
     },
 

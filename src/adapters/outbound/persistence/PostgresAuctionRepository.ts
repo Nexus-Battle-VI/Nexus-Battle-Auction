@@ -597,6 +597,16 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
     return findAuctionAggregate(this.db, auctionId)
   }
 
+  async findInventoryCommitmentId(auctionId: string): Promise<string | null> {
+    const row = await this.db
+      .selectFrom('auctions')
+      .select('inventory_commitment_id')
+      .where('id', '=', auctionId)
+      .executeTakeFirst()
+
+    return row?.inventory_commitment_id ?? null
+  }
+
   async recordFailure(command: RecordPublicationFailureCommand): Promise<void> {
     await this.db
       .insertInto('auction_publication_failures')

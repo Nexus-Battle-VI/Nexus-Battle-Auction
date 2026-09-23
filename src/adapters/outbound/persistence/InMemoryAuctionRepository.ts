@@ -97,6 +97,8 @@ const cloneAuction = (auction: AuctionSnapshot): AuctionSnapshot => ({
 export class InMemoryAuctionRepository implements AuctionRepositoryPort {
   private readonly auctions = new Map<string, AuctionSnapshot>()
 
+  private readonly inventoryCommitmentIds = new Map<string, string>()
+
   private readonly operations = new Map<string, OperationRecord>()
 
   private readonly failures = new Map<string, RecordPublicationFailureCommand>()
@@ -140,6 +142,7 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     }
 
     this.auctions.set(snapshot.id, snapshot)
+    this.inventoryCommitmentIds.set(snapshot.id, command.inventoryCommitmentId)
 
     this.operations.set(command.operationId, {
       hash,
@@ -261,6 +264,10 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
           snapshot.status === AuctionStatus.Finished ? (snapshot.completion ?? null) : null,
       }),
     )
+  }
+
+  findInventoryCommitmentId(auctionId: string): Promise<string | null> {
+    return Promise.resolve(this.inventoryCommitmentIds.get(auctionId) ?? null)
   }
 
   countActiveBySeller(sellerId: string): Promise<number> {

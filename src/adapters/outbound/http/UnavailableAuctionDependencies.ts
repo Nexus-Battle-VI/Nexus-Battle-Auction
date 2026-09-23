@@ -8,7 +8,11 @@ import type {
   CommitInventoryProductCommand,
   InventoryProductCommitment,
   InventoryProductEligibility,
+  MarkInventoryProductPendingClaimCommand,
+  PendingClaimInventoryProductCommitment,
   ProductInventoryPort,
+  ReleasedInventoryProductCommitment,
+  ReleaseInventoryProductCommand,
 } from '../../../application/ports/ProductInventoryPort'
 import type {
   ChargePublicationFeeCommand,
@@ -41,9 +45,15 @@ export class UnavailableProductInventory implements ProductInventoryPort {
     return Promise.reject(new ExternalDependencyUnavailableError('player-inventory'))
   }
 
-  release(operationId: string, commitmentId: string): Promise<void> {
-    void operationId
-    void commitmentId
+  release(command: ReleaseInventoryProductCommand): Promise<ReleasedInventoryProductCommitment> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('player-inventory'))
+  }
+
+  markPendingClaim(
+    command: MarkInventoryProductPendingClaimCommand,
+  ): Promise<PendingClaimInventoryProductCommitment> {
+    void command
     return Promise.reject(new ExternalDependencyUnavailableError('player-inventory'))
   }
 }
