@@ -4,21 +4,23 @@ import type {
   AuctionPendingClaimSnapshot,
   CreateAuctionPendingClaimInput,
 } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
+import { AuctionPendingClaim } from '../../../domain/entities/AuctionPendingClaim'
 import type { Database } from './schema'
 
 type Row = Selectable<Database['auction_pending_claims']>
-const toSnapshot = (row: Row): AuctionPendingClaimSnapshot => ({
-  auctionId: row.auction_id,
-  winnerId: row.winner_id,
-  productId: row.product_id,
-  winningBidId: row.winning_bid_id,
-  finalAmountCredits: Number(row.final_amount_credits),
-  settledAt: new Date(row.settled_at),
-  claimStatus: row.claim_status,
-  claimedAt: row.claimed_at === null ? null : new Date(row.claimed_at),
-  createdAt: new Date(row.created_at),
-  updatedAt: new Date(row.updated_at),
-})
+const toSnapshot = (row: Row): AuctionPendingClaimSnapshot =>
+  AuctionPendingClaim.restore({
+    auctionId: row.auction_id,
+    winnerId: row.winner_id,
+    productId: row.product_id,
+    winningBidId: row.winning_bid_id,
+    finalAmountCredits: Number(row.final_amount_credits),
+    settledAt: new Date(row.settled_at),
+    claimStatus: row.claim_status,
+    claimedAt: row.claimed_at === null ? null : new Date(row.claimed_at),
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+  }).snapshot()
 const same = (claim: AuctionPendingClaimSnapshot, input: CreateAuctionPendingClaimInput): boolean =>
   claim.winnerId === input.winnerId &&
   claim.productId === input.productId &&
