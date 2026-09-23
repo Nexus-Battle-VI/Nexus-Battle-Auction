@@ -47,4 +47,15 @@ export class InMemoryAuctionPendingClaimRepository implements AuctionPendingClai
         .map(clone),
     )
   }
+  // async (sin await) para que AuctionPendingClaim.claim() convierta su throw
+  // sincrono en un rechazo de promesa, igual que el resto de metodos de esta
+  // clase con Promise.reject.
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async markClaimed(auctionId: string, claimedAt: Date): Promise<AuctionPendingClaimSnapshot> {
+    const existing = this.claims.get(auctionId)
+    if (existing === undefined) throw new Error(`No existe pending-claim para ${auctionId}.`)
+    const claimed = AuctionPendingClaim.restore(existing).claim(claimedAt)
+    this.claims.set(auctionId, claimed)
+    return clone(claimed)
+  }
 }

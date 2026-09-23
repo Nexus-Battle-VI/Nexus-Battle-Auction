@@ -146,6 +146,7 @@ describe('GET productos ganados pendientes de reclamo HU-69.2', () => {
         claimDeadline: claim.claimDeadline.toISOString(),
         claimStatus: 'PENDING',
         remainingClaimDays: 4,
+        claimedAt: null,
       },
     ])
 

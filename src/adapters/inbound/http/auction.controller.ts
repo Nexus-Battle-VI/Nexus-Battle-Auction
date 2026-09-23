@@ -31,6 +31,7 @@ import {
 import type { AuctionPendingClaimSnapshot } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
 import { CLOCK, type ClockPort } from '../../../application/ports/ClockPort'
 import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVerifierPort'
+import { ClaimPendingProduct } from '../../../application/use-cases/ClaimPendingProduct'
 import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
 import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
@@ -62,6 +63,7 @@ export class AuctionController {
     private readonly getAuctionDetail: GetAuctionDetail,
     private readonly configureAutoBid: ConfigureAutoBid,
     private readonly getPendingClaims: GetPendingClaims,
+    private readonly claimPendingProduct: ClaimPendingProduct,
     @Inject(CLOCK)
     private readonly clock: ClockPort,
   ) {}
@@ -100,6 +102,65 @@ export class AuctionController {
     return claims.map((claim) => this.toPendingClaimResponse(claim, now))
   }
 
+  /**
+   * HU-69.3.
+   *
+   * Idempotente ante reintentos: reclamar un producto ya CLAIMED devuelve
+   * 200 con el estado actual en vez de fallar (ver ClaimPendingProduct).
+   */
+  @Post('me/pending-claims/:auctionId/claim')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Role.Player)
+  @ApiOperation({
+    summary: 'Reclamar un producto ganado pendiente del titular autenticado',
+  })
+  @ApiParam({
+    name: 'auctionId',
+    required: true,
+    description: 'Identificador de la subasta liquidada con ganador.',
+    example: 'auction-123',
+  })
+  @ApiOkResponse({
+    type: PendingClaimResponseDto,
+    description: 'Reclamo confirmado (o ya confirmado previamente, de forma idempotente).',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Access token ausente o invalido.',
+  })
+  @ApiForbiddenResponse({
+    description: 'La identidad no posee el rol requerido o no es titular del reclamo.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No existe un producto pendiente de reclamo para esa subasta.',
+  })
+  @ApiConflictResponse({
+    description: 'El reclamo cambio de estado de forma concurrente.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description: 'El plazo de reclamo (CA-03) ya vencio.',
+  })
+  @ApiServiceUnavailableResponse({
+    description: 'Player-Inventory no disponible para confirmar la entrega.',
+  })
+  async claimPendingProductAction(
+    @CurrentIdentity()
+    identity: VerifiedIdentity,
+
+    @Param('auctionId')
+    auctionId: string,
+  ): Promise<PendingClaimResponseDto> {
+    try {
+      const claim = await this.claimPendingProduct.execute({
+        auctionId,
+        winnerId: identity.subject,
+      })
+
+      return this.toPendingClaimResponse(claim, this.clock.now())
+    } catch (error: unknown) {
+      throw toAuctionHttpException(error)
+    }
+  }
+
   private toPendingClaimResponse(
     claim: AuctionPendingClaimSnapshot,
     now: Date,
@@ -115,6 +176,7 @@ export class AuctionController {
       claimDeadline: claim.claimDeadline,
       claimStatus: claim.claimStatus,
       remainingClaimDays: Math.max(0, Math.ceil(remainingMs / DAY_MS)),
+      claimedAt: claim.claimedAt,
     }
   }
 

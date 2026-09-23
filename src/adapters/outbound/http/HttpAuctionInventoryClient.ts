@@ -4,7 +4,9 @@ import {
   ExternalResourceNotFoundError,
 } from '../../../application/errors/ExternalDependencyError'
 import type {
+  ClaimedInventoryProductCommitment,
   CommitInventoryProductCommand,
+  ConfirmInventoryProductClaimCommand,
   InventoryProductCommitment,
   InventoryProductEligibility,
   MarkInventoryProductPendingClaimCommand,
@@ -139,6 +141,40 @@ export class HttpAuctionInventoryClient implements ProductInventoryPort {
       throw new ExternalContractError(
         'player-inventory',
         'Respuesta invalida al marcar pending claim.',
+      )
+    }
+    return {
+      operationId: payload.operationId,
+      commitmentId: payload.commitmentId,
+      status: payload.status,
+      winnerId: payload.winnerId,
+      applied: payload.applied,
+    }
+  }
+
+  async confirmClaim(
+    command: ConfirmInventoryProductClaimCommand,
+  ): Promise<ClaimedInventoryProductCommitment> {
+    const payload = await this.post(
+      `/api/internal/v1/inventory/auction-commitments/${encodeURIComponent(command.commitmentId)}/claim`,
+      {
+        operationId: command.operationId,
+        auctionId: command.auctionId,
+        winnerId: command.winnerId,
+        productId: command.productId,
+      },
+      command.commitmentId,
+    )
+    if (
+      payload.operationId !== command.operationId ||
+      payload.commitmentId !== command.commitmentId ||
+      payload.status !== 'CLAIMED' ||
+      payload.winnerId !== command.winnerId ||
+      typeof payload.applied !== 'boolean'
+    ) {
+      throw new ExternalContractError(
+        'player-inventory',
+        'Respuesta invalida al confirmar el reclamo.',
       )
     }
     return {

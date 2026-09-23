@@ -5,7 +5,9 @@ import type {
   CatalogProductPolicyPort,
 } from '../../../application/ports/CatalogProductPolicyPort'
 import type {
+  ClaimedInventoryProductCommitment,
   CommitInventoryProductCommand,
+  ConfirmInventoryProductClaimCommand,
   InventoryProductCommitment,
   InventoryProductEligibility,
   MarkInventoryProductPendingClaimCommand,
@@ -53,6 +55,13 @@ export class UnavailableProductInventory implements ProductInventoryPort {
   markPendingClaim(
     command: MarkInventoryProductPendingClaimCommand,
   ): Promise<PendingClaimInventoryProductCommitment> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('player-inventory'))
+  }
+
+  confirmClaim(
+    command: ConfirmInventoryProductClaimCommand,
+  ): Promise<ClaimedInventoryProductCommitment> {
     void command
     return Promise.reject(new ExternalDependencyUnavailableError('player-inventory'))
   }

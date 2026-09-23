@@ -227,6 +227,14 @@ export class PendingClaimResponseDto {
     description: 'Dias completos restantes hasta claimDeadline, redondeados hacia arriba.',
   })
   remainingClaimDays!: number
+
+  @ApiPropertyOptional({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'Instante en que se confirmo el reclamo (HU-69.3). Null mientras esta PENDING.',
+  })
+  claimedAt!: Date | null
 }
 
 export const assertIdempotencyKey = (value: string | undefined): string => {
