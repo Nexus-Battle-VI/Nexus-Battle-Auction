@@ -11,6 +11,8 @@ import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
+import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
+import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
@@ -49,6 +51,7 @@ import {
   OUTBID_NOTIFICATION,
   type OutbidNotificationPort,
 } from '../../application/ports/OutbidNotificationPort'
+import { AUCTION_WALLET, type AuctionWalletPort } from '../../application/ports/AuctionWalletPort'
 import {
   PRODUCT_INVENTORY,
   type ProductInventoryPort,
@@ -267,6 +270,22 @@ export const INTERNAL_CALLERS: readonly string[] = []
       },
 
       inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+
+    {
+      provide: AUCTION_WALLET,
+      useFactory: (config: AppConfig, clock: ClockPort): AuctionWalletPort => {
+        if (config.walletBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailableAuctionWalletClient()
+        }
+        return new HttpAuctionWalletClient({
+          baseUrl: config.walletBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          timeoutMs: config.walletRequestTimeoutMs,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, CLOCK],
     },
 
     {
