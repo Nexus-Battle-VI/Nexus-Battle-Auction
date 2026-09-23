@@ -14,6 +14,7 @@ import type {
   AuctionInventorySettlementIntentSnapshot,
   CreateAuctionInventorySettlementIntentInput,
 } from '../ports/AuctionInventorySettlementIntentRepositoryPort'
+import type { AuctionPendingClaimRepositoryPort } from '../ports/AuctionPendingClaimRepositoryPort'
 import {
   AuctionSettlementStatus,
   CaptureStatus,
@@ -43,6 +44,7 @@ export class SettleAuction {
     private readonly prepareLoserReleaseTasks: PrepareAuctionLoserReleaseTasks,
     private readonly inventory: ProductInventoryPort,
     private readonly inventoryIntents: AuctionInventorySettlementIntentRepositoryPort,
+    private readonly pendingClaims: AuctionPendingClaimRepositoryPort,
   ) {}
 
   async execute(input: { auctionId: string }): Promise<AuctionSettlementSnapshot> {
@@ -255,6 +257,16 @@ export class SettleAuction {
     })
     const resolved = await this.resolveInventoryIntent(intent)
     if (resolved.status !== 'CONFIRMED') return settlement
+    const settledAt = this.clock.now()
+    await this.pendingClaims.createIfAbsent({
+      auctionId,
+      winnerId: closing.winnerId,
+      productId,
+      winningBidId: closing.winningBidId,
+      finalAmountCredits: closing.finalAmountCredits,
+      settledAt,
+      createdAt: settledAt,
+    })
     return this.settlements.completeSettlement({
       auctionId,
       productId,
@@ -262,7 +274,7 @@ export class SettleAuction {
       winnerId: closing.winnerId,
       winningBidId: closing.winningBidId,
       finalAmountCredits: closing.finalAmountCredits,
-      settledAt: this.clock.now(),
+      settledAt,
     })
   }
 
