@@ -6,6 +6,7 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Inject,
   NotFoundException,
   Param,
   Post,
@@ -27,9 +28,12 @@ import {
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger'
 
+import type { AuctionPendingClaimSnapshot } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
+import { CLOCK, type ClockPort } from '../../../application/ports/ClockPort'
 import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVerifierPort'
 import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
+import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
 import { PublishAuction } from '../../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../../application/use-cases/RegisterBid'
 import { CurrentIdentity, Roles } from './auth/decorators'
@@ -39,11 +43,14 @@ import {
   AutoBidConfigResponseDto,
   BidResponseDto,
   ConfigureAutoBidRequestDto,
+  PendingClaimResponseDto,
   PublishAuctionRequestDto,
   RegisterBidRequestDto,
   assertIdempotencyKey,
 } from './auction.dto'
 import { toAuctionHttpException } from './auction-error.mapper'
+
+const DAY_MS = 24 * 60 * 60 * 1000
 
 @ApiTags('Auctions')
 @ApiBearerAuth()
@@ -54,7 +61,61 @@ export class AuctionController {
     private readonly registerBid: RegisterBid,
     private readonly getAuctionDetail: GetAuctionDetail,
     private readonly configureAutoBid: ConfigureAutoBid,
+    private readonly getPendingClaims: GetPendingClaims,
+    @Inject(CLOCK)
+    private readonly clock: ClockPort,
   ) {}
+
+  /**
+   * HU-69.2.
+   *
+   * Se registra antes de ":auctionId" solo por orden de lectura: al tener
+   * dos segmentos ("me/pending-claims") nunca compite con la ruta de
+   * detalle, que solo captura uno.
+   */
+  @Get('me/pending-claims')
+  @Roles(Role.Player)
+  @ApiOperation({
+    summary: 'Consultar los productos ganados pendientes de reclamo del titular autenticado',
+  })
+  @ApiOkResponse({
+    type: PendingClaimResponseDto,
+    isArray: true,
+    description: 'Productos ganados con reclamo aun abierto (CA-03: hasta el dia 7 desde settledAt).',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Access token ausente o invalido.',
+  })
+  @ApiForbiddenResponse({
+    description: 'La identidad no posee el rol requerido.',
+  })
+  async pendingClaims(
+    @CurrentIdentity()
+    identity: VerifiedIdentity,
+  ): Promise<PendingClaimResponseDto[]> {
+    const claims = await this.getPendingClaims.execute(identity.subject)
+    const now = this.clock.now()
+
+    return claims.map((claim) => this.toPendingClaimResponse(claim, now))
+  }
+
+  private toPendingClaimResponse(
+    claim: AuctionPendingClaimSnapshot,
+    now: Date,
+  ): PendingClaimResponseDto {
+    const remainingMs = claim.claimDeadline.getTime() - now.getTime()
+
+    return {
+      auctionId: claim.auctionId,
+      productId: claim.productId,
+      winningBidId: claim.winningBidId,
+      finalAmountCredits: claim.finalAmountCredits,
+      settledAt: claim.settledAt,
+      claimDeadline: claim.claimDeadline,
+      claimStatus: claim.claimStatus,
+      remainingClaimDays: Math.max(0, Math.ceil(remainingMs / DAY_MS)),
+    }
+  }
 
   /**
    * HU-63.6.

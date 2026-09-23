@@ -1,6 +1,7 @@
 import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
 import { InMemoryAuctionSettlementRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionSettlementRepository'
 import { InMemoryAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
+import { InMemoryAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
 import { InMemoryBidCreditOperationReader } from '../../src/adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { Auction } from '../../src/domain/entities/Auction'
 import { Bid } from '../../src/domain/entities/Bid'
@@ -207,6 +208,7 @@ describe('SettleAuction', () => {
     const auctions = new InMemoryAuctionRepository()
     const settlements = new InMemoryAuctionSettlementRepository()
     const inventoryIntents = new InMemoryAuctionInventorySettlementIntentRepository()
+    const pendingClaims = new InMemoryAuctionPendingClaimRepository()
     const classifyLoserCredits = new ClassifyAuctionLoserCredits(
       new InMemoryBidCreditOperationReader(operations),
     )
@@ -221,6 +223,7 @@ describe('SettleAuction', () => {
         prepareLoserReleaseTasks,
         inventory,
         inventoryIntents,
+        pendingClaims,
       )
     return {
       auctions,
@@ -228,6 +231,7 @@ describe('SettleAuction', () => {
       wallet,
       inventory,
       inventoryIntents,
+      pendingClaims,
       createUseCase,
       useCase: createUseCase(),
     }
@@ -368,7 +372,7 @@ describe('SettleAuction', () => {
 
   it('captura el hold ganador y confirma settlement WITH_WINNER', async () => {
     const wallet = new FakeAuctionWallet(['SUCCESS'], true)
-    const { auctions, settlements, useCase } = setup(wallet)
+    const { auctions, settlements, inventory, pendingClaims, useCase } = setup(wallet)
     const auctionId = 'auction-with-winner'
     const winningBidId = `bid-${auctionId}`
     await publish(auctions, auctionId)
@@ -408,6 +412,16 @@ describe('SettleAuction', () => {
     )
     expect(wallet.captureHold.mock.calls[0]?.[0].beneficiaryPlayerId).not.toBe('winner-1')
     expect(wallet.releaseHold).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).toHaveBeenCalledTimes(1)
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toMatchObject({
+      auctionId,
+      winnerId: 'winner-1',
+      productId: `product-${auctionId}`,
+      winningBidId,
+      finalAmountCredits: 30,
+      claimStatus: 'PENDING',
+      settledAt: now,
+    })
   })
 
   it('confirma capture Wallet idempotente applied:false sin completar settlement', async () => {

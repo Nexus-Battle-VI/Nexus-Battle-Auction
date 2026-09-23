@@ -360,6 +360,7 @@ describe('Persistencia PostgreSQL', () => {
           new PrepareAuctionLoserReleaseTasks(settlements),
           inventory,
           new PostgresAuctionInventorySettlementIntentRepository(db),
+          new PostgresAuctionPendingClaimRepository(db),
         ),
       }
     }

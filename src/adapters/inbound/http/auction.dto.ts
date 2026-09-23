@@ -175,6 +175,60 @@ export class AutoBidConfigResponseDto {
   isActive!: boolean
 }
 
+/**
+ * Respuesta utilizada por la Web para HU-69.2.
+ *
+ * remainingClaimDays expresa CA-03 (reclamo valido hasta e incluyendo el
+ * dia 7 desde settledAt) como un entero listo para mostrar, derivado del
+ * mismo claimDeadline calculado por el agregado en HU-69.1.
+ */
+export class PendingClaimResponseDto {
+  @ApiProperty({
+    example: 'auction-123',
+  })
+  auctionId!: string
+
+  @ApiProperty({
+    example: 'inventory-product-123',
+  })
+  productId!: string
+
+  @ApiProperty({
+    example: 'bid-123',
+  })
+  winningBidId!: string
+
+  @ApiProperty({
+    example: 30,
+  })
+  finalAmountCredits!: number
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  settledAt!: Date
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    description: 'Instante limite (inclusive) para reclamar el producto: settledAt + 7 dias.',
+  })
+  claimDeadline!: Date
+
+  @ApiProperty({
+    enum: ['PENDING', 'CLAIMED', 'EXPIRED'],
+  })
+  claimStatus!: string
+
+  @ApiProperty({
+    example: 5,
+    minimum: 0,
+    description: 'Dias completos restantes hasta claimDeadline, redondeados hacia arriba.',
+  })
+  remainingClaimDays!: number
+}
+
 export const assertIdempotencyKey = (value: string | undefined): string => {
   if (value === undefined || value.trim().length === 0 || value.length > 128) {
     throw new Error('INVALID_IDEMPOTENCY_KEY')

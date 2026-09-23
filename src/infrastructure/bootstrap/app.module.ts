@@ -32,12 +32,14 @@ import {
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
 import { InMemoryAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPublicationIntentRepository'
 import { InMemoryAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
+import { InMemoryAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
 import { InMemoryAuctionSettlementRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementRepository'
 import { InMemoryAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementWorkRepository'
 import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
 import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
+import { PostgresAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
 import { PostgresAuctionSettlementRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementRepository'
 import { PostgresAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementWorkRepository'
 import { PostgresBidCreditOperationReader } from '../../adapters/outbound/persistence/PostgresBidCreditOperationReader'
@@ -76,6 +78,10 @@ import {
   type AuctionInventorySettlementIntentRepositoryPort,
 } from '../../application/ports/AuctionInventorySettlementIntentRepositoryPort'
 import {
+  AUCTION_PENDING_CLAIM_REPOSITORY,
+  type AuctionPendingClaimRepositoryPort,
+} from '../../application/ports/AuctionPendingClaimRepositoryPort'
+import {
   AUCTION_SETTLEMENT_REPOSITORY,
   type AuctionSettlementRepositoryPort,
 } from '../../application/ports/AuctionSettlementRepositoryPort'
@@ -98,6 +104,7 @@ import {
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
+import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
@@ -237,6 +244,15 @@ export const INTERNAL_CALLERS: readonly string[] = []
         db === null
           ? new InMemoryAuctionInventorySettlementIntentRepository()
           : new PostgresAuctionInventorySettlementIntentRepository(db),
+      inject: [DATABASE],
+    },
+
+    {
+      provide: AUCTION_PENDING_CLAIM_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): AuctionPendingClaimRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionPendingClaimRepository()
+          : new PostgresAuctionPendingClaimRepository(db),
       inject: [DATABASE],
     },
 
@@ -414,6 +430,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
         prepareLoserReleaseTasks: PrepareAuctionLoserReleaseTasks,
         inventory: ProductInventoryPort,
         inventoryIntents: AuctionInventorySettlementIntentRepositoryPort,
+        pendingClaims: AuctionPendingClaimRepositoryPort,
       ): SettleAuction =>
         new SettleAuction(
           auctions,
@@ -424,6 +441,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
           prepareLoserReleaseTasks,
           inventory,
           inventoryIntents,
+          pendingClaims,
         ),
       inject: [
         AUCTION_REPOSITORY,
@@ -434,6 +452,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
         PrepareAuctionLoserReleaseTasks,
         PRODUCT_INVENTORY,
         AUCTION_INVENTORY_SETTLEMENT_INTENT_REPOSITORY,
+        AUCTION_PENDING_CLAIM_REPOSITORY,
       ],
     },
 
@@ -541,6 +560,15 @@ export const INTERNAL_CALLERS: readonly string[] = []
         new GetAuctionDetail(repository),
 
       inject: [AUCTION_REPOSITORY],
+    },
+
+    {
+      provide: GetPendingClaims,
+
+      useFactory: (pendingClaims: AuctionPendingClaimRepositoryPort): GetPendingClaims =>
+        new GetPendingClaims(pendingClaims),
+
+      inject: [AUCTION_PENDING_CLAIM_REPOSITORY],
     },
 
     {
