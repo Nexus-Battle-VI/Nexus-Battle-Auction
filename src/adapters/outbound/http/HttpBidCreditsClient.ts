@@ -126,7 +126,9 @@ export class HttpBidCreditsClient implements BidCreditsPort {
             method,
             path,
             timestamp,
-            body,
+            // Un GET no envia cuerpo, y el guard interno de Wallet verifica
+            // `request.body ?? {}`: la firma debe calcularse sobre `{}`, no `null`.
+            body: body ?? {},
           }),
         },
         ...(body === null ? {} : { body: JSON.stringify(body) }),

@@ -114,7 +114,9 @@ export class WalletHttpClient implements WalletPort {
       method,
       path,
       timestamp,
-      body: body ?? null,
+      // Un GET no envia cuerpo, y el guard interno de Wallet verifica
+      // `request.body ?? {}`: la firma debe calcularse sobre `{}`, no `null`.
+      body: body ?? {},
     })
     const controller = new AbortController()
     const timer = setTimeout(() => {
