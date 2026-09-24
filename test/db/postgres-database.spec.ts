@@ -2788,7 +2788,9 @@ describe('Persistencia PostgreSQL', () => {
         .execute()
       expect(outbox).toHaveLength(1)
 
-      await expect(repository.findOfficialById('official-concurrent-generated-again')).resolves.toBeNull()
+      await expect(
+        repository.findOfficialById('official-concurrent-generated-again'),
+      ).resolves.toBeNull()
     })
 
     it('rechaza reutilizar la operacion con otra intencion funcional', async () => {
