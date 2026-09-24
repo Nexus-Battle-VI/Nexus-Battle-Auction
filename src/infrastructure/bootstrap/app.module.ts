@@ -179,6 +179,7 @@ import { createLogger, type Logger } from '../observability/logger'
 import { createDatabase, pingDatabase } from '../persistence/database'
 import { AuctionReminderScheduler } from '../scheduling/AuctionReminderScheduler'
 import { AuctionPendingClaimExpirationScheduler } from '../scheduling/AuctionPendingClaimExpirationScheduler'
+import { EarlyClosureRetryScheduler } from '../scheduling/EarlyClosureRetryScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
 import {
   NodeSchedulerTimer,
@@ -1076,6 +1077,20 @@ export const createWatchlistEventPublisher = (
         NOTIFICATION,
         CLOCK,
       ],
+    },
+    {
+      provide: EarlyClosureRetryScheduler,
+      useFactory: (
+        worker: EarlyClosureNotificationService,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): EarlyClosureRetryScheduler =>
+        new EarlyClosureRetryScheduler(worker, timer, logger, {
+          enabled: config.auctionEarlyClosureRetrySchedulerEnabled,
+          pollIntervalMs: config.auctionEarlyClosureRetryPollIntervalMs,
+        }),
+      inject: [EarlyClosureNotificationService, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
     },
     {
       provide: BuyNowPendingClaimRegistrationService,

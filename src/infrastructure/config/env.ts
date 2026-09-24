@@ -127,6 +127,10 @@ export interface AppConfig {
   readonly auctionPendingClaimExpirationPollIntervalMs: number
 
   readonly auctionPendingClaimExpirationBatchSize: number
+
+  readonly auctionEarlyClosureRetrySchedulerEnabled: boolean
+
+  readonly auctionEarlyClosureRetryPollIntervalMs: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -453,6 +457,31 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     )
   }
 
+  const auctionEarlyClosureRetrySchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionEarlyClosureRetryPollIntervalMs = readInteger(
+    env,
+    'AUCTION_EARLY_CLOSURE_RETRY_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  if (auctionEarlyClosureRetrySchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (walletBaseUrl === '' || notificationsBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'WALLET_BASE_URL, NOTIFICATIONS_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
   return {
     nodeEnv,
 
@@ -529,5 +558,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionPendingClaimExpirationPollIntervalMs,
 
     auctionPendingClaimExpirationBatchSize,
+
+    auctionEarlyClosureRetrySchedulerEnabled,
+
+    auctionEarlyClosureRetryPollIntervalMs,
   }
 }
