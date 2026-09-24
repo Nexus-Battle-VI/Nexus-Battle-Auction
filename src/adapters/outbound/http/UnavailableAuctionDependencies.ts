@@ -5,6 +5,10 @@ import type {
   CatalogProductPolicyPort,
 } from '../../../application/ports/CatalogProductPolicyPort'
 import type {
+  OfficialAuctionEligibility,
+  OfficialAuctionEligibilityPort,
+} from '../../../application/ports/OfficialAuctionEligibilityPort'
+import type {
   ClaimedInventoryProductCommitment,
   CommitInventoryProductCommand,
   ConfirmInventoryProductClaimCommand,
@@ -40,6 +44,13 @@ import type {
  */
 export class UnavailableCatalogProductPolicy implements CatalogProductPolicyPort {
   getPolicy(productId: string): Promise<CatalogProductPolicy> {
+    void productId
+    return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
+  }
+}
+
+export class UnavailableOfficialAuctionEligibility implements OfficialAuctionEligibilityPort {
+  getEligibility(productId: string): Promise<OfficialAuctionEligibility> {
     void productId
     return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
   }
