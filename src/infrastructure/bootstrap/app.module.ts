@@ -232,6 +232,26 @@ export const createEarlyClosureNotificationPort = (
   })
 }
 
+/**
+ * HU-68: watchlist-events vive en un servidor/puerto de Notifications
+ * DISTINTO del de outbid/closed-by-buy-now/auto-bid-limit-reached (ver el
+ * comentario de `notificationsWatchlistBaseUrl` en env.ts), asi que usa su
+ * propia variable de entorno en vez de `notificationsBaseUrl`.
+ */
+export const createWatchlistEventPublisher = (
+  config: AppConfig,
+  clock: ClockPort,
+): WatchlistEventPublisherPort =>
+  config.notificationsWatchlistBaseUrl === null || config.internalServiceAuthSecret === null
+    ? new UnavailableWatchlistEventPublisher()
+    : new HttpWatchlistEventPublisher({
+        baseUrl: config.notificationsWatchlistBaseUrl,
+        secret: config.internalServiceAuthSecret,
+        serviceName: 'auction',
+        timeoutMs: config.notificationsTimeoutMs,
+        now: () => clock.now(),
+      })
+
 @Module({
   // La ruta estatica /watchlist debe registrarse antes de /:auctionId.
   controllers: [
@@ -774,16 +794,7 @@ export const createEarlyClosureNotificationPort = (
 
     {
       provide: WATCHLIST_EVENT_PUBLISHER,
-      useFactory: (config: AppConfig, clock: ClockPort): WatchlistEventPublisherPort =>
-        config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null
-          ? new UnavailableWatchlistEventPublisher()
-          : new HttpWatchlistEventPublisher({
-              baseUrl: config.notificationsBaseUrl,
-              secret: config.internalServiceAuthSecret,
-              serviceName: 'auction',
-              timeoutMs: config.notificationsTimeoutMs,
-              now: () => clock.now(),
-            }),
+      useFactory: createWatchlistEventPublisher,
       inject: [APP_CONFIG, CLOCK],
     },
 

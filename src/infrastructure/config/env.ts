@@ -68,8 +68,11 @@ export interface AppConfig {
   /**
    * HU-63.5.
    *
-   * URL interna del servidor de Notifications que recibe
-   * las notificaciones de puja superada.
+   * URL interna del servidor de Notifications que recibe las notificaciones
+   * de puja superada (HU-63.5), cierre por compra inmediata (HU-64.5) y
+   * limite de puja automatica alcanzado (HU-67). Las tres viven en el mismo
+   * servidor/puerto del lado de Notifications (`AUCTION_OUTBID_HTTP_PORT`,
+   * 3005 por convencion).
    *
    * null permite ejecutar Auction localmente sin levantar
    * Notifications.
@@ -77,6 +80,21 @@ export interface AppConfig {
   readonly notificationsBaseUrl: string | null
 
   readonly notificationsTimeoutMs: number
+
+  /**
+   * URL interna del servidor de Notifications que recibe los eventos de
+   * lista de seguimiento (HU-68: nueva puja, cierre proximo, liquidacion).
+   *
+   * Variable DELIBERADAMENTE separada de `notificationsBaseUrl`: del lado de
+   * Notifications, watchlist-events vive en un servidor/puerto distinto
+   * (`CATALOG_NOTIFICATIONS_HTTP_PORT`, 3004 por convencion) al de
+   * outbid/closed-by-buy-now/auto-bid-limit-reached (3005). Compartir una
+   * sola variable entre ambos hace que uno de los dos apunte siempre al
+   * puerto equivocado.
+   *
+   * null permite ejecutar Auction localmente sin levantar Notifications.
+   */
+  readonly notificationsWatchlistBaseUrl: string | null
 
   readonly walletBaseUrl: string | null
 
@@ -246,6 +264,8 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   const notificationsBaseUrl = readString(env, 'NOTIFICATIONS_BASE_URL', '')
 
   const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  const notificationsWatchlistBaseUrl = readString(env, 'NOTIFICATIONS_WATCHLIST_BASE_URL', '')
 
   const walletBaseUrl = readString(env, 'WALLET_BASE_URL', '')
 
@@ -427,6 +447,12 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     )
   }
 
+  if (notificationsWatchlistBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando NOTIFICATIONS_WATCHLIST_BASE_URL esta configurado.',
+    )
+  }
+
   return {
     nodeEnv,
 
@@ -464,6 +490,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
 
     notificationsTimeoutMs,
+
+    notificationsWatchlistBaseUrl:
+      notificationsWatchlistBaseUrl === '' ? null : notificationsWatchlistBaseUrl,
 
     walletBaseUrl: walletBaseUrl === '' ? null : walletBaseUrl,
 
