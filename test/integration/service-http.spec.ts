@@ -29,9 +29,11 @@ import {
   type TokenVerifierPort,
   type VerifiedIdentity,
 } from '../../src/application/ports/TokenVerifierPort'
+import { ConfigureAutoBid } from '../../src/application/use-cases/ConfigureAutoBid'
 import { PublishAuction } from '../../src/application/use-cases/PublishAuction'
 import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
+import { AutoBidRuleCode, AutoBidRuleViolation } from '../../src/domain/errors/AutoBidRuleViolation'
 import { BidRuleCode, BidRuleViolation } from '../../src/domain/errors/BidRuleViolation'
 import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
 
@@ -238,6 +240,43 @@ const registerBidStub = {
   }),
 }
 
+interface ConfigureAutoBidStubCommand {
+  auctionId: string
+  bidderId: string
+  maxAmountCredits: number
+}
+
+const configureAutoBidStub = {
+  execute: jest.fn((command: ConfigureAutoBidStubCommand) => {
+    if (command.auctionId === 'auction-closed') {
+      return Promise.reject(
+        new AutoBidRuleViolation(AutoBidRuleCode.AuctionNotActive, 'La subasta no esta activa.'),
+      )
+    }
+
+    if (command.auctionId === 'auction-own') {
+      return Promise.reject(
+        new AutoBidRuleViolation(
+          AutoBidRuleCode.SellerCannotConfigure,
+          'El vendedor no puede configurar en su propia subasta.',
+        ),
+      )
+    }
+
+    if (command.auctionId === 'auction-not-found') {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+
+    return Promise.resolve({
+      auctionId: command.auctionId,
+      bidderId: command.bidderId,
+      maxAmountCredits: command.maxAmountCredits,
+      configuredAt: new Date('2026-09-21T12:00:10.000Z'),
+      isActive: true,
+    })
+  }),
+}
+
 const stubVerifier: TokenVerifierPort = {
   verify: (token: string): Promise<VerifiedIdentity> => {
     const identity = IDENTITIES[token]
@@ -277,6 +316,8 @@ const buildApp = async (): Promise<INestApplication> => {
     .useValue(publishAuctionStub)
     .overrideProvider(RegisterBid)
     .useValue(registerBidStub)
+    .overrideProvider(ConfigureAutoBid)
+    .useValue(configureAutoBidStub)
     .compile()
 
   const app = moduleRef.createNestApplication()
@@ -725,6 +766,189 @@ describe('Servicio con autenticacion activa', () => {
 
       expect(Object.keys(operation?.responses ?? {})).toEqual(
         expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
+      )
+    })
+  })
+
+  describe('Configuracion de puja automatica HU-67.5', () => {
+    const validBody = {
+      maxAmountCredits: 100,
+    }
+
+    const invalidRequests: readonly {
+      body: Record<string, unknown>
+      description: string
+    }[] = [
+      {
+        body: { maxAmountCredits: 0 },
+        description: 'limite cero',
+      },
+      {
+        body: { maxAmountCredits: -10 },
+        description: 'limite negativo',
+      },
+      {
+        body: { maxAmountCredits: 10.5 },
+        description: 'limite decimal',
+      },
+      {
+        body: { maxAmountCredits: '100' },
+        description: 'limite con tipo incorrecto',
+      },
+      {
+        body: {},
+        description: 'limite ausente',
+      },
+    ]
+
+    const autoBid = (
+      auctionId = 'auction-ok',
+      token = 'token-jugador',
+      body: Record<string, unknown> = validBody,
+      operationId = 'operation-auto-bid-1',
+    ) =>
+      request(app.getHttpServer())
+        .post(`/api/v1/auctions/${auctionId}/auto-bid`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', operationId)
+        .send(body)
+
+    beforeEach(() => {
+      configureAutoBidStub.execute.mockClear()
+    })
+
+    it('responde 201 y usa la identidad autenticada como bidder', async () => {
+      const response = await autoBid()
+
+      expect(response.status).toBe(201)
+
+      expect(response.body).toMatchObject({
+        auctionId: 'auction-ok',
+        bidderId: 'sujeto-jugador',
+        maxAmountCredits: 100,
+        isActive: true,
+      })
+
+      expect(configureAutoBidStub.execute).toHaveBeenCalledWith({
+        auctionId: 'auction-ok',
+        bidderId: 'sujeto-jugador',
+        maxAmountCredits: 100,
+      })
+    })
+
+    it('responde 401 cuando no existe access token', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions/auction-ok/auto-bid')
+        .set('Idempotency-Key', 'operation-auto-bid-1')
+        .send(validBody)
+
+      expect(response.status).toBe(401)
+
+      expect(configureAutoBidStub.execute).not.toHaveBeenCalled()
+    })
+
+    it('responde 403 cuando la identidad no tiene rol PLAYER', async () => {
+      const response = await autoBid('auction-ok', 'token-admin')
+
+      expect(response.status).toBe(403)
+
+      expect(configureAutoBidStub.execute).not.toHaveBeenCalled()
+    })
+
+    it('rechaza campos desconocidos y no permite que el cliente envie bidderId', async () => {
+      const response = await autoBid('auction-ok', 'token-jugador', {
+        maxAmountCredits: 100,
+        bidderId: 'jugador-falsificado',
+      })
+
+      expect(response.status).toBe(400)
+
+      expect(response.body).toMatchObject({
+        code: 'INVALID_REQUEST',
+      })
+
+      expect(configureAutoBidStub.execute).not.toHaveBeenCalled()
+    })
+
+    it.each(invalidRequests)(
+      'responde 400 ante request invalido: $description',
+      async ({ body }) => {
+        const response = await autoBid('auction-ok', 'token-jugador', body)
+
+        expect(response.status).toBe(400)
+
+        expect(response.body).toMatchObject({
+          code: 'INVALID_REQUEST',
+        })
+
+        expect(configureAutoBidStub.execute).not.toHaveBeenCalled()
+      },
+    )
+
+    it('responde 400 cuando falta Idempotency-Key', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions/auction-ok/auto-bid')
+        .set('Authorization', 'Bearer token-jugador')
+        .send(validBody)
+
+      expect(response.status).toBe(400)
+
+      expect(response.body).toMatchObject({
+        statusCode: 400,
+        code: 'INVALID_IDEMPOTENCY_KEY',
+      })
+
+      expect(configureAutoBidStub.execute).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['auction-closed', 422, AutoBidRuleCode.AuctionNotActive],
+      ['auction-own', 403, AutoBidRuleCode.SellerCannotConfigure],
+      ['auction-not-found', 422, 'AUCTION_NOT_FOUND'],
+    ])('mapea el escenario %s a HTTP %i con codigo %s', async (auctionId, status, code) => {
+      const response = await autoBid(auctionId)
+
+      expect(response.status).toBe(status)
+
+      expect(response.body).toMatchObject({
+        statusCode: status,
+        code,
+      })
+    })
+
+    it('publica en OpenAPI el endpoint, autenticacion, Idempotency-Key y respuestas estables', () => {
+      const document = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().addBearerAuth().build(),
+      )
+
+      const operation = document.paths['/api/v1/auctions/{auctionId}/auto-bid']?.post
+
+      expect(operation).toBeDefined()
+
+      expect(operation?.security).toEqual([
+        {
+          bearer: [],
+        },
+      ])
+
+      expect(operation?.parameters).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: 'auctionId',
+            in: 'path',
+            required: true,
+          }),
+          expect.objectContaining({
+            name: 'Idempotency-Key',
+            in: 'header',
+            required: true,
+          }),
+        ]),
+      )
+
+      expect(Object.keys(operation?.responses ?? {})).toEqual(
+        expect.arrayContaining(['201', '400', '401', '403', '422', '503']),
       )
     })
   })

@@ -15,8 +15,37 @@ import type {
   ReserveBidCreditsCommand,
 } from '../../src/application/ports/BidCreditsPort'
 import { PersistBidWithCredits } from '../../src/application/use-cases/PersistBidWithCredits'
-import { Auction } from '../../src/domain/entities/Auction'
+import { PostgresAuctionSettlementRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionSettlementRepository'
+import { PostgresAuctionSettlementOutboxRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionSettlementOutboxRepository'
+import { PostgresAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
+import { PostgresBidCreditOperationReader } from '../../src/adapters/outbound/persistence/PostgresBidCreditOperationReader'
+import {
+  AuctionSettlementStatus,
+  CaptureStatus,
+  ReleaseStatus,
+} from '../../src/application/ports/AuctionSettlementRepositoryPort'
+import { Auction, AuctionClosingOutcome } from '../../src/domain/entities/Auction'
+import { AuctionClosingResult } from '../../src/domain/entities/AuctionClosingResult'
 import { Bid } from '../../src/domain/entities/Bid'
+import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
+import { createAuctionSettledEventV1 } from '../../src/domain/events/AuctionSettledEventV1'
+import { ClassifyAuctionLoserCredits } from '../../src/application/use-cases/ClassifyAuctionLoserCredits'
+import { PrepareAuctionLoserReleaseTasks } from '../../src/application/use-cases/PrepareAuctionLoserReleaseTasks'
+import { SettleAuction } from '../../src/application/use-cases/SettleAuction'
+import { PostgresAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
+import type { ClockPort } from '../../src/application/ports/ClockPort'
+import type {
+  AuctionWalletPort,
+  CaptureAuctionHoldCommand,
+  ReleaseAuctionHoldCommand,
+  WalletHoldOutcome,
+  WalletHoldResult,
+} from '../../src/application/ports/AuctionWalletPort'
+import type {
+  MarkInventoryProductPendingClaimCommand,
+  ProductInventoryPort,
+  ReleaseInventoryProductCommand,
+} from '../../src/application/ports/ProductInventoryPort'
 import {
   MIGRATIONS,
   createDatabase,
@@ -34,18 +63,23 @@ import {
 describe('Persistencia PostgreSQL', () => {
   let container: StartedPostgreSqlContainer
   let db: Kysely<Database>
+  let containerStarted = false
+  let databaseInitialized = false
 
   beforeAll(async () => {
     container = await new PostgreSqlContainer('postgres:17-alpine').start()
+    containerStarted = true
 
     db = createDatabase({
       connectionString: container.getConnectionUri(),
     })
+    databaseInitialized = true
   }, 120_000)
 
   afterAll(async () => {
-    await db.destroy()
-    await container.stop()
+    // beforeAll puede fallar antes de asignar recursos si Docker no esta disponible.
+    if (databaseInitialized) await db.destroy()
+    if (containerStarted) await container.stop()
   })
 
   it('la sonda responde contra un motor disponible', async () => {
@@ -153,6 +187,8 @@ describe('Persistencia PostgreSQL', () => {
   })
 
   describe('repositorio de publicaciones', () => {
+    const now = new Date('2026-09-23T12:00:00.000Z')
+
     const publication = (id: string, sellerId = 'seller-1', productId = `product-${id}`) => ({
       operationId: `operation-${id}`,
       auction: Auction.publish({
@@ -202,6 +238,8 @@ describe('Persistencia PostgreSQL', () => {
     beforeEach(async () => {
       await sql`
         truncate
+          auction_settlement_releases,
+          auction_settlements,
           auction_bids,
           auction_publication_operations,
           auction_audit_log,
@@ -210,6 +248,810 @@ describe('Persistencia PostgreSQL', () => {
           auctions
         restart identity cascade
       `.execute(db)
+    })
+
+    const expectRehydratedAuctionToRejectSecondFinish = (auction: Auction): void => {
+      let error: unknown
+
+      try {
+        auction.finish({
+          finishedAt: new Date('2026-09-23T12:00:00.000Z'),
+          leadingBid: null,
+        })
+      } catch (caught) {
+        error = caught
+      }
+
+      expect(error).toBeInstanceOf(AuctionRuleViolation)
+      expect(error).toMatchObject({ code: AuctionRuleCode.AuctionAlreadyFinished })
+    }
+
+    const winnerSettlement = (auctionId: string) => ({
+      auctionId,
+      resultType: 'WITH_WINNER' as const,
+      sellerId: 'seller-1',
+      winningBidId: `${auctionId}-bid`,
+      winnerId: `${auctionId}-winner`,
+      winningHoldId: `${auctionId}-hold`,
+      finalAmountCredits: 30,
+      captureOperationId: `auction:${auctionId}:settlement:capture`,
+      createdAt: new Date('2026-09-23T12:00:00.000Z'),
+    })
+
+    const fixedClock: ClockPort = { now: () => new Date(now) }
+
+    class FakeDbWallet implements AuctionWalletPort {
+      readonly captureCalls: CaptureAuctionHoldCommand[] = []
+      readonly releaseCalls: ReleaseAuctionHoldCommand[] = []
+      constructor(
+        private readonly captureOutcome: WalletHoldOutcome = 'SUCCESS',
+        private readonly releaseOutcome: WalletHoldOutcome = 'SUCCESS',
+        private readonly applied = true,
+      ) {}
+      captureHold(command: CaptureAuctionHoldCommand): Promise<WalletHoldResult> {
+        this.captureCalls.push(command)
+        return Promise.resolve({
+          outcome: this.captureOutcome,
+          operationId: command.operationId,
+          holdId: command.holdId,
+          applied: this.applied,
+        })
+      }
+      releaseHold(command: ReleaseAuctionHoldCommand): Promise<WalletHoldResult> {
+        this.releaseCalls.push(command)
+        return Promise.resolve({
+          outcome: this.releaseOutcome,
+          operationId: command.operationId,
+          holdId: command.holdId,
+          applied: this.applied,
+        })
+      }
+    }
+
+    class FakeDbInventory implements ProductInventoryPort {
+      readonly releaseCalls: ReleaseInventoryProductCommand[] = []
+      readonly pendingClaimCalls: MarkInventoryProductPendingClaimCommand[] = []
+
+      inspect(): Promise<{ readonly ownedByPlayer: boolean; readonly inUse: boolean }> {
+        return Promise.resolve({ ownedByPlayer: true, inUse: false })
+      }
+
+      commit(): Promise<never> {
+        return Promise.reject(new Error('No debe invocarse commit durante settlement.'))
+      }
+
+      release(command: ReleaseInventoryProductCommand) {
+        this.releaseCalls.push(command)
+        return Promise.resolve({
+          operationId: command.operationId,
+          commitmentId: command.commitmentId,
+          status: 'RELEASED' as const,
+          applied: true,
+        })
+      }
+
+      markPendingClaim(command: MarkInventoryProductPendingClaimCommand) {
+        this.pendingClaimCalls.push(command)
+        return Promise.resolve({
+          operationId: command.operationId,
+          commitmentId: command.commitmentId,
+          status: 'PENDING_CLAIM' as const,
+          winnerId: command.winnerId,
+          applied: true,
+        })
+      }
+
+      confirmClaim(): Promise<never> {
+        return Promise.reject(new Error('No debe invocarse confirmClaim durante settlement.'))
+      }
+    }
+
+    const createSettleAuctionForDb = (
+      wallet = new FakeDbWallet(),
+      inventory = new FakeDbInventory(),
+    ) => {
+      const auctions = new PostgresAuctionRepository(db)
+      const settlements = new PostgresAuctionSettlementRepository(db)
+      return {
+        wallet,
+        inventory,
+        auctions,
+        settlements,
+        useCase: new SettleAuction(
+          auctions,
+          settlements,
+          fixedClock,
+          wallet,
+          new ClassifyAuctionLoserCredits(new PostgresBidCreditOperationReader(db)),
+          new PrepareAuctionLoserReleaseTasks(settlements),
+          inventory,
+          new PostgresAuctionInventorySettlementIntentRepository(db),
+          new PostgresAuctionPendingClaimRepository(db),
+        ),
+      }
+    }
+
+    const withoutBidsFixture = (auctionId: string) => ({
+      auctionId,
+      sellerId: 'seller-1',
+      closesAt: publication(auctionId).auction.snapshot().closesAt,
+    })
+
+    const withWinnerFixture = async (auctionId: string, withLoser = false) => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication(auctionId))
+      if (withLoser)
+        await repository.persistBid(
+          bid(
+            `${auctionId}-loser`,
+            auctionId,
+            'loser',
+            20,
+            new Date('2026-09-21T12:00:10.000Z'),
+            null,
+          ),
+          `${auctionId}-loser-hold`,
+        )
+      await repository.persistBid(
+        bid(
+          `${auctionId}-winner`,
+          auctionId,
+          'winner',
+          30,
+          new Date('2026-09-21T12:00:11.000Z'),
+          null,
+        ),
+        `${auctionId}-winner-hold`,
+      )
+      return {
+        auctionId,
+        sellerId: 'seller-1',
+        winningBidId: `${auctionId}-winner`,
+        winningHoldId: `${auctionId}-winner-hold`,
+      }
+    }
+
+    it('construye SettleAuction con adapters PostgreSQL', () => {
+      const fixture = withoutBidsFixture('settle-auction-smoke')
+      expect(fixture.sellerId).toBe('seller-1')
+      expect(createSettleAuctionForDb().useCase).toBeInstanceOf(SettleAuction)
+    })
+
+    it('recupera WITHOUT_BIDS desde PostgreSQL tras recrear SettleAuction', async () => {
+      const auctionId = 'settle-auction-without-bids-recovery'
+      withoutBidsFixture(auctionId)
+      const walletA = new FakeDbWallet()
+      const first = createSettleAuctionForDb(walletA)
+      await first.auctions.publish(publication(auctionId))
+
+      await expect(first.useCase.execute({ auctionId })).resolves.toMatchObject({
+        status: AuctionSettlementStatus.Completed,
+        resultType: 'WITHOUT_BIDS',
+        captureStatus: CaptureStatus.NotRequired,
+      })
+      const auctionAfterFirst = await first.auctions.findAuctionAggregate(auctionId)
+      const settlementAfterFirst = await first.settlements.getByAuctionId(auctionId)
+      expect(auctionAfterFirst).toMatchObject({
+        status: 'FINISHED',
+        finishedAt: now,
+        closingResult: { outcome: AuctionClosingOutcome.WithoutBids },
+      })
+      expect(settlementAfterFirst).toMatchObject({
+        status: AuctionSettlementStatus.Completed,
+        resultType: 'WITHOUT_BIDS',
+        captureStatus: CaptureStatus.NotRequired,
+        winningBidId: null,
+        winnerId: null,
+        winningHoldId: null,
+        finalAmountCredits: null,
+        captureOperationId: null,
+      })
+      if (auctionAfterFirst === null || settlementAfterFirst === null)
+        throw new Error('Estado esperado.')
+
+      const walletB = new FakeDbWallet()
+      const second = createSettleAuctionForDb(walletB)
+      await expect(second.useCase.execute({ auctionId })).resolves.toMatchObject({
+        status: AuctionSettlementStatus.Completed,
+        resultType: 'WITHOUT_BIDS',
+        captureStatus: CaptureStatus.NotRequired,
+      })
+      await expect(second.auctions.findAuctionAggregate(auctionId)).resolves.toMatchObject({
+        status: 'FINISHED',
+        finishedAt: auctionAfterFirst.finishedAt,
+        closingResult: { outcome: AuctionClosingOutcome.WithoutBids },
+      })
+      await expect(second.settlements.getByAuctionId(auctionId)).resolves.toEqual(
+        settlementAfterFirst,
+      )
+      expect(walletA.captureCalls).toHaveLength(0)
+      expect(walletA.releaseCalls).toHaveLength(0)
+      expect(walletB.captureCalls).toHaveLength(0)
+      expect(walletB.releaseCalls).toHaveLength(0)
+      const row = await db
+        .selectFrom('auction_settlements')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .executeTakeFirstOrThrow()
+      expect(row.count).toBe(1)
+    })
+
+    it('recupera capture RETRYABLE con el mismo intent Wallet tras restart', async () => {
+      const auctionId = 'settle-auction-capture-retry-recovery'
+      const fixture = await withWinnerFixture(auctionId)
+      const walletA = new FakeDbWallet('RETRYABLE')
+      const first = createSettleAuctionForDb(walletA)
+
+      await expect(first.useCase.execute({ auctionId })).resolves.toMatchObject({
+        captureStatus: CaptureStatus.Retryable,
+      })
+      const beforeRestart = await first.settlements.getByAuctionId(auctionId)
+      expect(beforeRestart).toMatchObject({
+        resultType: 'WITH_WINNER',
+        captureStatus: CaptureStatus.Retryable,
+        winningBidId: fixture.winningBidId,
+        winnerId: 'winner',
+        winningHoldId: fixture.winningHoldId,
+        sellerId: fixture.sellerId,
+        finalAmountCredits: 30,
+        captureOperationId: `auction:${auctionId}:settlement:capture`,
+      })
+      if (beforeRestart === null) throw new Error('Settlement esperado.')
+      expect(walletA.captureCalls).toEqual([
+        expect.objectContaining({
+          holdId: beforeRestart.winningHoldId,
+          operationId: beforeRestart.captureOperationId,
+          beneficiaryPlayerId: fixture.sellerId,
+          auctionId,
+          winningBidId: fixture.winningBidId,
+        }),
+      ])
+
+      const walletB = new FakeDbWallet('SUCCESS', 'SUCCESS', false)
+      const second = createSettleAuctionForDb(walletB)
+      await second.useCase.execute({ auctionId })
+      expect(walletB.captureCalls).toEqual([
+        expect.objectContaining({
+          holdId: beforeRestart.winningHoldId,
+          operationId: beforeRestart.captureOperationId,
+        }),
+      ])
+      await expect(second.settlements.getByAuctionId(auctionId)).resolves.toMatchObject({
+        captureStatus: CaptureStatus.Confirmed,
+        winningHoldId: beforeRestart.winningHoldId,
+        captureOperationId: beforeRestart.captureOperationId,
+      })
+      const row = await db
+        .selectFrom('auction_settlements')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .executeTakeFirstOrThrow()
+      expect(row.count).toBe(1)
+    })
+
+    it('no recaptura un WITH_WINNER CONFIRMED tras recrear SettleAuction', async () => {
+      const auctionId = 'settle-auction-capture-confirmed-restart'
+      const fixture = await withWinnerFixture(auctionId)
+      const first = createSettleAuctionForDb(new FakeDbWallet('SUCCESS'))
+      await first.useCase.execute({ auctionId })
+      const beforeRestart = await first.settlements.getByAuctionId(auctionId)
+      expect(beforeRestart).toMatchObject({
+        resultType: 'WITH_WINNER',
+        captureStatus: CaptureStatus.Confirmed,
+        captureOperationId: `auction:${auctionId}:settlement:capture`,
+        winningHoldId: fixture.winningHoldId,
+      })
+      if (beforeRestart === null) throw new Error('Settlement esperado.')
+
+      const walletB = new FakeDbWallet('TERMINAL_CONFLICT')
+      const second = createSettleAuctionForDb(walletB)
+      await second.useCase.execute({ auctionId })
+      expect(walletB.captureCalls).toHaveLength(0)
+      await expect(second.settlements.getByAuctionId(auctionId)).resolves.toMatchObject({
+        captureStatus: CaptureStatus.Confirmed,
+        captureOperationId: beforeRestart.captureOperationId,
+        winningHoldId: beforeRestart.winningHoldId,
+      })
+      const row = await db
+        .selectFrom('auction_settlements')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .executeTakeFirstOrThrow()
+      expect(row.count).toBe(1)
+    })
+
+    it('recupera release RETRYABLE con mismo intent tras restart', async () => {
+      const auctionId = 'settle-auction-release-retry-recovery'
+      await withWinnerFixture(auctionId, true)
+      const walletA = new FakeDbWallet('SUCCESS', 'RETRYABLE')
+      const first = createSettleAuctionForDb(walletA)
+      await first.useCase.execute({ auctionId })
+      await first.useCase.execute({ auctionId })
+      const releaseBeforeRestart = (await first.settlements.listReleaseTasks(auctionId))[0]
+      const settlementBeforeRestart = await first.settlements.getByAuctionId(auctionId)
+      expect(releaseBeforeRestart).toMatchObject({
+        status: ReleaseStatus.Retryable,
+        holdId: `${auctionId}-loser-hold`,
+        operationId: `auction:${auctionId}:bid:${auctionId}-loser:release`,
+        reason: 'AUCTION_SETTLEMENT_LOST',
+        lastError: expect.any(String),
+      })
+      expect(settlementBeforeRestart).toMatchObject({ captureStatus: CaptureStatus.Confirmed })
+      if (releaseBeforeRestart === undefined || settlementBeforeRestart === null)
+        throw new Error('Estado durable esperado.')
+
+      const walletB = new FakeDbWallet('TERMINAL_CONFLICT', 'SUCCESS', false)
+      const second = createSettleAuctionForDb(walletB)
+      await second.useCase.execute({ auctionId })
+      expect(walletB.captureCalls).toHaveLength(0)
+      expect(walletB.releaseCalls).toEqual([
+        expect.objectContaining({
+          holdId: releaseBeforeRestart.holdId,
+          operationId: releaseBeforeRestart.operationId,
+          reason: releaseBeforeRestart.reason,
+        }),
+      ])
+      await expect(second.settlements.listReleaseTasks(auctionId)).resolves.toEqual([
+        expect.objectContaining({ status: ReleaseStatus.Released }),
+      ])
+      await expect(second.settlements.getByAuctionId(auctionId)).resolves.toMatchObject({
+        captureStatus: CaptureStatus.Confirmed,
+      })
+      const row = await db
+        .selectFrom('auction_settlement_releases')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .where('bid_id', '=', `${auctionId}-loser`)
+        .executeTakeFirstOrThrow()
+      expect(row.count).toBe(1)
+    })
+
+    it('no reintenta una release TERMINAL_ERROR tras restart', async () => {
+      const auctionId = 'settle-auction-release-terminal-recovery'
+      await withWinnerFixture(auctionId, true)
+      const first = createSettleAuctionForDb(new FakeDbWallet('SUCCESS', 'TERMINAL_NOT_FOUND'))
+      await first.useCase.execute({ auctionId })
+      await first.useCase.execute({ auctionId })
+      const releaseBeforeRestart = (await first.settlements.listReleaseTasks(auctionId))[0]
+      const settlementBeforeRestart = await first.settlements.getByAuctionId(auctionId)
+      expect(releaseBeforeRestart).toMatchObject({
+        status: ReleaseStatus.TerminalError,
+        holdId: `${auctionId}-loser-hold`,
+        operationId: `auction:${auctionId}:bid:${auctionId}-loser:release`,
+        reason: 'AUCTION_SETTLEMENT_LOST',
+        lastError: expect.any(String),
+      })
+      expect(settlementBeforeRestart).toMatchObject({ captureStatus: CaptureStatus.Confirmed })
+      if (releaseBeforeRestart === undefined || settlementBeforeRestart === null)
+        throw new Error('Estado durable esperado.')
+
+      const walletB = new FakeDbWallet('TERMINAL_CONFLICT', 'SUCCESS')
+      const second = createSettleAuctionForDb(walletB)
+      await second.useCase.execute({ auctionId })
+      expect(walletB.captureCalls).toHaveLength(0)
+      expect(walletB.releaseCalls).toHaveLength(0)
+      await expect(second.settlements.listReleaseTasks(auctionId)).resolves.toEqual([
+        expect.objectContaining({
+          status: ReleaseStatus.TerminalError,
+          holdId: releaseBeforeRestart.holdId,
+          operationId: releaseBeforeRestart.operationId,
+          lastError: expect.any(String),
+        }),
+      ])
+      await expect(second.settlements.getByAuctionId(auctionId)).resolves.toMatchObject({
+        captureStatus: CaptureStatus.Confirmed,
+        status: expect.not.stringMatching('COMPLETED'),
+      })
+      const row = await db
+        .selectFrom('auction_settlement_releases')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .where('bid_id', '=', `${auctionId}-loser`)
+        .executeTakeFirstOrThrow()
+      expect(row.count).toBe(1)
+    })
+
+    it('reproduce settlement WITH_WINNER COMPLETED sin nuevas operaciones tras restart', async () => {
+      const auctionId = 'settle-auction-completed-restart'
+      await withWinnerFixture(auctionId, true)
+      const first = createSettleAuctionForDb(new FakeDbWallet('SUCCESS', 'SUCCESS'))
+      await first.useCase.execute({ auctionId })
+      await expect(first.useCase.execute({ auctionId })).resolves.toMatchObject({
+        status: AuctionSettlementStatus.Completed,
+        captureStatus: CaptureStatus.Confirmed,
+      })
+      const auctionBeforeRestart = await first.auctions.findAuctionAggregate(auctionId)
+      const settlementBeforeRestart = await first.settlements.getByAuctionId(auctionId)
+      const releaseBeforeRestart = (await first.settlements.listReleaseTasks(auctionId))[0]
+      if (
+        auctionBeforeRestart === null ||
+        settlementBeforeRestart === null ||
+        releaseBeforeRestart === undefined
+      ) {
+        throw new Error('Estado durable esperado.')
+      }
+      expect(releaseBeforeRestart.status).toBe(ReleaseStatus.Released)
+
+      const walletB = new FakeDbWallet('TERMINAL_CONFLICT', 'TERMINAL_CONFLICT')
+      const second = createSettleAuctionForDb(walletB)
+      await expect(second.useCase.execute({ auctionId })).resolves.toMatchObject({
+        status: AuctionSettlementStatus.Completed,
+      })
+      expect(walletB.captureCalls).toHaveLength(0)
+      expect(walletB.releaseCalls).toHaveLength(0)
+      await expect(second.auctions.findAuctionAggregate(auctionId)).resolves.toEqual(
+        auctionBeforeRestart,
+      )
+      await expect(second.settlements.getByAuctionId(auctionId)).resolves.toEqual(
+        settlementBeforeRestart,
+      )
+      await expect(second.settlements.listReleaseTasks(auctionId)).resolves.toEqual([
+        releaseBeforeRestart,
+      ])
+      const settlements = await db
+        .selectFrom('auction_settlements')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .executeTakeFirstOrThrow()
+      const releases = await db
+        .selectFrom('auction_settlement_releases')
+        .select(sql<number>`count(*)::integer`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .where('bid_id', '=', `${auctionId}-loser`)
+        .executeTakeFirstOrThrow()
+      expect(settlements.count).toBe(1)
+      expect(releases.count).toBe(1)
+    })
+
+    const classifyPersistedLoser = async (
+      status: 'COMPLETED' | 'COMPENSATION_PENDING',
+      holdId: string | null,
+    ) => {
+      const auctionId = `hu63-${status}-${holdId ?? 'missing'}`
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication(auctionId))
+      const loser = bid(
+        `${auctionId}-bid`,
+        auctionId,
+        'loser',
+        20,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      )
+      await repository.persistBid(loser, holdId)
+      await repository.createBidCreditOperation({
+        operationId: `${auctionId}:operation`,
+        bidId: `${auctionId}-next`,
+        auctionId,
+        bidderId: 'next',
+        amountCredits: 30,
+        createdAt: now,
+      })
+      await repository.updateBidCreditOperation({
+        operationId: `${auctionId}:operation`,
+        status,
+        reservationId: 'new-hold',
+        previousReservationId: holdId,
+        updatedAt: now,
+      })
+      return {
+        auctionId,
+        loser: { ...loser.snapshot(), ...(holdId === null ? {} : { creditReservationId: holdId }) },
+        operationId: `${auctionId}:operation`,
+      }
+    }
+
+    it('clasifica durablemente un hold HU-63 ya liberado', async () => {
+      const scenario = await classifyPersistedLoser('COMPLETED', 'hold-released')
+      const actions = await new ClassifyAuctionLoserCredits(
+        new PostgresBidCreditOperationReader(db),
+      ).execute(scenario.auctionId, [scenario.loser], null)
+      expect(actions).toMatchObject([{ classification: 'ALREADY_RELEASED' }])
+    })
+
+    it('reutiliza durablemente operationId HU-63 pendiente sin duplicar task', async () => {
+      const scenario = await classifyPersistedLoser('COMPENSATION_PENDING', 'hold-pending')
+      const actions = await new ClassifyAuctionLoserCredits(
+        new PostgresBidCreditOperationReader(db),
+      ).execute(scenario.auctionId, [scenario.loser], null)
+      const settlements = new PostgresAuctionSettlementRepository(db)
+      const prepare = new PrepareAuctionLoserReleaseTasks(settlements)
+      await prepare.execute(actions, now)
+      await prepare.execute(actions, now)
+      await expect(settlements.listReleaseTasks(scenario.auctionId)).resolves.toMatchObject([
+        { operationId: scenario.operationId, holdId: 'hold-pending' },
+      ])
+    })
+
+    it('clasifica durablemente un hold activo y prepara operationId HU-65', async () => {
+      const auctionId = 'hu63-active'
+      const actions = await new ClassifyAuctionLoserCredits(
+        new PostgresBidCreditOperationReader(db),
+      ).execute(
+        auctionId,
+        [
+          {
+            id: 'loser',
+            auctionId,
+            bidderId: 'loser',
+            amountCredits: 20,
+            placedAt: now,
+            creditReservationId: 'hold-active',
+          },
+        ],
+        null,
+      )
+      const settlements = new PostgresAuctionSettlementRepository(db)
+      await new PrepareAuctionLoserReleaseTasks(settlements).execute(actions, now)
+      await expect(settlements.listReleaseTasks(auctionId)).resolves.toMatchObject([
+        { operationId: 'auction:hu63-active:bid:loser:release' },
+      ])
+    })
+
+    it('clasifica durablemente una compensacion sin hold como inconsistente', async () => {
+      const scenario = await classifyPersistedLoser('COMPENSATION_PENDING', null)
+      const actions = await new ClassifyAuctionLoserCredits(
+        new PostgresBidCreditOperationReader(db),
+      ).execute(scenario.auctionId, [scenario.loser], null)
+      expect(actions).toMatchObject([{ classification: 'INCONSISTENT' }])
+    })
+
+    it('crea settlement idempotentemente y conserva el registro durable', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const input = winnerSettlement('settlement-idempotent')
+      const first = await repository.createIfAbsent(input)
+      const replay = await repository.createIfAbsent({
+        ...input,
+        createdAt: new Date('2027-01-01'),
+      })
+
+      expect(first).toEqual(replay)
+      await expect(repository.getByAuctionId(input.auctionId)).resolves.toMatchObject({
+        status: AuctionSettlementStatus.CapturePending,
+        captureStatus: CaptureStatus.Pending,
+        captureOperationId: input.captureOperationId,
+      })
+      const { amount } = await db
+        .selectFrom('auction_settlements')
+        .select(sql<number>`count(*)::integer`.as('amount'))
+        .where('auction_id', '=', input.auctionId)
+        .executeTakeFirstOrThrow()
+      expect(amount).toBe(1)
+    })
+
+    it('mantiene un solo settlement ante createIfAbsent concurrente', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const input = winnerSettlement('settlement-concurrent')
+      const [left, right] = await Promise.all([
+        repository.createIfAbsent(input),
+        repository.createIfAbsent(input),
+      ])
+
+      expect(left).toEqual(right)
+      const { amount } = await db
+        .selectFrom('auction_settlements')
+        .select(sql<number>`count(*)::integer`.as('amount'))
+        .where('auction_id', '=', input.auctionId)
+        .executeTakeFirstOrThrow()
+      expect(amount).toBe(1)
+    })
+
+    it('rechaza un intent de settlement incompatible y acepta replay identico', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const input = winnerSettlement('settlement-conflict')
+      await repository.createIfAbsent(input)
+      await expect(
+        repository.createIfAbsent({ ...input, winningHoldId: 'other-hold' }),
+      ).rejects.toThrow('Conflicto de intent')
+      await expect(
+        repository.createIfAbsent({ ...input, createdAt: new Date('2027-01-01') }),
+      ).resolves.toMatchObject({ winningHoldId: input.winningHoldId })
+    })
+
+    it('mantiene un release unico y persiste sus transiciones', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const auctionId = 'settlement-release'
+      await repository.createIfAbsent(winnerSettlement(auctionId))
+      const release = {
+        auctionId,
+        bidId: 'loser-bid',
+        holdId: 'loser-hold',
+        operationId: 'auction:settlement-release:release:loser-bid',
+        createdAt: new Date('2026-09-23T12:00:00.000Z'),
+      }
+      const [left, right] = await Promise.all([
+        repository.createReleaseIfAbsent(release),
+        repository.createReleaseIfAbsent(release),
+      ])
+
+      expect(left).toEqual(right)
+      await repository.markReleaseRetryable(
+        auctionId,
+        release.bidId,
+        'timeout',
+        new Date('2026-09-23T12:01:00.000Z'),
+      )
+      await expect(repository.listPendingReleaseTasks(auctionId)).resolves.toMatchObject([
+        { status: ReleaseStatus.Retryable },
+      ])
+      await repository.markReleaseConfirmed(
+        auctionId,
+        release.bidId,
+        new Date('2026-09-23T12:02:00.000Z'),
+      )
+      await expect(
+        repository.markReleaseRetryable(auctionId, release.bidId, 'again', new Date()),
+      ).rejects.toThrow()
+      const { amount } = await db
+        .selectFrom('auction_settlement_releases')
+        .select(sql<number>`count(*)::integer`.as('amount'))
+        .where('auction_id', '=', auctionId)
+        .where('bid_id', '=', release.bidId)
+        .executeTakeFirstOrThrow()
+      expect(amount).toBe(1)
+    })
+
+    it('rechaza un intent de release incompatible y acepta replay identico', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const auctionId = 'settlement-release-conflict'
+      await repository.createIfAbsent(winnerSettlement(auctionId))
+      const release = {
+        auctionId,
+        bidId: 'loser',
+        holdId: 'hold',
+        operationId: 'release-op',
+        createdAt: now,
+      }
+      await repository.createReleaseIfAbsent(release)
+      await expect(
+        repository.createReleaseIfAbsent({ ...release, holdId: 'other' }),
+      ).rejects.toThrow('Conflicto de intent')
+      await expect(
+        repository.createReleaseIfAbsent({ ...release, createdAt: new Date('2027-01-01') }),
+      ).resolves.toMatchObject({ holdId: 'hold', operationId: 'release-op' })
+    })
+
+    it('persiste PENDING -> RETRYABLE -> CONFIRMED para capture', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const auctionId = 'settlement-capture'
+      await repository.createIfAbsent(winnerSettlement(auctionId))
+      await repository.markCaptureRetryable(
+        auctionId,
+        'timeout',
+        new Date('2026-09-23T12:01:00.000Z'),
+      )
+      await expect(repository.getByAuctionId(auctionId)).resolves.toMatchObject({
+        captureStatus: CaptureStatus.Retryable,
+      })
+      await repository.markCaptureConfirmed(auctionId, new Date('2026-09-23T12:02:00.000Z'))
+      await expect(repository.getByAuctionId(auctionId)).resolves.toMatchObject({
+        captureStatus: CaptureStatus.Confirmed,
+      })
+      await expect(
+        repository.markCaptureRetryable(auctionId, 'again', new Date()),
+      ).rejects.toThrow()
+    })
+
+    it('completa WITHOUT_BIDS sin captura', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      await repository.createIfAbsent({
+        auctionId: 'settlement-empty',
+        resultType: 'WITHOUT_BIDS',
+        sellerId: 'seller-1',
+        createdAt: new Date('2026-09-23T12:00:00.000Z'),
+      })
+      await repository.markCompleted('settlement-empty', new Date('2026-09-23T12:01:00.000Z'))
+
+      await expect(repository.getByAuctionId('settlement-empty')).resolves.toMatchObject({
+        status: AuctionSettlementStatus.Completed,
+        captureStatus: CaptureStatus.NotRequired,
+        winningBidId: null,
+        winnerId: null,
+        winningHoldId: null,
+        finalAmountCredits: null,
+        captureOperationId: null,
+      })
+    })
+
+    it('rehidrata desde PostgreSQL un cierre WITH_WINNER', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const command = publication('auction-finished-winner')
+      const finishedAt = new Date('2026-09-23T12:00:00.000Z')
+      const closingResult = AuctionClosingResult.withWinner({
+        finishedAt,
+        bidderId: 'winner-1',
+        bidId: 'winning-bid-1',
+        amountCredits: 30,
+      })
+
+      await repository.publish(command)
+      await repository.finishAuction({
+        auctionId: command.auction.snapshot().id,
+        finishedAt,
+        closingResult,
+      })
+
+      const rehydrated = await repository.findAuctionAggregate(command.auction.snapshot().id)
+
+      expect(rehydrated).not.toBeNull()
+      expect(rehydrated?.status).toBe('FINISHED')
+      expect(rehydrated?.finishedAt).toEqual(finishedAt)
+      expect(rehydrated?.closingResult).toEqual({
+        outcome: AuctionClosingOutcome.WithWinner,
+        finishedAt,
+        winnerId: 'winner-1',
+        winningBidId: 'winning-bid-1',
+        finalAmountCredits: 30,
+      })
+      expectRehydratedAuctionToRejectSecondFinish(rehydrated!)
+    })
+
+    it('rehidrata desde PostgreSQL un cierre WITHOUT_BIDS', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const command = publication('auction-finished-without-bids')
+      const finishedAt = new Date('2026-09-23T12:00:00.000Z')
+      const closingResult = AuctionClosingResult.withoutBids(finishedAt)
+
+      await repository.publish(command)
+      await repository.finishAuction({
+        auctionId: command.auction.snapshot().id,
+        finishedAt,
+        closingResult,
+      })
+
+      const rehydrated = await repository.findAuctionAggregate(command.auction.snapshot().id)
+
+      expect(rehydrated).not.toBeNull()
+      expect(rehydrated?.status).toBe('FINISHED')
+      expect(rehydrated?.finishedAt).toEqual(finishedAt)
+      expect(rehydrated?.closingResult).toEqual({
+        outcome: AuctionClosingOutcome.WithoutBids,
+        finishedAt,
+        winnerId: null,
+        winningBidId: null,
+        finalAmountCredits: null,
+      })
+      expectRehydratedAuctionToRejectSecondFinish(rehydrated!)
+    })
+
+    it('rechaza un segundo cierre y conserva el primer resultado persistido', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const command = publication('auction-finished-once')
+      const firstFinishedAt = new Date('2026-09-23T12:00:00.000Z')
+      const firstResult = AuctionClosingResult.withWinner({
+        finishedAt: firstFinishedAt,
+        bidderId: 'winner-a',
+        bidId: 'winning-bid-a',
+        amountCredits: 40,
+      })
+
+      await repository.publish(command)
+      await repository.finishAuction({
+        auctionId: command.auction.snapshot().id,
+        finishedAt: firstFinishedAt,
+        closingResult: firstResult,
+      })
+      await expect(
+        repository.finishAuction({
+          auctionId: command.auction.snapshot().id,
+          finishedAt: new Date('2026-09-24T12:00:00.000Z'),
+          closingResult: AuctionClosingResult.withoutBids(new Date('2026-09-24T12:00:00.000Z')),
+        }),
+      ).rejects.toThrow('ya fue finalizada')
+
+      await expect(
+        repository.findAuctionAggregate(command.auction.snapshot().id),
+      ).resolves.toMatchObject({
+        status: 'FINISHED',
+        finishedAt: firstFinishedAt,
+        closingResult: {
+          outcome: AuctionClosingOutcome.WithWinner,
+          finishedAt: firstFinishedAt,
+          winnerId: 'winner-a',
+          winningBidId: 'winning-bid-a',
+          finalAmountCredits: 40,
+        },
+      })
     })
 
     /** Verifica las migraciones de creditos mediante operaciones reales e idempotentes. */
@@ -255,7 +1097,7 @@ describe('Persistencia PostgreSQL', () => {
         repository.persistBid(second, 'reserve-second', command.operationId),
       ).resolves.toEqual({
         bid: second.snapshot(),
-        previousLeader: first.snapshot(),
+        previousLeader: { ...first.snapshot(), creditReservationId: 'reserve-first' },
         previousLeaderReservationId: 'reserve-first',
       })
       await expect(repository.findBidCreditOperation(command.operationId)).resolves.toMatchObject({
@@ -874,7 +1716,10 @@ describe('Persistencia PostgreSQL', () => {
         expect(lowerResult.reason).toBeInstanceOf(ConcurrentBidConflictError)
       }
 
-      await expect(repository.findLeadingBid(auctionId)).resolves.toEqual(higherBid.snapshot())
+      await expect(repository.findLeadingBid(auctionId)).resolves.toEqual({
+        ...higherBid.snapshot(),
+        creditReservationId: 'reservation-bid-credit-concurrent-30',
+      })
       expect(activeReservations).toEqual(new Set(['reservation-bid-credit-concurrent-30']))
       expect(reserve).toHaveBeenCalledTimes(2)
       expect(release).toHaveBeenCalledTimes(1)
@@ -886,6 +1731,515 @@ describe('Persistencia PostgreSQL', () => {
       ).resolves.toMatchObject({
         status: lowerResult.status === 'fulfilled' ? 'COMPLETED' : 'COMPENSATED',
       })
+    })
+  })
+
+  describe('pending claims HU-65.3', () => {
+    const persistAuctionForClaim = async (auctionId: string): Promise<void> => {
+      await db
+        .insertInto('auctions')
+        .values({
+          id: auctionId,
+          seller_id: 'seller',
+          product_id: `product-${auctionId}`,
+          duration_hours: 24,
+          publication_fee_credits: 1,
+          minimum_bid_credits: 1,
+          buy_now_credits: null,
+          status: 'FINISHED',
+          published_at: new Date('2026-01-01'),
+          closes_at: new Date('2026-01-02'),
+          inventory_commitment_id: 'commitment',
+          fee_charge_id: 'fee',
+          finished_at: new Date('2026-01-02'),
+          closing_result_type: 'WITH_WINNER',
+          winning_bid_id: `bid-${auctionId}`,
+          winner_id: 'winner',
+          final_amount_credits: 30,
+        })
+        .execute()
+    }
+    const input = (auctionId: string) => ({
+      auctionId,
+      winnerId: 'winner',
+      productId: `product-${auctionId}`,
+      winningBidId: `bid-${auctionId}`,
+      finalAmountCredits: 30,
+      settledAt: new Date('2026-01-03'),
+      createdAt: new Date('2026-01-03'),
+    })
+    it('persiste, reproduce, consulta y mantiene un unico claim tras concurrencia/restart', async () => {
+      const auctionId = 'claim-durable'
+      await persistAuctionForClaim(auctionId)
+      const repository = new PostgresAuctionPendingClaimRepository(db)
+      const [first, replay] = await Promise.all([
+        repository.createIfAbsent(input(auctionId)),
+        repository.createIfAbsent(input(auctionId)),
+      ])
+      expect(first).toEqual(replay)
+      expect(
+        (await repository.findPendingByWinnerId('winner')).some(
+          (claim) => claim.auctionId === auctionId,
+        ),
+      ).toBe(true)
+      const restarted = new PostgresAuctionPendingClaimRepository(db)
+      await expect(restarted.findByAuctionId(auctionId)).resolves.toMatchObject({
+        claimStatus: 'PENDING',
+        productId: `product-${auctionId}`,
+      })
+      const count = await db
+        .selectFrom('auction_pending_claims')
+        .select(sql<string>`count(*)::text`.as('count'))
+        .where('auction_id', '=', auctionId)
+        .executeTakeFirstOrThrow()
+      expect(count.count).toBe('1')
+      await expect(
+        repository.createIfAbsent({ ...input(auctionId), productId: 'other' }),
+      ).rejects.toThrow('Conflicto de intent')
+    })
+    it('impone FK y constraints de claim', async () => {
+      const now = new Date('2026-01-03')
+      await expect(
+        db
+          .insertInto('auction_pending_claims')
+          .values({
+            auction_id: 'missing',
+            winner_id: 'winner',
+            product_id: 'product',
+            winning_bid_id: 'bid',
+            final_amount_credits: 1,
+            settled_at: now,
+            claim_status: 'PENDING',
+            claimed_at: null,
+            created_at: now,
+            updated_at: now,
+          })
+          .execute(),
+      ).rejects.toThrow()
+      const auctionId = 'claim-constraints'
+      await persistAuctionForClaim(auctionId)
+      await expect(
+        db
+          .insertInto('auction_pending_claims')
+          .values({
+            auction_id: auctionId,
+            winner_id: 'winner',
+            product_id: 'product',
+            winning_bid_id: 'bid',
+            final_amount_credits: 0,
+            settled_at: now,
+            claim_status: 'PENDING',
+            claimed_at: now,
+            created_at: now,
+            updated_at: now,
+          })
+          .execute(),
+      ).rejects.toThrow()
+    })
+
+    describe('findExpirablePending / markExpired (HU-69.6)', () => {
+      it('el limite exacto del dia 7 no expira; 1 ms despues si, y registra auditoria', async () => {
+        const boundaryId = 'claim-expire-boundary'
+        const pastId = 'claim-expire-past'
+        await persistAuctionForClaim(boundaryId)
+        await persistAuctionForClaim(pastId)
+        const repository = new PostgresAuctionPendingClaimRepository(db)
+        const settledAt = new Date('2026-01-03T00:00:00.000Z')
+        await repository.createIfAbsent({ ...input(boundaryId), settledAt, createdAt: settledAt })
+        await repository.createIfAbsent({ ...input(pastId), settledAt, createdAt: settledAt })
+        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000
+        const deadline = new Date(settledAt.getTime() + sevenDaysMs)
+        const pastDeadline = new Date(deadline.getTime() + 1)
+
+        const atDeadline = await repository.findExpirablePending(deadline, 1_000)
+        expect(atDeadline.map((c) => c.auctionId)).not.toEqual(
+          expect.arrayContaining([boundaryId, pastId]),
+        )
+        // boundaryId y pastId comparten settledAt: en pastDeadline (1ms despues
+        // del limite) ambos ya vencieron su propio claimDeadline y son
+        // candidatos legitimos. La distincion real "limite exacto vs vencido"
+        // se prueba comparando el resultado en `deadline` (ninguno) contra
+        // `pastDeadline` (ambos), y con markExpired(boundaryId, deadline) abajo.
+        const candidates = await repository.findExpirablePending(pastDeadline, 1_000)
+        expect(candidates.map((c) => c.auctionId)).toEqual(
+          expect.arrayContaining([boundaryId, pastId]),
+        )
+
+        await expect(repository.markExpired(boundaryId, deadline)).rejects.toThrow()
+        await expect(repository.markExpired(pastId, pastDeadline)).resolves.toMatchObject({
+          claimStatus: 'EXPIRED',
+          claimedAt: null,
+        })
+        await expect(repository.findByAuctionId(boundaryId)).resolves.toMatchObject({
+          claimStatus: 'PENDING',
+        })
+
+        const audit = await db
+          .selectFrom('auction_audit_log')
+          .selectAll()
+          .where('auction_id', '=', pastId)
+          .where('action', '=', 'AUCTION_PENDING_CLAIM_EXPIRED')
+          .executeTakeFirst()
+        expect(audit).toMatchObject({ actor_id: 'winner' })
+      })
+
+      it('no permite expirar un pending-claim ya CLAIMED ni reclamar uno ya EXPIRED', async () => {
+        const claimedId = 'claim-expire-already-claimed'
+        await persistAuctionForClaim(claimedId)
+        const repository = new PostgresAuctionPendingClaimRepository(db)
+        const settledAt = new Date('2026-01-03T00:00:00.000Z')
+        await repository.createIfAbsent({ ...input(claimedId), settledAt, createdAt: settledAt })
+        await repository.markClaimed(claimedId, new Date(settledAt.getTime() + 1000))
+        const farFuture = new Date('2026-02-01T00:00:00.000Z')
+
+        await expect(repository.markExpired(claimedId, farFuture)).rejects.toThrow()
+
+        const expiredId = 'claim-expire-then-claim'
+        await persistAuctionForClaim(expiredId)
+        await repository.createIfAbsent({ ...input(expiredId), settledAt, createdAt: settledAt })
+        await repository.markExpired(expiredId, farFuture)
+
+        await expect(repository.markClaimed(expiredId, farFuture)).rejects.toThrow()
+        await expect(repository.markExpired(expiredId, farFuture)).rejects.toThrow()
+      })
+
+      it('procesa varios vencidos en una misma ejecucion y respeta el limite del batch', async () => {
+        const ids = ['claim-batch-a', 'claim-batch-b', 'claim-batch-c']
+        for (const id of ids) {
+          await persistAuctionForClaim(id)
+        }
+        const repository = new PostgresAuctionPendingClaimRepository(db)
+        // settledAt propio y mas reciente que el resto de fixtures del describe,
+        // para poder distinguir "mis" candidatos del limite exacto devuelto.
+        const settledAt = new Date('2026-01-05T00:00:00.000Z')
+        for (const id of ids) {
+          await repository.createIfAbsent({ ...input(id), settledAt, createdAt: settledAt })
+        }
+        const farFuture = new Date('2026-02-01T00:00:00.000Z')
+
+        const limited = await repository.findExpirablePending(farFuture, 2)
+        expect(limited.length).toBeLessThanOrEqual(2)
+        const own = limited.filter((c) => ids.includes(c.auctionId))
+        for (const candidate of own) {
+          await repository.markExpired(candidate.auctionId, farFuture)
+        }
+        const remainingOwn = (await repository.findExpirablePending(farFuture, 1_000)).filter((c) =>
+          ids.includes(c.auctionId),
+        )
+        expect(remainingOwn).toHaveLength(ids.length - own.length)
+      })
+    })
+  })
+
+  describe('completion atomica HU-65.3', () => {
+    const setupWinner = async (auctionId: string) => {
+      await db
+        .insertInto('auctions')
+        .values({
+          id: auctionId,
+          seller_id: 'seller',
+          product_id: `product-${auctionId}`,
+          duration_hours: 24,
+          publication_fee_credits: 1,
+          minimum_bid_credits: 1,
+          buy_now_credits: null,
+          status: 'FINISHED',
+          published_at: new Date('2026-01-01'),
+          closes_at: new Date('2026-01-02'),
+          inventory_commitment_id: 'commitment',
+          fee_charge_id: 'fee',
+          finished_at: new Date('2026-01-02'),
+          closing_result_type: 'WITH_WINNER',
+          winning_bid_id: `bid-${auctionId}`,
+          winner_id: 'winner',
+          final_amount_credits: 30,
+        })
+        .execute()
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const at = new Date('2026-01-03T00:00:00.000Z')
+      await repository.createIfAbsent({
+        auctionId,
+        resultType: 'WITH_WINNER',
+        sellerId: 'seller',
+        winningBidId: `bid-${auctionId}`,
+        winnerId: 'winner',
+        winningHoldId: 'hold',
+        finalAmountCredits: 30,
+        captureOperationId: `capture-${auctionId}`,
+        createdAt: at,
+      })
+      await repository.markCaptureConfirmed(auctionId, at)
+      return {
+        repository,
+        at,
+        input: {
+          auctionId,
+          resultType: 'WITH_WINNER' as const,
+          productId: `product-${auctionId}`,
+          winnerId: 'winner',
+          winningBidId: `bid-${auctionId}`,
+          finalAmountCredits: 30,
+          loserBidderIds: [],
+          settledAt: at,
+          event: createAuctionSettledEventV1({
+            auctionId,
+            productId: `product-${auctionId}`,
+            sellerId: 'seller',
+            resultType: 'WITH_WINNER',
+            winnerId: 'winner',
+            winningBidId: `bid-${auctionId}`,
+            finalAmountCredits: 30,
+            loserBidderIds: [],
+            settledAt: at,
+          }),
+        },
+      }
+    }
+    it('completa WITH_WINNER con claim, audit, outbox y replay estable', async () => {
+      const { repository, input } = await setupWinner('completion-winner')
+      const first = await repository.completeSettlement(input)
+      const replay = await new PostgresAuctionSettlementRepository(db).completeSettlement(input)
+      expect(replay).toEqual(first)
+      const claim = await db
+        .selectFrom('auction_pending_claims')
+        .selectAll()
+        .where('auction_id', '=', input.auctionId)
+        .execute()
+      const audit = await db
+        .selectFrom('auction_audit_log')
+        .selectAll()
+        .where('auction_id', '=', input.auctionId)
+        .where('action', '=', 'AUCTION_SETTLED')
+        .execute()
+      const outbox = await db
+        .selectFrom('outbox_events')
+        .selectAll()
+        .where('id', '=', `auction:${input.auctionId}:settled`)
+        .execute()
+      expect(first).toMatchObject({
+        status: AuctionSettlementStatus.Completed,
+        settledAt: input.settledAt,
+      })
+      expect(claim).toHaveLength(1)
+      expect(claim[0]).toMatchObject({
+        winner_id: 'winner',
+        product_id: input.productId,
+        winning_bid_id: input.winningBidId,
+        claim_status: 'PENDING',
+        claimed_at: null,
+      })
+      expect(audit).toHaveLength(1)
+      expect(audit[0]?.details).toMatchObject({
+        ...input,
+        settledAt: input.settledAt.toISOString(),
+      })
+      expect(outbox).toHaveLength(1)
+      expect(outbox[0]).toMatchObject({ event_type: 'auction.settled.v1' })
+      expect(outbox[0]?.payload).toMatchObject({
+        eventId: `auction:${input.auctionId}:settled`,
+        eventType: 'auction.settled',
+        eventVersion: 1,
+        aggregateId: input.auctionId,
+        occurredAt: input.settledAt.toISOString(),
+        producer: 'auction',
+        correlationId: `auction:${input.auctionId}:settlement`,
+        data: {
+          auctionId: input.auctionId,
+          productId: input.productId,
+          sellerId: 'seller',
+          resultType: 'WITH_WINNER',
+          winnerId: input.winnerId,
+          winningBidId: input.winningBidId,
+          finalAmountCredits: input.finalAmountCredits,
+          loserBidderIds: input.loserBidderIds,
+          settledAt: input.settledAt.toISOString(),
+        },
+      })
+    })
+    it('completa concurrentemente una sola vez', async () => {
+      const { input } = await setupWinner('completion-concurrent')
+      const [a, b] = await Promise.all([
+        new PostgresAuctionSettlementRepository(db).completeSettlement(input),
+        new PostgresAuctionSettlementRepository(db).completeSettlement(input),
+      ])
+      expect(a.settledAt).toEqual(b.settledAt)
+      const claims = await db
+        .selectFrom('auction_pending_claims')
+        .selectAll()
+        .where('auction_id', '=', input.auctionId)
+        .execute()
+      const audits = await db
+        .selectFrom('auction_audit_log')
+        .selectAll()
+        .where('auction_id', '=', input.auctionId)
+        .where('action', '=', 'AUCTION_SETTLED')
+        .execute()
+      expect(claims).toHaveLength(1)
+      expect(audits).toHaveLength(1)
+    })
+    it('revierte completion al encontrar un claim persistido con intent conflictivo', async () => {
+      const { repository, input, at } = await setupWinner('completion-claim-conflict')
+      await db
+        .insertInto('auction_pending_claims')
+        .values({
+          auction_id: input.auctionId,
+          winner_id: input.winnerId,
+          product_id: 'other-product',
+          winning_bid_id: input.winningBidId,
+          final_amount_credits: input.finalAmountCredits,
+          settled_at: at,
+          claim_status: 'PENDING',
+          claimed_at: null,
+          created_at: at,
+          updated_at: at,
+        })
+        .execute()
+      await expect(repository.completeSettlement(input)).rejects.toThrow()
+      await expect(repository.getByAuctionId(input.auctionId)).resolves.toMatchObject({
+        status: AuctionSettlementStatus.Captured,
+        settledAt: null,
+      })
+      await expect(
+        db
+          .selectFrom('auction_pending_claims')
+          .selectAll()
+          .where('auction_id', '=', input.auctionId)
+          .execute(),
+      ).resolves.toMatchObject([{ product_id: 'other-product' }])
+      await expect(
+        db
+          .selectFrom('auction_audit_log')
+          .selectAll()
+          .where('auction_id', '=', input.auctionId)
+          .where('action', '=', 'AUCTION_SETTLED')
+          .execute(),
+      ).resolves.toHaveLength(0)
+      await expect(
+        db
+          .selectFrom('outbox_events')
+          .selectAll()
+          .where('id', '=', `auction:${input.auctionId}:settled`)
+          .execute(),
+      ).resolves.toHaveLength(0)
+    })
+    it('completa WITHOUT_BIDS sin claim', async () => {
+      const auctionId = 'completion-empty'
+      const at = new Date('2026-01-03')
+      await db
+        .insertInto('auctions')
+        .values({
+          id: auctionId,
+          seller_id: 'seller',
+          product_id: 'product-empty',
+          duration_hours: 24,
+          publication_fee_credits: 1,
+          minimum_bid_credits: 1,
+          buy_now_credits: null,
+          status: 'FINISHED',
+          published_at: new Date('2026-01-01'),
+          closes_at: new Date('2026-01-02'),
+          inventory_commitment_id: 'commitment',
+          fee_charge_id: 'fee',
+          finished_at: at,
+          closing_result_type: 'WITHOUT_BIDS',
+          winning_bid_id: null,
+          winner_id: null,
+          final_amount_credits: null,
+        })
+        .execute()
+      const repo = new PostgresAuctionSettlementRepository(db)
+      await repo.createIfAbsent({
+        auctionId,
+        resultType: 'WITHOUT_BIDS',
+        sellerId: 'seller',
+        createdAt: at,
+      })
+      await expect(
+        repo.completeSettlement({
+          auctionId,
+          resultType: 'WITHOUT_BIDS',
+          productId: 'product-empty',
+          settledAt: at,
+          event: createAuctionSettledEventV1({
+            auctionId,
+            productId: 'product-empty',
+            sellerId: 'seller',
+            resultType: 'WITHOUT_BIDS',
+            settledAt: at,
+          }),
+        }),
+      ).resolves.toMatchObject({ status: AuctionSettlementStatus.Completed, settledAt: at })
+      await expect(
+        db
+          .selectFrom('auction_pending_claims')
+          .selectAll()
+          .where('auction_id', '=', auctionId)
+          .execute(),
+      ).resolves.toHaveLength(0)
+    })
+  })
+
+  describe('outbox settlement HU-65.6', () => {
+    beforeEach(async () => {
+      await db.deleteFrom('outbox_events').execute()
+    })
+
+    it('lee pendientes en orden estable y marca solo el evento settlement sin publicar', async () => {
+      const older = createAuctionSettledEventV1({
+        auctionId: 'outbox-older',
+        productId: 'product',
+        sellerId: 'seller',
+        resultType: 'WITHOUT_BIDS',
+        settledAt: new Date('2026-01-01T00:00:00.000Z'),
+      })
+      const newer = createAuctionSettledEventV1({
+        auctionId: 'outbox-newer',
+        productId: 'product',
+        sellerId: 'seller',
+        resultType: 'WITHOUT_BIDS',
+        settledAt: new Date('2026-01-02T00:00:00.000Z'),
+      })
+      await db
+        .insertInto('outbox_events')
+        .values([
+          {
+            id: newer.eventId,
+            aggregate_id: newer.aggregateId,
+            event_type: 'auction.settled.v1',
+            payload: newer,
+            occurred_at: new Date(newer.occurredAt),
+            published_at: null,
+          },
+          {
+            id: older.eventId,
+            aggregate_id: older.aggregateId,
+            event_type: 'auction.settled.v1',
+            payload: older,
+            occurred_at: new Date(older.occurredAt),
+            published_at: null,
+          },
+        ])
+        .execute()
+      const repository = new PostgresAuctionSettlementOutboxRepository(db)
+
+      await expect(repository.findPending({ limit: 1 })).resolves.toEqual([older])
+      await repository.markPublished({
+        eventId: older.eventId,
+        publishedAt: new Date('2026-01-03'),
+      })
+      await repository.markPublished({
+        eventId: older.eventId,
+        publishedAt: new Date('2026-01-04'),
+      })
+
+      await expect(repository.findPending({ limit: 10 })).resolves.toEqual([newer])
+      await expect(
+        db
+          .selectFrom('outbox_events')
+          .select('published_at')
+          .where('id', '=', older.eventId)
+          .executeTakeFirstOrThrow(),
+      ).resolves.toMatchObject({ published_at: new Date('2026-01-03') })
     })
   })
 })

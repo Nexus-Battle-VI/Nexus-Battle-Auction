@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   HttpException,
+  NotFoundException,
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common'
@@ -15,6 +16,10 @@ import {
   PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
 import {
+  PendingClaimNotFoundError,
+  PendingClaimOwnershipError,
+} from '../../../application/errors/AuctionPendingClaimError'
+import {
   BidCreditCompensationError,
   InsufficientBidCreditsError,
 } from '../../../application/errors/BidCreditError'
@@ -23,7 +28,12 @@ import {
   ExternalDependencyUnavailableError,
   ExternalResourceNotFoundError,
 } from '../../../application/errors/ExternalDependencyError'
+import {
+  AuctionPendingClaimRuleCode,
+  AuctionPendingClaimRuleViolation,
+} from '../../../domain/errors/AuctionPendingClaimRuleViolation'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../../domain/errors/AuctionRuleViolation'
+import { AutoBidRuleCode, AutoBidRuleViolation } from '../../../domain/errors/AutoBidRuleViolation'
 import { BidRuleCode, BidRuleViolation } from '../../../domain/errors/BidRuleViolation'
 
 const body = (statusCode: number, code: string, message: string) => ({
@@ -76,6 +86,22 @@ export const toAuctionHttpException = (error: unknown): HttpException => {
     )
   }
 
+  if (error instanceof PendingClaimNotFoundError) {
+    return new NotFoundException(body(404, 'PENDING_CLAIM_NOT_FOUND', error.message))
+  }
+
+  if (error instanceof PendingClaimOwnershipError) {
+    return new ForbiddenException(body(403, 'PENDING_CLAIM_NOT_OWNED', error.message))
+  }
+
+  if (error instanceof AuctionPendingClaimRuleViolation) {
+    if (error.code === AuctionPendingClaimRuleCode.AlreadyClaimed) {
+      return new ConflictException(body(409, error.code, error.message))
+    }
+
+    return new UnprocessableEntityException(body(422, error.code, error.message))
+  }
+
   if (error instanceof BidRuleViolation) {
     if (
       error.code === BidRuleCode.InvalidIdentifier ||
@@ -93,6 +119,21 @@ export const toAuctionHttpException = (error: unknown): HttpException => {
     }
 
     if (error.code === BidRuleCode.SellerCannotBid) {
+      return new ForbiddenException(body(403, error.code, error.message))
+    }
+
+    return new UnprocessableEntityException(body(422, error.code, error.message))
+  }
+
+  if (error instanceof AutoBidRuleViolation) {
+    if (
+      error.code === AutoBidRuleCode.InvalidIdentifier ||
+      error.code === AutoBidRuleCode.InvalidConfigurationDate
+    ) {
+      return new BadRequestException(body(400, error.code, error.message))
+    }
+
+    if (error.code === AutoBidRuleCode.SellerCannotConfigure) {
       return new ForbiddenException(body(403, error.code, error.message))
     }
 

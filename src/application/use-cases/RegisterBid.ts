@@ -14,6 +14,7 @@ import type { IdentifierGeneratorPort } from '../ports/IdentifierGeneratorPort'
 import type { OutbidNotificationPort } from '../ports/OutbidNotificationPort'
 import type { PersistBidWithCredits } from './PersistBidWithCredits'
 import type { NotifyWatchlistChange } from './NotifyWatchlistChange'
+import type { ReactToRivalBid } from './ReactToRivalBid'
 
 export interface RegisterBidCommand {
   readonly operationId: string
@@ -29,6 +30,7 @@ export class RegisterBid {
     private readonly clock: ClockPort,
     private readonly identifiers: IdentifierGeneratorPort,
     private readonly notifications: OutbidNotificationPort,
+    private readonly autoBidReactor: ReactToRivalBid,
     private readonly watchlistChanges?: NotifyWatchlistChange,
   ) {}
 
@@ -110,6 +112,11 @@ export class RegisterBid {
     await this.notifyPreviousLeader(command.operationId, result)
     await this.notifyWatchers(command.operationId, result.bid)
 
+    await this.autoBidReactor.execute({
+      operationId: command.operationId,
+      leadingBid: result.bid,
+    })
+
     return result.bid
   }
 
@@ -159,6 +166,11 @@ export class RegisterBid {
      */
     await this.notifyPreviousLeader(command.operationId, result)
     await this.notifyWatchers(command.operationId, result.bid)
+
+    await this.autoBidReactor.execute({
+      operationId: command.operationId,
+      leadingBid: result.bid,
+    })
 
     return result.bid
   }

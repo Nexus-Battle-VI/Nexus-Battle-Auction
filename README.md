@@ -91,6 +91,14 @@ Ver [.env.example](.env.example). Las reglas que hacen fallar el arranque son de
 | `PERSISTENCE_DRIVER=postgres` sin `DATABASE_URL`      | **No arranca**           |
 | `AUTH_MODE=jwt` sin pool o cliente                    | **No arranca**           |
 
+El scheduler de settlement está deshabilitado por defecto
+(`AUCTION_SETTLEMENT_SCHEDULER_ENABLED=false`). Al habilitarlo, espera el primer
+intervalo (`AUCTION_SETTLEMENT_POLL_INTERVAL_MS=5000`) antes de procesar. Usa
+lotes de 25, concurrencia 4, un lease durable de cinco minutos y 30 segundos
+entre reintentos. El lease y `SKIP LOCKED` protegen múltiples instancias; el
+scheduler evita solapamientos locales y `SettleAuction` conserva la idempotencia
+como segunda barrera.
+
 ## Identidad y autorización
 
 - **Toda ruta nace protegida.** El guard es global; abrir una ruta exige `@Public()`.

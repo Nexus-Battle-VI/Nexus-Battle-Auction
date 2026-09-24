@@ -62,6 +62,10 @@ export interface FinishAuctionInput {
   readonly finishedAt: Date
   readonly leadingBid: LeadingBidForClosing | null
 }
+export interface RehydrateAuctionInput extends AuctionSnapshot {
+  readonly finishedAt: Date | null
+  readonly closingResult: AuctionClosingResultSnapshot | null
+}
 
 export class Auction {
   private constructor(
@@ -78,6 +82,84 @@ export class Auction {
 
   get status(): AuctionStatus {
     return this.currentStatus
+  }
+  get finishedAt(): Date | null {
+    return this.completion === null ? null : new Date(this.completion.finishedAt)
+  }
+  get closingResult(): AuctionClosingResultSnapshot | null {
+    return this.completion === null ? null : this.completion.snapshot()
+  }
+
+  static rehydrate(input: RehydrateAuctionInput): Auction {
+    const active = input.status === AuctionStatus.Active
+    if (
+      (active && (input.finishedAt !== null || input.closingResult !== null)) ||
+      (!active && (input.finishedAt === null || input.closingResult === null))
+    )
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.InvalidFinalizationDate,
+        'Estado persistido de cierre incoherente.',
+      )
+    let completion: AuctionClosingResult | null = null
+    if (input.closingResult !== null) {
+      const result = input.closingResult
+      const finishedAt = input.finishedAt
+      if (finishedAt === null) {
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.InvalidFinalizationDate,
+          'Estado persistido de cierre incoherente.',
+        )
+      }
+      const outcome: string = result.outcome
+      if (outcome === 'WITH_WINNER') {
+        if (
+          result.winnerId === null ||
+          result.winningBidId === null ||
+          result.finalAmountCredits === null ||
+          result.finalAmountCredits <= 0
+        )
+          throw new AuctionRuleViolation(
+            AuctionRuleCode.InvalidFinalizationDate,
+            'Resultado ganador persistido incoherente.',
+          )
+        completion = AuctionClosingResult.withWinner({
+          finishedAt,
+          bidderId: result.winnerId,
+          bidId: result.winningBidId,
+          amountCredits: result.finalAmountCredits,
+        })
+      } else if (outcome === 'WITHOUT_BIDS') {
+        if (
+          result.winnerId !== null ||
+          result.winningBidId !== null ||
+          result.finalAmountCredits !== null
+        )
+          throw new AuctionRuleViolation(
+            AuctionRuleCode.InvalidFinalizationDate,
+            'Resultado sin pujas persistido incoherente.',
+          )
+        completion = AuctionClosingResult.withoutBids(finishedAt)
+      } else
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.InvalidFinalizationDate,
+          'Resultado de cierre desconocido.',
+        )
+    }
+    return new Auction(
+      AuctionId.create(input.id),
+      SellerId.create(input.sellerId),
+      ProductId.create(input.productId),
+      AuctionDuration.fromHours(input.durationHours),
+      AuctionPricing.create({
+        currency: AuctionCurrency.Credits,
+        minimumBid: input.minimumBidCredits,
+        buyNow: input.buyNowCredits,
+      }),
+      input.status,
+      new Date(input.publishedAt),
+      new Date(input.closesAt),
+      completion,
+    )
   }
 
   static publish(input: PublishAuctionInput): Auction {

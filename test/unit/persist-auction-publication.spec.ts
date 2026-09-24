@@ -2,6 +2,7 @@ import type { AuctionRepositoryPort } from '../../src/application/ports/AuctionR
 import type { ProductInventoryPort } from '../../src/application/ports/ProductInventoryPort'
 import type { PublicationFeePort } from '../../src/application/ports/PublicationFeePort'
 import { PersistAuctionPublication } from '../../src/application/use-cases/PersistAuctionPublication'
+import { InMemoryAuctionPublicationIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionPublicationIntentRepository'
 import { Auction } from '../../src/domain/entities/Auction'
 
 const now = new Date('2026-09-21T12:00:00.000Z')
@@ -34,21 +35,50 @@ const dependencies = () => {
   } as unknown as jest.Mocked<AuctionRepositoryPort>
   const inventory = {
     inspect: jest.fn(),
-    commit: jest.fn(() => Promise.resolve({ commitmentId: 'commitment-1' })),
-    release: jest.fn(() => Promise.resolve()),
+    commit: jest.fn(() =>
+      Promise.resolve({
+        operationId: 'auction:auction-1:inventory:commit',
+        commitmentId: 'commitment-1',
+        status: 'ACTIVE' as const,
+        applied: true,
+      }),
+    ),
+    release: jest.fn(() =>
+      Promise.resolve({
+        operationId: 'auction:auction-1:inventory:release',
+        commitmentId: 'commitment-1',
+        status: 'RELEASED' as const,
+        applied: true,
+      }),
+    ),
   } as unknown as jest.Mocked<ProductInventoryPort>
   const fees = {
     charge: jest.fn(() => Promise.resolve({ chargeId: 'charge-1' })),
     refund: jest.fn(() => Promise.resolve()),
   } as unknown as jest.Mocked<PublicationFeePort>
-  const useCase = new PersistAuctionPublication(repository, inventory, fees, { now: () => now })
-  return { repository, inventory, fees, useCase }
+  const intents = new InMemoryAuctionPublicationIntentRepository()
+  const useCase = new PersistAuctionPublication(
+    repository,
+    inventory,
+    fees,
+    { now: () => now },
+    intents,
+  )
+  return { repository, inventory, fees, intents, useCase }
 }
 
 describe('PersistAuctionPublication', () => {
   it('coordina cobro, compromiso y persistencia con la misma operacion', async () => {
-    const { repository, inventory, fees, useCase } = dependencies()
+    const { repository, inventory, fees, intents, useCase } = dependencies()
     const entity = auction()
+    await intents.getOrCreate({
+      operationId: 'operation-1',
+      auctionId: 'auction-1',
+      sellerId: 'seller-1',
+      productId: 'product-1',
+      closesAt: entity.closesAt,
+      createdAt: now,
+    })
 
     await expect(
       useCase.execute({ operationId: 'operation-1', auction: entity }),
@@ -60,7 +90,8 @@ describe('PersistAuctionPublication', () => {
       amount: 1,
     })
     expect(inventory.commit).toHaveBeenCalledWith({
-      operationId: 'operation-1',
+      operationId: 'auction:auction-1:inventory:commit',
+      auctionId: 'auction-1',
       ownerId: 'seller-1',
       productId: 'product-1',
       expiresAt: new Date('2026-09-22T12:00:00.000Z'),
@@ -74,51 +105,76 @@ describe('PersistAuctionPublication', () => {
     expect(repository.recordFailure).not.toHaveBeenCalled()
   })
 
-  it('devuelve el cobro y registra evidencia si falla el bloqueo', async () => {
-    const { repository, inventory, fees, useCase } = dependencies()
+  it('conserva la intencion pendiente si falla el bloqueo', async () => {
+    const { repository, inventory, fees, intents, useCase } = dependencies()
+    const entity = auction()
+    await intents.getOrCreate({
+      operationId: 'operation-1',
+      auctionId: 'auction-1',
+      sellerId: 'seller-1',
+      productId: 'product-1',
+      closesAt: entity.closesAt,
+      createdAt: now,
+    })
     inventory.commit.mockRejectedValue(new Error('inventory unavailable'))
 
-    await expect(
-      useCase.execute({ operationId: 'operation-1', auction: auction() }),
-    ).rejects.toThrow('inventory unavailable')
+    await expect(useCase.execute({ operationId: 'operation-1', auction: entity })).rejects.toThrow(
+      'inventory unavailable',
+    )
 
-    expect(fees.refund).toHaveBeenCalledWith('operation-1', 'charge-1')
+    expect(fees.refund).not.toHaveBeenCalled()
     expect(inventory.release).not.toHaveBeenCalled()
     expect(repository.recordFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         stage: 'COMMITTING_INVENTORY',
-        feeRefunded: true,
+        feeRefunded: false,
         inventoryReleased: true,
       }),
     )
   })
 
-  it('libera inventario, devuelve cobro y registra evidencia si falla persistencia', async () => {
-    const { repository, inventory, fees, useCase } = dependencies()
+  it('no compensa Inventory ante un fallo retryable posterior al commitment', async () => {
+    const { repository, inventory, fees, intents, useCase } = dependencies()
+    const entity = auction()
+    await intents.getOrCreate({
+      operationId: 'operation-1',
+      auctionId: 'auction-1',
+      sellerId: 'seller-1',
+      productId: 'product-1',
+      closesAt: entity.closesAt,
+      createdAt: now,
+    })
     repository.publish.mockRejectedValue(new Error('database unavailable'))
 
-    await expect(
-      useCase.execute({ operationId: 'operation-1', auction: auction() }),
-    ).rejects.toThrow('database unavailable')
+    await expect(useCase.execute({ operationId: 'operation-1', auction: entity })).rejects.toThrow(
+      'database unavailable',
+    )
 
-    expect(inventory.release).toHaveBeenCalledWith('operation-1', 'commitment-1')
-    expect(fees.refund).toHaveBeenCalledWith('operation-1', 'charge-1')
+    expect(inventory.release).not.toHaveBeenCalled()
+    expect(fees.refund).not.toHaveBeenCalled()
     expect(repository.recordFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         stage: 'PERSISTING_AUCTION',
-        inventoryReleased: true,
-        feeRefunded: true,
+        inventoryReleased: false,
+        feeRefunded: false,
       }),
     )
   })
 
-  it('deja pendiente la compensacion que tambien falla', async () => {
-    const { repository, inventory, fees, useCase } = dependencies()
+  it('persiste el commitment y permite continuar tras un fallo de persistencia', async () => {
+    const { repository, intents, useCase } = dependencies()
+    const entity = auction()
+    await intents.getOrCreate({
+      operationId: 'operation-1',
+      auctionId: 'auction-1',
+      sellerId: 'seller-1',
+      productId: 'product-1',
+      closesAt: entity.closesAt,
+      createdAt: now,
+    })
     repository.publish.mockRejectedValue('persistence failure')
-    inventory.release.mockRejectedValue(new Error('release failure'))
-    fees.refund.mockRejectedValue(new Error('refund failure'))
 
-    await expect(useCase.execute({ operationId: 'operation-1', auction: auction() })).rejects.toBe(
+    await expect(useCase.execute({ operationId: 'operation-1', auction: entity })).rejects.toBe(
       'persistence failure',
     )
     expect(repository.recordFailure).toHaveBeenCalledWith(
@@ -128,5 +184,38 @@ describe('PersistAuctionPublication', () => {
         feeRefunded: false,
       }),
     )
+    await expect(intents.getByOperationId('operation-1')).resolves.toMatchObject({
+      inventoryCommitmentId: 'commitment-1',
+      inventoryStatus: 'COMMITTED',
+      publicationStatus: 'PENDING',
+    })
+  })
+
+  it('reanuda tras restart sin recommit Inventory', async () => {
+    const { repository, inventory, fees, intents, useCase } = dependencies()
+    const entity = auction()
+    await intents.getOrCreate({
+      operationId: 'operation-1',
+      auctionId: 'auction-1',
+      sellerId: 'seller-1',
+      productId: 'product-1',
+      closesAt: entity.closesAt,
+      createdAt: now,
+    })
+    repository.publish.mockRejectedValueOnce(new Error('database unavailable'))
+    await expect(useCase.execute({ operationId: 'operation-1', auction: entity })).rejects.toThrow(
+      'database unavailable',
+    )
+    const restarted = new PersistAuctionPublication(
+      repository,
+      inventory,
+      fees,
+      { now: () => now },
+      intents,
+    )
+    await expect(
+      restarted.execute({ operationId: 'operation-1', auction: entity }),
+    ).resolves.toMatchObject({ replayed: false })
+    expect(inventory.commit).toHaveBeenCalledTimes(1)
   })
 })
