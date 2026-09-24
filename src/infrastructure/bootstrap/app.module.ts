@@ -126,6 +126,7 @@ import { DispatchClosingSoonReminders } from '../../application/use-cases/Dispat
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { FollowAuction } from '../../application/use-cases/FollowAuction'
 import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
+import { ListActiveAuctions } from '../../application/use-cases/ListActiveAuctions'
 import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchlistChange'
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
@@ -413,6 +414,13 @@ export const INTERNAL_CALLERS: readonly string[] = []
         auctions: AuctionRepositoryPort,
       ): ListFollowedAuctions => new ListFollowedAuctions(watchlist, auctions),
       inject: [WATCHLIST_REPOSITORY, AUCTION_REPOSITORY],
+    },
+
+    {
+      provide: ListActiveAuctions,
+      useFactory: (auctions: AuctionRepositoryPort, clock: ClockPort): ListActiveAuctions =>
+        new ListActiveAuctions(auctions, clock),
+      inject: [AUCTION_REPOSITORY, CLOCK],
     },
 
     {
