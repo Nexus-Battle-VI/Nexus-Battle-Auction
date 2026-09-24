@@ -898,15 +898,6 @@ export const createWatchlistEventPublisher = (
     },
 
     {
-      provide: GetAuctionDetail,
-
-      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
-        new GetAuctionDetail(repository),
-
-      inject: [AUCTION_REPOSITORY],
-    },
-
-    {
       provide: GetPendingClaims,
 
       useFactory: (pendingClaims: AuctionPendingClaimRepositoryPort): GetPendingClaims =>

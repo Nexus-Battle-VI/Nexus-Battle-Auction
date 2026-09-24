@@ -15,9 +15,11 @@ Este repositorio contiene código y Pull Requests. No contiene Issues ni Product
 
 ## Estado
 
-**Andamiaje desplegado.** Desde el 2026-09-16 corre en producción en el nodo `app` y Caddy le envía `https://nexus.simuladorupbbga.app/api/v1/auctions*`. Arranca, verifica identidad, firma y comprueba el contrato interno, expone sus sondas y conecta con su base, que ya existe con usuario propio.
+**En desarrollo activo.** Caddy enruta `https://nexus.simuladorupbbga.app/api/v1/auctions*` hacia este servicio. Verifica identidad, firma y comprueba el contrato interno, expone sus sondas y conecta con su base PostgreSQL propia.
 
-**No tiene todavía ninguna ruta de negocio ni ninguna tabla o colección**: las añade cada Historia de Usuario. Mientras tanto, cualquier ruta bajo ese prefijo responde `404` desde NestJS.
+Las Historias de Usuario HU-62 a HU-69 ya tienen rutas de negocio y tablas implementadas: publicación (jugador y Maestro de Juego), pujas y puja automática, compra inmediata, lista de seguimiento, liquidación y reclamo de productos. El detalle de cada una vive en su issue de Management y en sus migraciones (`src/adapters/outbound/persistence/migrations`).
+
+Las integraciones con otros servicios son opcionales por configuración y fallan de forma cerrada cuando falta su URL o el secreto interno (ver [.env.example](.env.example)).
 
 ## Qué posee este contexto
 
