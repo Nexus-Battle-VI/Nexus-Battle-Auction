@@ -3,7 +3,11 @@ import type {
   PersistAuctionPublicationResult,
 } from '../ports/AuctionRepositoryPort'
 import type { ClockPort } from '../ports/ClockPort'
-import type { ProductInventoryPort } from '../ports/ProductInventoryPort'
+import {
+  inventoryCommitOperationId,
+  type ProductInventoryPort,
+} from '../ports/ProductInventoryPort'
+import type { AuctionPublicationIntentRepositoryPort } from '../ports/AuctionPublicationIntentRepositoryPort'
 import type { PublicationFeePort } from '../ports/PublicationFeePort'
 import type { Auction } from '../../domain/entities/Auction'
 
@@ -21,13 +25,21 @@ export class PersistAuctionPublication {
     private readonly inventory: ProductInventoryPort,
     private readonly fees: PublicationFeePort,
     private readonly clock: ClockPort,
+    private readonly intents: AuctionPublicationIntentRepositoryPort,
   ) {}
 
   async execute(command: PersistPublicationCommand): Promise<PersistAuctionPublicationResult> {
     const auction = command.auction.snapshot()
     let stage = 'CHARGING_FEE'
+    const intent = await this.intents.getByOperationId(command.operationId)
+    if (intent === null) throw new Error(`La intencion ${command.operationId} no existe.`)
+    if (intent.publicationStatus === 'COMPLETED') {
+      const published = await this.repository.findById(intent.auctionId)
+      if (published === null) throw new Error(`La publicacion ${intent.auctionId} no existe.`)
+      return { auction: published, replayed: true }
+    }
     let feeChargeId: string | null = null
-    let inventoryCommitmentId: string | null = null
+    let inventoryCommitmentId = intent.inventoryCommitmentId
 
     try {
       feeChargeId = (
@@ -38,42 +50,36 @@ export class PersistAuctionPublication {
         })
       ).chargeId
       stage = 'COMMITTING_INVENTORY'
-      inventoryCommitmentId = (
-        await this.inventory.commit({
-          operationId: command.operationId,
-          ownerId: auction.sellerId,
-          productId: auction.productId,
-          expiresAt: auction.closesAt,
-        })
-      ).commitmentId
+      if (intent.inventoryStatus !== 'COMMITTED') {
+        inventoryCommitmentId = (
+          await this.inventory.commit({
+            operationId: inventoryCommitOperationId(auction.id),
+            auctionId: auction.id,
+            ownerId: auction.sellerId,
+            productId: auction.productId,
+            expiresAt: auction.closesAt,
+          })
+        ).commitmentId
+        await this.intents.persistInventoryCommitment(
+          command.operationId,
+          inventoryCommitmentId,
+          this.clock.now(),
+        )
+      }
+      if (inventoryCommitmentId === null)
+        throw new Error('El commitment Inventory durable no existe.')
       stage = 'PERSISTING_AUCTION'
 
-      return await this.repository.publish({
+      const result = await this.repository.publish({
         operationId: command.operationId,
         auction: command.auction,
         inventoryCommitmentId,
         feeChargeId,
       })
+      await this.intents.markPublicationCompleted(command.operationId, this.clock.now())
+      return result
     } catch (error: unknown) {
-      let inventoryReleased = inventoryCommitmentId === null
-      let feeRefunded = feeChargeId === null
-
-      if (inventoryCommitmentId !== null) {
-        try {
-          await this.inventory.release(command.operationId, inventoryCommitmentId)
-          inventoryReleased = true
-        } catch {
-          inventoryReleased = false
-        }
-      }
-      if (feeChargeId !== null) {
-        try {
-          await this.fees.refund(command.operationId, feeChargeId)
-          feeRefunded = true
-        } catch {
-          feeRefunded = false
-        }
-      }
+      await this.intents.recordFailure(command.operationId, reasonOf(error), this.clock.now())
 
       await this.repository.recordFailure({
         operationId: command.operationId,
@@ -83,8 +89,8 @@ export class PersistAuctionPublication {
         reason: reasonOf(error),
         feeChargeId,
         inventoryCommitmentId,
-        feeRefunded,
-        inventoryReleased,
+        feeRefunded: false,
+        inventoryReleased: inventoryCommitmentId === null,
         occurredAt: this.clock.now(),
       })
       throw error

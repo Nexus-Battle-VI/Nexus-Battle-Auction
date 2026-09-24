@@ -43,6 +43,16 @@ export class InMemoryWatchlistRepository implements WatchlistRepositoryPort {
     )
   }
 
+  /** Resuelve la audiencia del evento sin exponer entradas de otra subasta. */
+  listByAuction(auctionId: string): Promise<readonly WatchlistEntry[]> {
+    return Promise.resolve(
+      [...this.entries.values()]
+        .filter((entry) => entry.auctionId === auctionId)
+        .sort((a, b) => (a.playerId < b.playerId ? -1 : a.playerId > b.playerId ? 1 : 0))
+        .map((entry) => WatchlistEntry.create(entry)),
+    )
+  }
+
   /** Un jugador no elimina relaciones ajenas al retirar su pareja. */
   delete(playerId: string, auctionId: string): Promise<boolean> {
     return Promise.resolve(this.entries.delete(this.key(playerId, auctionId)))

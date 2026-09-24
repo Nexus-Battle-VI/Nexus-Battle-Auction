@@ -28,6 +28,30 @@ describe('Configuracion del servicio', () => {
       notificationsBaseUrl: null,
 
       notificationsTimeoutMs: 3_000,
+
+      auctionSettlementBatchSize: 25,
+
+      auctionSettlementConcurrency: 4,
+
+      auctionSettlementLeaseMs: 300_000,
+
+      auctionSettlementRetryDelayMs: 30_000,
+
+      auctionSettlementSchedulerEnabled: false,
+
+      auctionSettlementPollIntervalMs: 5_000,
+
+      auctionSettlementEventDispatchEnabled: false,
+
+      auctionSettlementQueueUrl: null,
+
+      auctionSettlementEventDispatchBatchSize: 25,
+
+      auctionPendingClaimExpirationSchedulerEnabled: false,
+
+      auctionPendingClaimExpirationPollIntervalMs: 60_000,
+
+      auctionPendingClaimExpirationBatchSize: 100,
     })
   })
 
@@ -216,5 +240,202 @@ describe('Configuracion del servicio', () => {
     ],
   ])('rechaza %s', (_caso, env) => {
     expect(() => loadConfig(env)).toThrow(ConfigurationError)
+  })
+
+  it.each(['1', '5000'])('acepta timeout Wallet valido %s', (timeout) => {
+    expect(
+      loadConfig({
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        WALLET_BASE_URL: 'https://wallet.example.com/',
+        WALLET_REQUEST_TIMEOUT_MS: timeout,
+      }),
+    ).toMatchObject({
+      walletBaseUrl: 'https://wallet.example.com/',
+      walletRequestTimeoutMs: Number(timeout),
+    })
+  })
+
+  it.each(['0', '60001', 'abc', ''])('rechaza timeout Wallet invalido %s', (timeout) => {
+    expect(() => loadConfig({ WALLET_REQUEST_TIMEOUT_MS: timeout })).toThrow(ConfigurationError)
+  })
+
+  it('valida URL y secreto Wallet opcional', () => {
+    expect(loadConfig({}).walletBaseUrl).toBeNull()
+    expect(() =>
+      loadConfig({ WALLET_BASE_URL: 'not-url', INTERNAL_SERVICE_AUTH_SECRET: 'secret' }),
+    ).toThrow(ConfigurationError)
+    expect(() => loadConfig({ WALLET_BASE_URL: 'https://wallet.example.com' })).toThrow(
+      /INTERNAL_SERVICE_AUTH_SECRET/,
+    )
+  })
+
+  it.each(['1', '5000'])('acepta timeout Inventory valido %s', (timeout) => {
+    expect(
+      loadConfig({
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        INVENTORY_BASE_URL: 'https://inventory.example.com/',
+        INVENTORY_REQUEST_TIMEOUT_MS: timeout,
+      }),
+    ).toMatchObject({
+      inventoryBaseUrl: 'https://inventory.example.com/',
+      inventoryRequestTimeoutMs: Number(timeout),
+    })
+  })
+
+  it.each(['0', '60001', 'abc', ''])('rechaza timeout Inventory invalido %s', (timeout) => {
+    expect(() => loadConfig({ INVENTORY_REQUEST_TIMEOUT_MS: timeout })).toThrow(ConfigurationError)
+  })
+
+  it('valida URL y secreto Inventory opcional', () => {
+    expect(loadConfig({}).inventoryBaseUrl).toBeNull()
+    expect(() =>
+      loadConfig({ INVENTORY_BASE_URL: 'not-url', INTERNAL_SERVICE_AUTH_SECRET: 'secret' }),
+    ).toThrow(ConfigurationError)
+    expect(() => loadConfig({ INVENTORY_BASE_URL: 'https://inventory.example.com' })).toThrow(
+      /INTERNAL_SERVICE_AUTH_SECRET/,
+    )
+  })
+
+  it('lee la configuracion del worker de settlement', () => {
+    expect(
+      loadConfig({
+        AUCTION_SETTLEMENT_BATCH_SIZE: '40',
+        AUCTION_SETTLEMENT_CONCURRENCY: '8',
+        AUCTION_SETTLEMENT_LEASE_MS: '60000',
+        AUCTION_SETTLEMENT_RETRY_DELAY_MS: '5000',
+      }),
+    ).toMatchObject({
+      auctionSettlementBatchSize: 40,
+      auctionSettlementConcurrency: 8,
+      auctionSettlementLeaseMs: 60_000,
+      auctionSettlementRetryDelayMs: 5_000,
+    })
+  })
+
+  it.each([
+    ['AUCTION_SETTLEMENT_BATCH_SIZE', '0'],
+    ['AUCTION_SETTLEMENT_BATCH_SIZE', '101'],
+    ['AUCTION_SETTLEMENT_CONCURRENCY', '17'],
+    ['AUCTION_SETTLEMENT_LEASE_MS', '29999'],
+    ['AUCTION_SETTLEMENT_RETRY_DELAY_MS', '999'],
+  ])('rechaza %s fuera de rango', (key, value) => {
+    expect(() => loadConfig({ [key]: value })).toThrow(ConfigurationError)
+  })
+
+  it('rechaza concurrencia mayor al batch', () => {
+    expect(() =>
+      loadConfig({
+        AUCTION_SETTLEMENT_BATCH_SIZE: '2',
+        AUCTION_SETTLEMENT_CONCURRENCY: '3',
+      }),
+    ).toThrow(/CONCURRENCY/)
+  })
+
+  it('lee la configuracion del scheduler de vencimiento de pending-claims (HU-69.6)', () => {
+    expect(
+      loadConfig({
+        AUCTION_PENDING_CLAIM_EXPIRATION_SCHEDULER_ENABLED: 'true',
+        AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS: '120000',
+        AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE: '50',
+      }),
+    ).toMatchObject({
+      auctionPendingClaimExpirationSchedulerEnabled: true,
+      auctionPendingClaimExpirationPollIntervalMs: 120_000,
+      auctionPendingClaimExpirationBatchSize: 50,
+    })
+  })
+
+  it('no exige postgres ni Wallet/Inventory para habilitar el scheduler de vencimiento', () => {
+    expect(() =>
+      loadConfig({ AUCTION_PENDING_CLAIM_EXPIRATION_SCHEDULER_ENABLED: 'true' }),
+    ).not.toThrow()
+  })
+
+  it.each([
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS', '999'],
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS', '3600001'],
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE', '0'],
+    ['AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE', '1001'],
+  ])('rechaza %s fuera de rango', (key, value) => {
+    expect(() => loadConfig({ [key]: value })).toThrow(ConfigurationError)
+  })
+
+  it.each(['true', 'false'])('lee scheduler enabled estricto: %s', (enabled) => {
+    const common =
+      enabled === 'true'
+        ? {
+            PERSISTENCE_DRIVER: 'postgres',
+            DATABASE_URL: 'postgres://db/auction',
+            INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+            WALLET_BASE_URL: 'http://wallet:3004',
+            INVENTORY_BASE_URL: 'http://inventory:3006',
+          }
+        : {}
+    expect(
+      loadConfig({ ...common, AUCTION_SETTLEMENT_SCHEDULER_ENABLED: enabled })
+        .auctionSettlementSchedulerEnabled,
+    ).toBe(enabled === 'true')
+  })
+
+  it('rechaza scheduler enabled ambiguo', () => {
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_SCHEDULER_ENABLED: 'yes' })).toThrow(
+      ConfigurationError,
+    )
+  })
+
+  it.each(['1000', '5000', '300000'])('acepta poll interval valido %s', (interval) => {
+    expect(loadConfig({ AUCTION_SETTLEMENT_POLL_INTERVAL_MS: interval })).toMatchObject({
+      auctionSettlementPollIntervalMs: Number(interval),
+    })
+  })
+
+  it.each(['999', '300001'])('rechaza poll interval fuera de rango %s', (interval) => {
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_POLL_INTERVAL_MS: interval })).toThrow(
+      ConfigurationError,
+    )
+  })
+
+  it('falla cerrado si el scheduler no tiene persistencia o dependencias externas', () => {
+    const enabled = { AUCTION_SETTLEMENT_SCHEDULER_ENABLED: 'true' }
+    expect(() => loadConfig(enabled)).toThrow(/PERSISTENCE_DRIVER/)
+    expect(() =>
+      loadConfig({
+        ...enabled,
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+      }),
+    ).toThrow(/WALLET_BASE_URL/)
+  })
+
+  it('lee el despacho de eventos de settlement y exige su cola al habilitarlo', () => {
+    expect(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED: 'true',
+        AUCTION_SETTLEMENT_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/123/auction',
+        AUCTION_SETTLEMENT_EVENT_DISPATCH_BATCH_SIZE: '100',
+      }),
+    ).toMatchObject({
+      auctionSettlementEventDispatchEnabled: true,
+      auctionSettlementQueueUrl: 'https://sqs.us-east-1.amazonaws.com/123/auction',
+      auctionSettlementEventDispatchBatchSize: 100,
+    })
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED: 'true' })).toThrow(
+      /PERSISTENCE_DRIVER/,
+    )
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED: 'true',
+      }),
+    ).toThrow(/AUCTION_SETTLEMENT_QUEUE_URL/)
+  })
+
+  it.each(['0', '101', 'invalid'])('rechaza batch de despacho invalido: %s', (batchSize) => {
+    expect(() => loadConfig({ AUCTION_SETTLEMENT_EVENT_DISPATCH_BATCH_SIZE: batchSize })).toThrow(
+      ConfigurationError,
+    )
   })
 })

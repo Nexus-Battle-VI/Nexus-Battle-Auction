@@ -4,6 +4,7 @@ import type { ProductInventoryPort } from '../../src/application/ports/ProductIn
 import type { SellerSanctionPort } from '../../src/application/ports/SellerSanctionPort'
 import type { PersistAuctionPublication } from '../../src/application/use-cases/PersistAuctionPublication'
 import { PublishAuction } from '../../src/application/use-cases/PublishAuction'
+import { InMemoryAuctionPublicationIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionPublicationIntentRepository'
 
 describe('PublishAuction', () => {
   it('consulta elegibilidad, construye el agregado y delega la persistencia', async () => {
@@ -33,6 +34,7 @@ describe('PublishAuction', () => {
       persistence,
       { now: () => new Date('2026-09-21T12:00:00.000Z') },
       { generate: () => 'auction-1' },
+      new InMemoryAuctionPublicationIntentRepository(),
     )
 
     await expect(

@@ -66,6 +66,38 @@ export interface AppConfig {
   readonly notificationsBaseUrl: string | null
 
   readonly notificationsTimeoutMs: number
+
+  readonly walletBaseUrl: string | null
+
+  readonly walletRequestTimeoutMs: number
+
+  readonly inventoryBaseUrl: string | null
+
+  readonly inventoryRequestTimeoutMs: number
+
+  readonly auctionSettlementBatchSize: number
+
+  readonly auctionSettlementConcurrency: number
+
+  readonly auctionSettlementLeaseMs: number
+
+  readonly auctionSettlementRetryDelayMs: number
+
+  readonly auctionSettlementSchedulerEnabled: boolean
+
+  readonly auctionSettlementPollIntervalMs: number
+
+  readonly auctionSettlementEventDispatchEnabled: boolean
+
+  readonly auctionSettlementQueueUrl: string | null
+
+  readonly auctionSettlementEventDispatchBatchSize: number
+
+  readonly auctionPendingClaimExpirationSchedulerEnabled: boolean
+
+  readonly auctionPendingClaimExpirationPollIntervalMs: number
+
+  readonly auctionPendingClaimExpirationBatchSize: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -203,6 +235,151 @@ export const loadConfig = (env: RawEnv): AppConfig => {
 
   const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
 
+  const walletBaseUrl = readString(env, 'WALLET_BASE_URL', '')
+
+  if (env.WALLET_REQUEST_TIMEOUT_MS === '') {
+    throw new ConfigurationError('WALLET_REQUEST_TIMEOUT_MS no puede estar vacio.')
+  }
+
+  const walletRequestTimeoutMs = readInteger(env, 'WALLET_REQUEST_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  const inventoryBaseUrl = readString(env, 'INVENTORY_BASE_URL', '')
+
+  if (env.INVENTORY_REQUEST_TIMEOUT_MS === '') {
+    throw new ConfigurationError('INVENTORY_REQUEST_TIMEOUT_MS no puede estar vacio.')
+  }
+
+  const inventoryRequestTimeoutMs = readInteger(
+    env,
+    'INVENTORY_REQUEST_TIMEOUT_MS',
+    3_000,
+    1,
+    60_000,
+  )
+
+  const auctionSettlementBatchSize = readInteger(env, 'AUCTION_SETTLEMENT_BATCH_SIZE', 25, 1, 100)
+  const auctionSettlementConcurrency = readInteger(env, 'AUCTION_SETTLEMENT_CONCURRENCY', 4, 1, 16)
+  if (auctionSettlementConcurrency > auctionSettlementBatchSize) {
+    throw new ConfigurationError(
+      'AUCTION_SETTLEMENT_CONCURRENCY no puede superar AUCTION_SETTLEMENT_BATCH_SIZE.',
+    )
+  }
+  const auctionSettlementLeaseMs = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_LEASE_MS',
+    300_000,
+    30_000,
+    900_000,
+  )
+  const auctionSettlementRetryDelayMs = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_RETRY_DELAY_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionSettlementSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_SETTLEMENT_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionSettlementPollIntervalMs = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_POLL_INTERVAL_MS',
+    5_000,
+    1_000,
+    300_000,
+  )
+  const auctionSettlementEventDispatchEnabled = readBoolean(
+    env,
+    'AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED',
+    false,
+  )
+  const auctionSettlementQueueUrl = readString(env, 'AUCTION_SETTLEMENT_QUEUE_URL', '')
+  const auctionSettlementEventDispatchBatchSize = readInteger(
+    env,
+    'AUCTION_SETTLEMENT_EVENT_DISPATCH_BATCH_SIZE',
+    25,
+    1,
+    100,
+  )
+  if (auctionSettlementEventDispatchEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED=true.',
+      )
+    }
+    if (auctionSettlementQueueUrl === '') {
+      throw new ConfigurationError(
+        'AUCTION_SETTLEMENT_QUEUE_URL es obligatorio cuando AUCTION_SETTLEMENT_EVENT_DISPATCH_ENABLED=true.',
+      )
+    }
+  }
+
+  if (walletBaseUrl !== '') {
+    try {
+      new URL(walletBaseUrl)
+    } catch {
+      throw new ConfigurationError('WALLET_BASE_URL debe ser una URL valida.')
+    }
+  }
+
+  if (inventoryBaseUrl !== '') {
+    try {
+      new URL(inventoryBaseUrl)
+    } catch {
+      throw new ConfigurationError('INVENTORY_BASE_URL debe ser una URL valida.')
+    }
+  }
+
+  if (walletBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando WALLET_BASE_URL esta configurado.',
+    )
+  }
+
+  if (inventoryBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando INVENTORY_BASE_URL esta configurado.',
+    )
+  }
+
+  if (auctionSettlementSchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_SETTLEMENT_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (walletBaseUrl === '' || inventoryBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'WALLET_BASE_URL, INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_SETTLEMENT_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
+  const auctionPendingClaimExpirationSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_PENDING_CLAIM_EXPIRATION_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionPendingClaimExpirationPollIntervalMs = readInteger(
+    env,
+    'AUCTION_PENDING_CLAIM_EXPIRATION_POLL_INTERVAL_MS',
+    60_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionPendingClaimExpirationBatchSize = readInteger(
+    env,
+    'AUCTION_PENDING_CLAIM_EXPIRATION_BATCH_SIZE',
+    100,
+    1,
+    1_000,
+  )
+  // Sin dependencias externas (Wallet/Inventory): a diferencia del scheduler
+  // de settlement, no exige postgres -- una instancia en memoria puede
+  // expirar sus propios pending-claims igual de bien para desarrollo local.
+
   /*
    * Si se configura Notifications, una llamada sin firma no
    * serviria: Notifications la rechazaria con 401.
@@ -253,5 +430,37 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
 
     notificationsTimeoutMs,
+
+    walletBaseUrl: walletBaseUrl === '' ? null : walletBaseUrl,
+
+    walletRequestTimeoutMs,
+
+    inventoryBaseUrl: inventoryBaseUrl === '' ? null : inventoryBaseUrl,
+
+    inventoryRequestTimeoutMs,
+
+    auctionSettlementBatchSize,
+
+    auctionSettlementConcurrency,
+
+    auctionSettlementLeaseMs,
+
+    auctionSettlementRetryDelayMs,
+
+    auctionSettlementSchedulerEnabled,
+
+    auctionSettlementPollIntervalMs,
+
+    auctionSettlementEventDispatchEnabled,
+
+    auctionSettlementQueueUrl: auctionSettlementQueueUrl === '' ? null : auctionSettlementQueueUrl,
+
+    auctionSettlementEventDispatchBatchSize,
+
+    auctionPendingClaimExpirationSchedulerEnabled,
+
+    auctionPendingClaimExpirationPollIntervalMs,
+
+    auctionPendingClaimExpirationBatchSize,
   }
 }

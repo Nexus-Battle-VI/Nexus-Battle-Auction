@@ -28,6 +28,7 @@
     "test:db": "jest --config jest.db.config.ts --coverage"
   },
   "dependencies": {
+    "@aws-sdk/client-sqs": "3.1125.0",
     "@nestjs/common": "11.2.1",
     "@nestjs/core": "11.2.1",
     "@nestjs/platform-express": "11.2.1",

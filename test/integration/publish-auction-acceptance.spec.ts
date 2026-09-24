@@ -1,4 +1,5 @@
 import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
+import { InMemoryAuctionPublicationIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionPublicationIntentRepository'
 import { InsufficientPublicationFundsError } from '../../src/application/errors/AuctionPersistenceError'
 import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
 import type { CatalogProductPolicyPort } from '../../src/application/ports/CatalogProductPolicyPort'
@@ -62,10 +63,21 @@ class StatefulInventory implements ProductInventoryPort {
     return Promise.resolve(this.eligibility)
   }
 
-  commit(command: CommitInventoryProductCommand): Promise<{ commitmentId: string }> {
+  commit(command: CommitInventoryProductCommand): Promise<{
+    operationId: string
+    commitmentId: string
+    status: 'ACTIVE'
+    applied: boolean
+  }> {
     if (this.commitFailure !== null) return Promise.reject(this.commitFailure)
     const previous = this.commitments.get(command.operationId)
-    if (previous !== undefined) return Promise.resolve({ commitmentId: previous.commitmentId })
+    if (previous !== undefined)
+      return Promise.resolve({
+        operationId: command.operationId,
+        commitmentId: previous.commitmentId,
+        status: 'ACTIVE',
+        applied: false,
+      })
 
     const commitmentId = `commitment-${command.operationId}`
     this.commitments.set(command.operationId, {
@@ -73,20 +85,53 @@ class StatefulInventory implements ProductInventoryPort {
       productId: command.productId,
       released: false,
     })
-    return Promise.resolve({ commitmentId })
+    return Promise.resolve({
+      operationId: command.operationId,
+      commitmentId,
+      status: 'ACTIVE',
+      applied: true,
+    })
   }
 
-  release(operationId: string, commitmentId: string): Promise<void> {
-    const commitment = this.commitments.get(operationId)
-    if (commitment?.commitmentId === commitmentId) {
+  release(command: {
+    operationId: string
+    commitmentId: string
+    auctionId: string
+    ownerId: string
+    productId: string
+    reason: 'AUCTION_WITHOUT_BIDS'
+  }): Promise<{
+    operationId: string
+    commitmentId: string
+    status: 'RELEASED'
+    applied: boolean
+  }> {
+    const commitment = [...this.commitments.values()].find(
+      (candidate) => candidate.commitmentId === command.commitmentId,
+    )
+    if (commitment !== undefined) {
       commitment.released = true
     }
-    return Promise.resolve()
+    return Promise.resolve({
+      operationId: command.operationId,
+      commitmentId: command.commitmentId,
+      status: 'RELEASED',
+      applied: true,
+    })
+  }
+
+  markPendingClaim(): Promise<never> {
+    return Promise.reject(new Error('not used by publication'))
+  }
+
+  confirmClaim(): Promise<never> {
+    return Promise.reject(new Error('not used by publication'))
   }
 }
 
 const fixture = (balance = 20) => {
   const repository = new InMemoryAuctionRepository()
+  const intents = new InMemoryAuctionPublicationIntentRepository()
   const inventory = new StatefulInventory()
   const wallet = new StatefulWallet(balance)
   const catalog: CatalogProductPolicyPort = {
@@ -95,7 +140,7 @@ const fixture = (balance = 20) => {
   const sanctions: SellerSanctionPort = { hasActiveSanctions: () => Promise.resolve(false) }
   const clock = { now: () => new Date(NOW) }
   let sequence = 0
-  const persistence = new PersistAuctionPublication(repository, inventory, wallet, clock)
+  const persistence = new PersistAuctionPublication(repository, inventory, wallet, clock, intents)
   const useCase = new PublishAuction(
     repository,
     catalog,
@@ -106,9 +151,10 @@ const fixture = (balance = 20) => {
     {
       generate: () => `auction-${String(++sequence)}`,
     },
+    intents,
   )
 
-  return { repository, inventory, wallet, catalog, sanctions, useCase }
+  return { repository, inventory, wallet, catalog, sanctions, intents, useCase }
 }
 
 const command = (overrides: Partial<PublishAuctionCommand> = {}): PublishAuctionCommand => ({
@@ -144,7 +190,7 @@ describe('HU-62 - aceptacion de publicacion de subasta', () => {
       })
       expect(wallet.balance).toBe(20 - testCase.fee)
       expect(wallet.charges.size).toBe(1)
-      expect(inventory.commitments.get('operation-1')).toMatchObject({
+      expect(inventory.commitments.get(`auction:${result.id}:inventory:commit`)).toMatchObject({
         productId: 'product-1',
         released: false,
       })
@@ -278,7 +324,7 @@ describe('HU-62 - aceptacion de publicacion de subasta', () => {
     await expect(repository.countActiveBySeller('seller-1')).resolves.toBe(10)
   })
 
-  it('compensa el cobro y no crea la subasta si falla el bloqueo de inventario', async () => {
+  it('conserva la tarifa idempotente y no crea la subasta si falla el bloqueo de inventario', async () => {
     const { repository, inventory, wallet, useCase } = fixture()
     inventory.commitFailure = new ExternalDependencyUnavailableError('inventory')
 
@@ -286,8 +332,8 @@ describe('HU-62 - aceptacion de publicacion de subasta', () => {
       ExternalDependencyUnavailableError,
     )
 
-    expect(wallet.balance).toBe(20)
-    expect(wallet.charges.get('operation-1')).toMatchObject({ refunded: true })
+    expect(wallet.balance).toBe(19)
+    expect(wallet.charges.get('operation-1')).toMatchObject({ refunded: false })
     expect(inventory.commitments.size).toBe(0)
     await expect(repository.countActiveBySeller('seller-1')).resolves.toBe(0)
   })
@@ -301,6 +347,18 @@ describe('HU-62 - aceptacion de publicacion de subasta', () => {
     expect(retry.id).toBe(first.id)
     expect(wallet.balance).toBe(19)
     expect(wallet.charges.size).toBe(1)
+    expect(inventory.commitments.size).toBe(1)
+    await expect(repository.countActiveBySeller('seller-1')).resolves.toBe(1)
+  })
+
+  it('serializa publicaciones concurrentes con la misma operationId', async () => {
+    const { repository, inventory, useCase } = fixture()
+    const [first, second] = await Promise.all([
+      useCase.execute(command()),
+      useCase.execute(command()),
+    ])
+
+    expect(second.id).toBe(first.id)
     expect(inventory.commitments.size).toBe(1)
     await expect(repository.countActiveBySeller('seller-1')).resolves.toBe(1)
   })

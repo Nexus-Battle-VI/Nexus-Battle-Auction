@@ -8,6 +8,7 @@ import type {
   OutbidNotificationPort,
 } from '../../src/application/ports/OutbidNotificationPort'
 import { PersistBidWithCredits } from '../../src/application/use-cases/PersistBidWithCredits'
+import { ReactToRivalBid } from '../../src/application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { Auction } from '../../src/domain/entities/Auction'
 import { BidRuleCode } from '../../src/domain/errors/BidRuleViolation'
@@ -60,14 +61,26 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
       reserve,
       release,
     }
-    const notifications: OutbidNotificationPort = { publish: publishNotification }
+    const notifications: OutbidNotificationPort = {
+      publish: publishNotification,
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
+    const identifiers = { generate: () => `bid-${String(++nextBidNumber)}` }
+    const autoBidReactor = new ReactToRivalBid(
+      repository,
+      persistence,
+      clock,
+      identifiers,
+      notifications,
+    )
     const registerBid = new RegisterBid(
       repository,
       persistence,
       clock,
-      { generate: () => `bid-${String(++nextBidNumber)}` },
+      identifiers,
       notifications,
+      autoBidReactor,
     )
 
     const firstBid = await registerBid.execute({
@@ -185,14 +198,26 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
       reserve,
       release,
     }
-    const notifications: OutbidNotificationPort = { publish: publishNotification }
+    const notifications: OutbidNotificationPort = {
+      publish: publishNotification,
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
+    const identifiers = { generate: () => `bid-cp-02-${String(++nextBidNumber)}` }
+    const autoBidReactor = new ReactToRivalBid(
+      repository,
+      persistence,
+      clock,
+      identifiers,
+      notifications,
+    )
     const registerBid = new RegisterBid(
       repository,
       persistence,
       clock,
-      { generate: () => `bid-cp-02-${String(++nextBidNumber)}` },
+      identifiers,
       notifications,
+      autoBidReactor,
     )
 
     const firstBid = await registerBid.execute({
@@ -283,12 +308,25 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
       release,
     }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
+    const identifiers = { generate: () => `bid-invalid-${String(++nextBidNumber)}` }
+    const notifications = {
+      publish: publishNotification,
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
+    const autoBidReactor = new ReactToRivalBid(
+      repository,
+      persistence,
+      clock,
+      identifiers,
+      notifications,
+    )
     const registerBid = new RegisterBid(
       repository,
       persistence,
       clock,
-      { generate: () => `bid-invalid-${String(++nextBidNumber)}` },
-      { publish: publishNotification },
+      identifiers,
+      notifications,
+      autoBidReactor,
     )
 
     const firstBid = await registerBid.execute({
@@ -354,12 +392,25 @@ describe('HU-63: pruebas de aceptacion de pujas', () => {
       release: () => Promise.resolve(),
     }
     const persistence = new PersistBidWithCredits(repository, credits, clock)
+    const identifiers = { generate: () => `bid-limit-${String(++nextBidNumber)}` }
+    const notifications = {
+      publish: () => Promise.resolve(),
+      publishAutoBidLimitReached: () => Promise.resolve(),
+    }
+    const autoBidReactor = new ReactToRivalBid(
+      repository,
+      persistence,
+      clock,
+      identifiers,
+      notifications,
+    )
     const registerBid = new RegisterBid(
       repository,
       persistence,
       clock,
-      { generate: () => `bid-limit-${String(++nextBidNumber)}` },
-      { publish: () => Promise.resolve() },
+      identifiers,
+      notifications,
+      autoBidReactor,
     )
 
     for (let index = 1; index <= 51; index++) {

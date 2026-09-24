@@ -3,6 +3,7 @@ import {
   ExternalDependencyUnavailableError,
 } from '../../../application/errors/ExternalDependencyError'
 import type {
+  AutoBidLimitReachedNotification,
   OutbidNotification,
   OutbidNotificationPort,
 } from '../../../application/ports/OutbidNotificationPort'
@@ -14,6 +15,9 @@ import {
 } from '../identity/internal-signature'
 
 export const AUCTION_OUTBID_NOTIFICATION_PATH = '/api/internal/v1/notifications/auction/outbid'
+
+export const AUCTION_AUTO_BID_LIMIT_REACHED_NOTIFICATION_PATH =
+  '/api/internal/v1/notifications/auction/auto-bid-limit-reached'
 
 export interface HttpOutbidNotificationClientLogger {
   warn(message: string, context?: Readonly<Record<string, string | number | boolean>>): void
@@ -64,8 +68,8 @@ export class HttpOutbidNotificationClient implements OutbidNotificationPort {
     this.now = options.now ?? (() => new Date())
   }
 
-  async publish(notification: OutbidNotification): Promise<void> {
-    const body = {
+  publish(notification: OutbidNotification): Promise<void> {
+    return this.send(AUCTION_OUTBID_NOTIFICATION_PATH, notification.notificationId, {
       notificationId: notification.notificationId,
 
       operationId: notification.operationId,
@@ -83,8 +87,38 @@ export class HttpOutbidNotificationClient implements OutbidNotificationPort {
       winningAmountCredits: notification.winningAmountCredits,
 
       occurredAt: notification.occurredAt.toISOString(),
-    }
+    })
+  }
 
+  publishAutoBidLimitReached(notification: AutoBidLimitReachedNotification): Promise<void> {
+    return this.send(
+      AUCTION_AUTO_BID_LIMIT_REACHED_NOTIFICATION_PATH,
+      notification.notificationId,
+      {
+        notificationId: notification.notificationId,
+
+        operationId: notification.operationId,
+
+        recipientPlayerId: notification.recipientPlayerId,
+
+        auctionId: notification.auctionId,
+
+        autoBidLimitCredits: notification.autoBidLimitCredits,
+
+        requiredAmountCredits: notification.requiredAmountCredits,
+
+        leadingBidderId: notification.leadingBidderId,
+
+        occurredAt: notification.occurredAt.toISOString(),
+      },
+    )
+  }
+
+  private async send(
+    path: string,
+    notificationId: string,
+    body: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
     const timestamp = String(this.now().getTime())
 
     const signature = signInternalRequest(this.options.secret, {
@@ -92,7 +126,7 @@ export class HttpOutbidNotificationClient implements OutbidNotificationPort {
 
       method: 'POST',
 
-      path: AUCTION_OUTBID_NOTIFICATION_PATH,
+      path,
 
       timestamp,
 
@@ -106,26 +140,23 @@ export class HttpOutbidNotificationClient implements OutbidNotificationPort {
     }, this.options.timeoutMs)
 
     try {
-      const response = await this.fetchImpl(
-        `${this.options.baseUrl}${AUCTION_OUTBID_NOTIFICATION_PATH}`,
-        {
-          method: 'POST',
+      const response = await this.fetchImpl(`${this.options.baseUrl}${path}`, {
+        method: 'POST',
 
-          headers: {
-            'content-type': 'application/json',
+        headers: {
+          'content-type': 'application/json',
 
-            [INTERNAL_SERVICE_HEADER]: this.options.serviceName,
+          [INTERNAL_SERVICE_HEADER]: this.options.serviceName,
 
-            [INTERNAL_TIMESTAMP_HEADER]: timestamp,
+          [INTERNAL_TIMESTAMP_HEADER]: timestamp,
 
-            [INTERNAL_SIGNATURE_HEADER]: signature,
-          },
-
-          body: JSON.stringify(body),
-
-          signal: controller.signal,
+          [INTERNAL_SIGNATURE_HEADER]: signature,
         },
-      )
+
+        body: JSON.stringify(body),
+
+        signal: controller.signal,
+      })
 
       if (!response.ok) {
         this.options.logger.warn('outbid_notification_respuesta_no_ok', {
@@ -146,13 +177,10 @@ export class HttpOutbidNotificationClient implements OutbidNotificationPort {
         )
       }
 
-      if (
-        !isNotificationResponse(payload) ||
-        payload.notificationId !== notification.notificationId
-      ) {
+      if (!isNotificationResponse(payload) || payload.notificationId !== notificationId) {
         throw new ExternalContractError(
           'notifications',
-          'Notifications devolvio una respuesta incompatible con el contrato de puja superada.',
+          'Notifications devolvio una respuesta incompatible con el contrato de notificacion.',
         )
       }
     } catch (error: unknown) {

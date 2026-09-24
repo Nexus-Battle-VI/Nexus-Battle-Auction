@@ -8,6 +8,8 @@ export interface WatchlistRepositoryPort {
   find(playerId: string, auctionId: string): Promise<WatchlistEntry | null>
   /** Lista solo el jugador indicado, por fecha descendente y auctionId ascendente. */
   listByPlayer(playerId: string): Promise<readonly WatchlistEntry[]>
+  /** Lista seguidores de una subasta para resolver destinatarios de eventos. */
+  listByAuction(auctionId: string): Promise<readonly WatchlistEntry[]>
   /** Elimina solo la pareja indicada; false significa que no existia. */
   delete(playerId: string, auctionId: string): Promise<boolean>
 }

@@ -1,7 +1,8 @@
-import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common'
+import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common'
+import { Reflector } from '@nestjs/core'
 
 import { ALL_ROLES, type VerifiedIdentity } from '../../../../application/ports/TokenVerifierPort'
-import type { RequestWithIdentity } from './decorators'
+import { AUTHENTICATION_REQUIRED, type RequestWithIdentity } from './decorators'
 
 /**
  * Identidad que se atribuye a toda peticion cuando `AUTH_MODE=disabled`.
@@ -28,7 +29,18 @@ export const ANONYMOUS_IDENTITY: VerifiedIdentity = {
  */
 @Injectable()
 export class AnonymousIdentityGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector = new Reflector()) {}
+
+  /** Las rutas privadas optan por fail-closed aun cuando el desarrollo deshabilite JWT. */
   canActivate(context: ExecutionContext): boolean {
+    if (
+      this.reflector.getAllAndOverride<boolean>(AUTHENTICATION_REQUIRED, [
+        context.getHandler(),
+        context.getClass(),
+      ])
+    ) {
+      throw new UnauthorizedException('Esta operacion requiere autenticacion habilitada.')
+    }
     context.switchToHttp().getRequest<RequestWithIdentity>().identity = ANONYMOUS_IDENTITY
 
     return true

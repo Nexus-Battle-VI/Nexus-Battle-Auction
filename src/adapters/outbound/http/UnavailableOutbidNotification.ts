@@ -1,5 +1,6 @@
 import { ExternalDependencyUnavailableError } from '../../../application/errors/ExternalDependencyError'
 import type {
+  AutoBidLimitReachedNotification,
   OutbidNotification,
   OutbidNotificationPort,
 } from '../../../application/ports/OutbidNotificationPort'
@@ -13,6 +14,12 @@ import type {
  */
 export class UnavailableOutbidNotification implements OutbidNotificationPort {
   publish(notification: OutbidNotification): Promise<void> {
+    void notification
+
+    return Promise.reject(new ExternalDependencyUnavailableError('notifications'))
+  }
+
+  publishAutoBidLimitReached(notification: AutoBidLimitReachedNotification): Promise<void> {
     void notification
 
     return Promise.reject(new ExternalDependencyUnavailableError('notifications'))
