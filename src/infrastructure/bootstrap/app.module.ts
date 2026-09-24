@@ -12,6 +12,7 @@ import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/to
 import { WatchlistController } from '../../adapters/inbound/http/watchlist.controller'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpAuctionInventoryClient } from '../../adapters/outbound/http/HttpAuctionInventoryClient'
+import { HttpBidCreditsClient } from '../../adapters/outbound/http/HttpBidCreditsClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
@@ -167,6 +168,19 @@ export const DATABASE = Symbol('Database')
 export const DATABASE_LIFECYCLE = Symbol('DatabaseLifecycle')
 
 export const INTERNAL_CALLERS: readonly string[] = []
+
+/** Seleccion fail-closed del contrato de creditos usado exclusivamente por pujas. */
+export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCreditsPort => {
+  if (config.walletBaseUrl === null || config.internalServiceAuthSecret === null) {
+    return new UnavailableBidCredits()
+  }
+  return new HttpBidCreditsClient({
+    baseUrl: config.walletBaseUrl,
+    secret: config.internalServiceAuthSecret,
+    timeoutMs: config.walletRequestTimeoutMs,
+    now: () => clock.now(),
+  })
+}
 
 @Module({
   // La ruta estatica /watchlist debe registrarse antes de /:auctionId.
@@ -482,7 +496,8 @@ export const INTERNAL_CALLERS: readonly string[] = []
     {
       provide: BID_CREDITS,
 
-      useFactory: (): BidCreditsPort => new UnavailableBidCredits(),
+      useFactory: createBidCreditsPort,
+      inject: [APP_CONFIG, CLOCK],
     },
 
     /**
