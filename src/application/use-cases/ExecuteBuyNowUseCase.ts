@@ -6,6 +6,7 @@ import type { EarlyClosureNotificationService } from '../services/EarlyClosureNo
 import type { BuyNowPendingClaimRegistrationService } from '../services/BuyNowPendingClaimRegistrationService'
 import type { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
 import { AuctionNotFoundError } from '../errors/BuyNowRequestError'
+import { BuyNowIdempotencyConflictError } from '../errors/BuyNowTransactionError'
 import type { AuctionRepositoryPort, BuyNowOperationRecord } from '../ports/AuctionRepositoryPort'
 import type { ClockPort } from '../ports/ClockPort'
 import type { WalletPort } from '../ports/WalletPort'
@@ -58,6 +59,14 @@ export class ExecuteBuyNowUseCase {
     const existing = await this.repository.findBuyNowOperation(command.operationId)
 
     if (existing !== null) {
+      // La operacion existe, pero puede no ser ESTA operacion: reusar la
+      // misma Idempotency-Key para otra subasta o otro comprador es un uso
+      // incorrecto del cliente, no un reintento legitimo. Sin esta
+      // comparacion, se devolveria la confirmacion de un tercero.
+      if (existing.auction.id !== command.auctionId || existing.buyerId !== command.buyerId) {
+        throw new BuyNowIdempotencyConflictError()
+      }
+
       const confirmation = ExecuteBuyNowUseCase.toReplayedConfirmation(existing)
 
       // Reintentar tambien reintenta avisar del cierre y registrar el
