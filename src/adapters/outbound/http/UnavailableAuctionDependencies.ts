@@ -157,10 +157,10 @@ export class UnavailableWallet implements WalletPort {
 }
 
 /**
- * Notifications no tiene, hoy, ningun endpoint para el cierre anticipado por
- * compra inmediata (HU-64.5) -a diferencia de la puja superada, HU-63.5, que
- * si publico el suyo-. Fallar cerrado evita simular una entrega que nadie
- * realizo.
+ * Fallback de HU-64.5 cuando no hay URL de Notifications o secreto interno
+ * configurados (desarrollo local). Con ambos se usa
+ * `HttpEarlyClosureNotificationClient`. Fallar cerrado evita simular una
+ * entrega que nadie realizo.
  */
 export class UnavailableEarlyClosureNotification implements NotificationPort {
   notifyAuctionClosedEarly(
