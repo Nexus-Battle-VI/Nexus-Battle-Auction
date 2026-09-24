@@ -41,9 +41,13 @@ const confirm = {
 const response = (status: number, value: unknown): Response =>
   new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
 
-const client = (fetchImpl: typeof fetch, timeoutMs = 1_000) =>
+const client = (
+  fetchImpl: typeof fetch,
+  timeoutMs = 1_000,
+  baseUrl = 'https://inventory.example.com/',
+) =>
   new HttpAuctionInventoryClient({
-    baseUrl: 'https://inventory.example.com/',
+    baseUrl,
     secret: 'secret',
     timeoutMs,
     fetchImpl,
@@ -54,6 +58,117 @@ const mockFetch = (implementation: () => Promise<Response>): jest.MockedFunction
   jest.fn(implementation) as unknown as jest.MockedFunction<typeof fetch>
 
 describe('HttpAuctionInventoryClient', () => {
+  const eligibility = (ownedByPlayer: boolean, inUse: boolean) => ({
+    ownerId: 'seller-1',
+    productId: 'product-1',
+    ownedByPlayer,
+    inUse,
+  })
+
+  it.each([
+    [true, false],
+    [true, true],
+    [false, false],
+  ])(
+    'consulta elegibilidad owned=%s/inUse=%s con el contrato de Player-Inventory',
+    async (ownedByPlayer, inUse) => {
+      const fetchImpl = mockFetch(() =>
+        Promise.resolve(response(200, eligibility(ownedByPlayer, inUse))),
+      )
+
+      await expect(client(fetchImpl).inspect('seller-1', 'product-1')).resolves.toEqual({
+        ownedByPlayer,
+        inUse,
+      })
+    },
+  )
+
+  it('firma GET y codifica owner/product sin duplicar /api si baseUrl ya lo contiene', async () => {
+    const ownerId = 'seller/ one'
+    const productId = 'product/ one'
+    const path = '/api/internal/v1/inventory/auction-eligibility/seller%2F%20one/product%2F%20one'
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(response(200, { ownerId, productId, ownedByPlayer: true, inUse: false })),
+    )
+
+    await expect(
+      client(fetchImpl, 1_000, 'https://inventory.example.com/api/').inspect(ownerId, productId),
+    ).resolves.toEqual({
+      ownedByPlayer: true,
+      inUse: false,
+    })
+
+    const [url, request] = fetchImpl.mock.calls[0]!
+    expect(url).toBe(`https://inventory.example.com${path}`)
+    expect(request?.method).toBe('GET')
+    expect(request?.headers).toMatchObject({
+      'x-internal-service': 'auction',
+      'x-internal-timestamp': String(now.getTime()),
+      'x-internal-signature': signInternalRequest('secret', {
+        service: 'auction',
+        method: 'GET',
+        path,
+        timestamp: String(now.getTime()),
+        body: {},
+      }),
+    })
+  })
+
+  it.each([
+    ['ownerId', { ...eligibility(true, false), ownerId: 'other-owner' }],
+    ['productId', { ...eligibility(true, false), productId: 'other-product' }],
+    ['ownedByPlayer', { ...eligibility(true, false), ownedByPlayer: 'true' }],
+    ['inUse', { ...eligibility(true, false), inUse: 0 }],
+  ])('rechaza payload de elegibilidad con %s inconsistente', async (_field, payload) => {
+    const fetchImpl = mockFetch(() => Promise.resolve(response(200, payload)))
+    await expect(client(fetchImpl).inspect('seller-1', 'product-1')).rejects.toBeInstanceOf(
+      ExternalContractError,
+    )
+  })
+
+  it('rechaza JSON invalido de elegibilidad como error contractual', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve({
+        status: 200,
+        json: () => Promise.reject(new SyntaxError('invalid json')),
+      } as Response),
+    )
+    await expect(client(fetchImpl).inspect('seller-1', 'product-1')).rejects.toBeInstanceOf(
+      ExternalContractError,
+    )
+  })
+
+  it.each([500, 503])(
+    'clasifica elegibilidad HTTP %i como dependencia no disponible',
+    async (status) => {
+      const fetchImpl = mockFetch(() => Promise.resolve(response(status, {})))
+      await expect(client(fetchImpl).inspect('seller-1', 'product-1')).rejects.toBeInstanceOf(
+        ExternalDependencyUnavailableError,
+      )
+    },
+  )
+
+  it('clasifica un error de red de elegibilidad como dependencia no disponible', async () => {
+    const fetchImpl = mockFetch(() => Promise.reject(new Error('network')))
+    await expect(client(fetchImpl, 1).inspect('seller-1', 'product-1')).rejects.toBeInstanceOf(
+      ExternalDependencyUnavailableError,
+    )
+  })
+
+  it('aborta timeout de elegibilidad y lo clasifica como dependencia no disponible', async () => {
+    const fetchImpl = jest.fn(
+      (_url: string, request: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            reject(new Error('aborted'))
+          })
+        }),
+    ) as unknown as typeof fetch
+    await expect(client(fetchImpl, 1).inspect('seller-1', 'product-1')).rejects.toBeInstanceOf(
+      ExternalDependencyUnavailableError,
+    )
+  })
+
   it('envia commit firmado con body y ruta canonicos', async () => {
     const fetchImpl = mockFetch(() =>
       Promise.resolve(
