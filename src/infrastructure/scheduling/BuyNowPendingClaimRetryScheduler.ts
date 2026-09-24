@@ -21,7 +21,9 @@ export class BuyNowPendingClaimRetryScheduler implements OnModuleInit, OnModuleD
   onModuleInit(): void {
     if (!this.options.enabled) return
     this.stopped = false
-    this.timerHandle = this.timer.setInterval(() => this.tick(), this.options.pollIntervalMs)
+    this.timerHandle = this.timer.setInterval(() => {
+      this.tick()
+    }, this.options.pollIntervalMs)
   }
   async onModuleDestroy(): Promise<void> {
     this.stopped = true
@@ -37,11 +39,11 @@ export class BuyNowPendingClaimRetryScheduler implements OnModuleInit, OnModuleD
     const batch = this.worker
       .runBatch()
       .then(() => undefined)
-      .catch((error: unknown) =>
+      .catch((error: unknown) => {
         this.logger.error('buy_now_pending_claim_retry_scheduler_error', {
           detail: describeError(error),
-        }),
-      )
+        })
+      })
       .finally(() => {
         if (this.activeBatch === batch) this.activeBatch = null
       })
