@@ -53,9 +53,7 @@ export class BuyNowPendingClaimRegistrationService {
     const commitmentId = await this.auctions.findInventoryCommitmentId(command.auctionId)
 
     if (commitmentId === null) {
-      throw new Error(
-        `La subasta ${command.auctionId} no tiene un inventoryCommitmentId durable.`,
-      )
+      throw new Error(`La subasta ${command.auctionId} no tiene un inventoryCommitmentId durable.`)
     }
 
     const intent = await this.inventoryIntents.getOrCreate({

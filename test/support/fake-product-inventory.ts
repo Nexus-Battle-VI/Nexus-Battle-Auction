@@ -43,7 +43,9 @@ export class FakeProductInventory implements ProductInventoryPort {
     return Promise.reject(new Error('No debe invocarse release durante compra inmediata.'))
   }
 
-  confirmClaim(command: ConfirmInventoryProductClaimCommand): Promise<ClaimedInventoryProductCommitment> {
+  confirmClaim(
+    command: ConfirmInventoryProductClaimCommand,
+  ): Promise<ClaimedInventoryProductCommitment> {
     void command
     return Promise.reject(new Error('No debe invocarse confirmClaim durante compra inmediata.'))
   }
