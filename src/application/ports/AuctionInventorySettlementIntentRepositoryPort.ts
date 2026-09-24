@@ -41,6 +41,10 @@ export type CreateAuctionInventorySettlementIntentInput =
 
 export interface AuctionInventorySettlementIntentRepositoryPort {
   getByAuctionId(auctionId: string): Promise<AuctionInventorySettlementIntentSnapshot | null>
+  /** Candidatos PENDING_CLAIM retryables, ordenados de forma determinista. */
+  findRetryablePendingClaims(
+    limit: number,
+  ): Promise<readonly AuctionInventorySettlementIntentSnapshot[]>
   getOrCreate(
     input: CreateAuctionInventorySettlementIntentInput,
   ): Promise<AuctionInventorySettlementIntentSnapshot>

@@ -131,6 +131,10 @@ export interface AppConfig {
   readonly auctionEarlyClosureRetrySchedulerEnabled: boolean
 
   readonly auctionEarlyClosureRetryPollIntervalMs: number
+
+  readonly auctionBuyNowPendingClaimRetrySchedulerEnabled: boolean
+  readonly auctionBuyNowPendingClaimRetryPollIntervalMs: number
+  readonly auctionBuyNowPendingClaimRetryBatchSize: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -482,6 +486,38 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  const auctionBuyNowPendingClaimRetrySchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionBuyNowPendingClaimRetryPollIntervalMs = readInteger(
+    env,
+    'AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionBuyNowPendingClaimRetryBatchSize = readInteger(
+    env,
+    'AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_BATCH_SIZE',
+    50,
+    1,
+    500,
+  )
+  if (auctionBuyNowPendingClaimRetrySchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (inventoryBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
   return {
     nodeEnv,
 
@@ -562,5 +598,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionEarlyClosureRetrySchedulerEnabled,
 
     auctionEarlyClosureRetryPollIntervalMs,
+
+    auctionBuyNowPendingClaimRetrySchedulerEnabled,
+    auctionBuyNowPendingClaimRetryPollIntervalMs,
+    auctionBuyNowPendingClaimRetryBatchSize,
   }
 }

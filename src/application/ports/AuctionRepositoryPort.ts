@@ -280,6 +280,8 @@ export interface AuctionRepositoryPort {
   recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void>
 
   findBuyNowOperation(operationId: string): Promise<BuyNowOperationRecord | null>
+  /** Operacion durable que identifica una compra inmediata para una subasta. */
+  findBuyNowOperationByAuctionId(auctionId: string): Promise<BuyNowOperationRecord | null>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')
