@@ -1,9 +1,10 @@
+import { createHash, createHmac } from 'node:crypto'
+
 import {
   ExternalContractError,
   ExternalDependencyUnavailableError,
 } from '../../src/application/errors/ExternalDependencyError'
 import { HttpBidCreditsClient } from '../../src/adapters/outbound/http/HttpBidCreditsClient'
-import { signInternalRequest } from '../../src/adapters/outbound/identity/internal-signature'
 
 const now = new Date('2026-09-23T12:00:00.000Z')
 const reserve = {
@@ -45,16 +46,22 @@ describe('HttpBidCreditsClient', () => {
     const [url, request] = fetchImpl.mock.calls[0]!
     const path = '/api/internal/v1/wallet/buy-now-transfers/balance/player-1'
     expect(url).toBe(`https://wallet.example.com${path}`)
+    expect(request?.method).toBe('GET')
+    expect(request?.body).toBeUndefined()
+
+    // Calculo independiente del cliente: el guard de Wallet verifica
+    // `request.body ?? {}`, asi que un GET sin cuerpo se firma sobre `{}`.
+    const canonical = [
+      'auction',
+      'GET',
+      path,
+      String(now.getTime()),
+      createHash('sha256').update('{}', 'utf8').digest('hex'),
+    ].join('\n')
     expect(request?.headers).toMatchObject({
       'x-internal-service': 'auction',
       'x-internal-timestamp': String(now.getTime()),
-      'x-internal-signature': signInternalRequest('secret', {
-        service: 'auction',
-        method: 'GET',
-        path,
-        timestamp: String(now.getTime()),
-        body: null,
-      }),
+      'x-internal-signature': createHmac('sha256', 'secret').update(canonical).digest('hex'),
     })
   })
 

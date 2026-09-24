@@ -63,7 +63,9 @@ export class OfficialAuctionEligibilityClient implements OfficialAuctionEligibil
       method: 'GET',
       path,
       timestamp,
-      body: null,
+      // El GET no envia cuerpo; el guard interno de Catalog verifica
+      // `request.body ?? {}`, asi que la firma se calcula sobre `{}`.
+      body: {},
     })
     const controller = new AbortController()
     const timer = setTimeout(() => {
