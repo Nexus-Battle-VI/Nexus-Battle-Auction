@@ -18,6 +18,7 @@ import { AppModule } from '../../src/infrastructure/bootstrap/app.module'
 const identities: Readonly<Record<string, VerifiedIdentity>> = {
   player: { subject: 'player-1', email: null, roles: new Set([Role.Player]) },
   admin: { subject: 'admin-1', email: null, roles: new Set([Role.Administrator]) },
+  gameMaster: { subject: 'upb-company', email: null, roles: new Set([Role.GameMaster]) },
 }
 const verifier: TokenVerifierPort = {
   verify: (token) =>
@@ -32,9 +33,15 @@ const list = {
         {
           id: 'auction-1',
           sellerId: 'seller-1',
+          publisherType: 'PLAYER' as const,
           productId: 'product-1',
+          priceKind: 'CREDITS' as const,
           minimumBidCredits: 10,
           buyNowCredits: null,
+          currency: null,
+          minimumBidAmountMinor: null,
+          buyNowAmountMinor: null,
+          officialMark: null,
           status: 'ACTIVE' as const,
           publishedAt: new Date('2026-09-22T12:00:00.000Z'),
           closesAt: new Date('2026-09-24T12:00:00.000Z'),
@@ -56,6 +63,7 @@ describe('GET /v1/auctions marketplace', () => {
       COGNITO_USER_POOL_ID: 'pool',
       COGNITO_CLIENT_ID: 'client',
       INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+      GAME_MASTER_SUBJECT: 'upb-company',
       PERSISTENCE_DRIVER: 'memory',
     })
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -101,6 +109,11 @@ describe('GET /v1/auctions marketplace', () => {
         .set('Authorization', 'Bearer player'),
     ).resolves.toMatchObject({ status: 200 })
     expect(list.execute).toHaveBeenLastCalledWith({ page: 2, pageSize: 100 })
+    await expect(
+      request(app.getHttpServer())
+        .get('/api/v1/auctions')
+        .set('Authorization', 'Bearer gameMaster'),
+    ).resolves.toMatchObject({ status: 200 })
     await expect(request(app.getHttpServer()).get('/api/v1/auctions')).resolves.toMatchObject({
       status: 401,
     })

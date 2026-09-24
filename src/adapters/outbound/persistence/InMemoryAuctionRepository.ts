@@ -388,34 +388,70 @@ export class InMemoryAuctionRepository
   }
 
   listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
-    const active = [...this.auctions.values()]
+    const playerItems: ActiveAuctionList['items'][number][] = [...this.auctions.values()]
       .filter(
         (auction) =>
           auction.status === AuctionStatus.Active &&
           auction.closesAt.getTime() > input.now.getTime(),
       )
-      .sort(
-        (left, right) =>
-          left.closesAt.getTime() - right.closesAt.getTime() || left.id.localeCompare(right.id),
-      )
-    const offset = (input.page - 1) * input.pageSize
-    return Promise.resolve({
-      total: active.length,
-      items: active.slice(offset, offset + input.pageSize).map((auction) => {
+      .map((auction) => {
         const leaderId = this.leadingBidByAuction.get(auction.id)
         const leader = leaderId === undefined ? undefined : this.bids.get(leaderId)
         return {
           id: auction.id,
           sellerId: auction.sellerId,
+          publisherType: 'PLAYER' as const,
           productId: auction.productId,
+          priceKind: 'CREDITS' as const,
           minimumBidCredits: auction.minimumBidCredits,
           buyNowCredits: auction.buyNowCredits,
+          currency: null,
+          minimumBidAmountMinor: null,
+          buyNowAmountMinor: null,
+          officialMark: null,
           status: AuctionStatus.Active,
           publishedAt: new Date(auction.publishedAt),
           closesAt: new Date(auction.closesAt),
           currentBidAmount: leader?.snapshot.amountCredits ?? null,
         }
-      }),
+      })
+    const officialItems: ActiveAuctionList['items'][number][] = [...this.officialAuctions.values()]
+      .filter(
+        (auction) =>
+          auction.status === AuctionStatus.Active &&
+          auction.closesAt.getTime() > input.now.getTime(),
+      )
+      .map((auction) => ({
+        id: auction.id,
+        sellerId: auction.publisherId,
+        publisherType: 'GAME_MASTER' as const,
+        productId: auction.productId,
+        priceKind: 'REAL_MONEY' as const,
+        minimumBidCredits: null,
+        buyNowCredits: null,
+        currency: auction.currency,
+        minimumBidAmountMinor: auction.minimumBidAmountMinor,
+        buyNowAmountMinor: auction.buyNowAmountMinor,
+        officialMark: auction.mark,
+        status: AuctionStatus.Active,
+        publishedAt: new Date(auction.publishedAt),
+        closesAt: new Date(auction.closesAt),
+        currentBidAmount: null,
+      }))
+    const active = [...officialItems, ...playerItems].sort(
+      (left, right) =>
+        (left.publisherType === right.publisherType
+          ? 0
+          : left.publisherType === 'GAME_MASTER'
+            ? -1
+            : 1) ||
+        left.closesAt.getTime() - right.closesAt.getTime() ||
+        left.id.localeCompare(right.id),
+    )
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({
+      total: active.length,
+      items: active.slice(offset, offset + input.pageSize),
     })
   }
 

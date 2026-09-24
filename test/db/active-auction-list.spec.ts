@@ -6,6 +6,12 @@ import type { Database } from '../../src/adapters/outbound/persistence/schema'
 import { Auction } from '../../src/domain/entities/Auction'
 import { AuctionClosingResult } from '../../src/domain/entities/AuctionClosingResult'
 import { Bid } from '../../src/domain/entities/Bid'
+import {
+  AuctionPublisherType,
+  OfficialAuction,
+  OfficialAuctionMark,
+} from '../../src/domain/entities/OfficialAuction'
+import { AuctionPriceKind } from '../../src/domain/value-objects/AuctionPublicationPricing'
 import { createDatabase, migrateToLatest } from '../../src/infrastructure/persistence/database'
 
 const now = new Date('2026-09-23T12:00:00.000Z')
@@ -59,6 +65,30 @@ describe('PostgreSQL active auction marketplace', () => {
     })
   }
 
+  const publishOfficial = async (
+    id: string,
+    closesAt: Date,
+    mark = OfficialAuctionMark.Official,
+  ) => {
+    await repository.publishOfficial({
+      operationId: `publish-${id}`,
+      auction: OfficialAuction.publish({
+        auctionId: id,
+        publisherId: 'upb-company',
+        publisherType: AuctionPublisherType.GameMaster,
+        productId: `product-${id}`,
+        durationHours: 24,
+        pricing: {
+          kind: AuctionPriceKind.RealMoney,
+          minimumBid: { amountMinor: 90_000, currency: 'COP' },
+          buyNow: { amountMinor: 120_000, currency: 'COP' },
+        },
+        mark,
+        publishedAt: new Date(closesAt.getTime() - 24 * 60 * 60 * 1000),
+      }),
+    })
+  }
+
   it('filtra, ordena, pagina y resuelve el lider con una sola consulta de listado', async () => {
     await publish('expired', now)
     await publish('same-b', new Date(now.getTime() + 2_000))
@@ -94,6 +124,34 @@ describe('PostgreSQL active auction marketplace', () => {
     await expect(repository.listActive({ now, page: 2, pageSize: 1 })).resolves.toMatchObject({
       total: 2,
       items: [{ id: 'same-a', currentBidAmount: 30, status: 'ACTIVE' }],
+    })
+  })
+
+  it('pagina el listado mixto con oficiales primero y desempate determinista', async () => {
+    await publish('player-earlier', new Date(now.getTime() + 1_000))
+    await publishOfficial('official-b', new Date(now.getTime() + 3_000))
+    await publishOfficial(
+      'official-a',
+      new Date(now.getTime() + 3_000),
+      OfficialAuctionMark.Premium,
+    )
+
+    await expect(repository.listActive({ now, page: 1, pageSize: 2 })).resolves.toMatchObject({
+      total: 3,
+      items: [
+        {
+          id: 'official-a',
+          publisherType: 'GAME_MASTER',
+          priceKind: 'REAL_MONEY',
+          currency: 'COP',
+          officialMark: 'PREMIUM',
+        },
+        { id: 'official-b', publisherType: 'GAME_MASTER', officialMark: 'OFFICIAL' },
+      ],
+    })
+    await expect(repository.listActive({ now, page: 2, pageSize: 2 })).resolves.toMatchObject({
+      total: 3,
+      items: [{ id: 'player-earlier', publisherType: 'PLAYER', priceKind: 'CREDITS' }],
     })
   })
 })

@@ -118,12 +118,24 @@ export class ActiveAuctionSummaryResponseDto {
   id!: string
   @ApiProperty()
   sellerId!: string
+  @ApiProperty({ enum: ['PLAYER', 'GAME_MASTER'] })
+  publisherType!: 'PLAYER' | 'GAME_MASTER'
   @ApiProperty()
   productId!: string
-  @ApiProperty({ minimum: 1 })
-  minimumBidCredits!: number
+  @ApiProperty({ enum: ['CREDITS', 'REAL_MONEY'] })
+  priceKind!: 'CREDITS' | 'REAL_MONEY'
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  minimumBidCredits!: number | null
   @ApiPropertyOptional({ nullable: true, minimum: 1 })
   buyNowCredits!: number | null
+  @ApiPropertyOptional({ nullable: true, example: 'COP' })
+  currency!: string | null
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  minimumBidAmountMinor!: number | null
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  buyNowAmountMinor!: number | null
+  @ApiPropertyOptional({ nullable: true, enum: ['OFFICIAL', 'PREMIUM'] })
+  officialMark!: 'OFFICIAL' | 'PREMIUM' | null
   @ApiProperty({ enum: ['ACTIVE'] })
   status!: 'ACTIVE'
   @ApiProperty({ type: String, format: 'date-time' })
