@@ -28,6 +28,11 @@ export interface AuctionTable {
   closes_at: Timestamp
   inventory_commitment_id: string
   fee_charge_id: string
+  finished_at: Date | null
+  closing_result_type: string | null
+  winning_bid_id: string | null
+  winner_id: string | null
+  final_amount_credits: string | number | null
   created_at: GeneratedTimestamp
 }
 
@@ -76,6 +81,20 @@ export interface AuctionPublicationOperationTable {
   completed_at: Timestamp
 }
 
+export interface AuctionPublicationIntentTable {
+  operation_id: string
+  auction_id: string
+  seller_id: string
+  product_id: string
+  closes_at: Timestamp
+  inventory_commitment_id: string | null
+  inventory_status: 'PENDING' | 'COMMITTED' | 'RELEASED'
+  publication_status: 'PENDING' | 'COMPLETED' | 'FAILED_TERMINAL'
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
 export interface AuctionPublicationFailureTable {
   operation_id: string
   auction_id: string
@@ -112,12 +131,88 @@ export interface Database {
   auction_watchlist: AuctionWatchlistTable
   auctions: AuctionTable
   auction_bids: AuctionBidTable
+  auction_auto_bids: AuctionAutoBidTable
   auction_publication_operations: AuctionPublicationOperationTable
+  auction_publication_intents: AuctionPublicationIntentTable
   auction_publication_failures: AuctionPublicationFailureTable
   auction_bid_credit_operations: AuctionBidCreditOperationTable
   auction_bid_credit_failures: AuctionBidCreditFailureTable
   auction_audit_log: AuctionAuditLogTable
   outbox_events: OutboxEventTable
+  auction_settlements: AuctionSettlementTable
+  auction_settlement_releases: AuctionSettlementReleaseTable
+  auction_pending_claims: AuctionPendingClaimTable
+  auction_inventory_settlement_intents: AuctionInventorySettlementIntentTable
+  auction_settlement_work: AuctionSettlementWorkTable
+}
+
+export interface AuctionSettlementWorkTable {
+  auction_id: string
+  status: 'READY' | 'LEASED' | 'RETRYABLE' | 'COMPLETED' | 'TERMINAL'
+  available_at: Timestamp
+  lease_owner: string | null
+  lease_until: Timestamp | null
+  attempts: number
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+  completed_at: Timestamp | null
+  terminal_at: Timestamp | null
+}
+
+export interface AuctionInventorySettlementIntentTable {
+  auction_id: string
+  operation_id: string
+  action: 'RELEASE' | 'PENDING_CLAIM'
+  commitment_id: string
+  seller_id: string
+  product_id: string
+  winner_id: string | null
+  status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR'
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+  confirmed_at: Timestamp | null
+}
+
+export interface AuctionSettlementTable {
+  auction_id: string
+  status: string
+  result_type: string
+  winning_bid_id: string | null
+  winner_id: string | null
+  winning_hold_id: string | null
+  seller_id: string
+  final_amount_credits: string | number | null
+  capture_operation_id: string | null
+  capture_status: string
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
+  settled_at: Timestamp | null
+}
+export interface AuctionPendingClaimTable {
+  auction_id: string
+  winner_id: string
+  product_id: string
+  winning_bid_id: string
+  final_amount_credits: string | number
+  settled_at: Timestamp
+  claim_status: 'PENDING' | 'CLAIMED' | 'EXPIRED'
+  claimed_at: Timestamp | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+export interface AuctionSettlementReleaseTable {
+  auction_id: string
+  bid_id: string
+  hold_id: string
+  operation_id: string
+  status: string
+  reason: string
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
 }
 
 /** Identidad compuesta de seguimiento; player_id no referencia bases de otros servicios. */
@@ -125,4 +220,14 @@ export interface AuctionWatchlistTable {
   player_id: string
   auction_id: string
   followed_at: Timestamp
+}
+
+/** Clave primaria compuesta (auction_id, bidder_id): a lo sumo una fila por jugador y subasta. */
+export interface AuctionAutoBidTable {
+  auction_id: string
+  bidder_id: string
+  max_amount_credits: number
+  is_active: boolean
+  created_at: Timestamp
+  updated_at: Timestamp
 }

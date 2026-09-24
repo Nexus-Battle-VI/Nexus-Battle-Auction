@@ -17,15 +17,23 @@ import type {
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
   PersistBidResult,
+  FinishAuctionCommand,
   RecordBidCreditFailureCommand,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
+import type {
+  AuctionSettlementCandidate,
+  AuctionSettlementCandidateReaderPort,
+} from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
+import type { AuctionClosingOutcome } from '../../../domain/entities/Auction'
 import {
+  Auction,
   AuctionStatus,
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
+import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 import type { Database } from './schema'
 
@@ -34,6 +42,8 @@ type AuctionRow = Selectable<Database['auctions']>
 type AuctionBidRow = Selectable<Database['auction_bids']>
 
 type BidCreditOperationRow = Selectable<Database['auction_bid_credit_operations']>
+
+type AutoBidConfigRow = Selectable<Database['auction_auto_bids']>
 
 type AuctionDatabase = Kysely<Database> | Transaction<Database>
 
@@ -69,12 +79,41 @@ const toSnapshot = (row: AuctionRow): AuctionSnapshot => ({
   closesAt: new Date(row.closes_at),
 })
 
+const toAuction = (row: AuctionRow): Auction => {
+  if (row.status !== 'FINISHED' || row.finished_at === null) {
+    return Auction.rehydrate({ ...toSnapshot(row), finishedAt: null, closingResult: null })
+  }
+
+  return Auction.rehydrate({
+    ...toSnapshot(row),
+    finishedAt: row.finished_at,
+    closingResult: {
+      outcome: row.closing_result_type as AuctionClosingOutcome,
+      finishedAt: row.finished_at,
+      winnerId: row.winner_id,
+      winningBidId: row.winning_bid_id,
+      finalAmountCredits:
+        row.final_amount_credits === null ? null : Number(row.final_amount_credits),
+    },
+  })
+}
+
 const toBidSnapshot = (row: AuctionBidRow): BidSnapshot => ({
   id: row.id,
   auctionId: row.auction_id,
   bidderId: row.bidder_id,
   amountCredits: row.amount_credits,
   placedAt: new Date(row.placed_at),
+  ...(row.credit_reservation_id === null ? {} : { creditReservationId: row.credit_reservation_id }),
+})
+
+/** configuredAt refleja la ultima reconfiguracion (updated_at), no la primera (created_at). */
+const toAutoBidConfigSnapshot = (row: AutoBidConfigRow): AutoBidConfigSnapshot => ({
+  auctionId: row.auction_id,
+  bidderId: row.bidder_id,
+  maxAmountCredits: row.max_amount_credits,
+  configuredAt: new Date(row.updated_at),
+  isActive: row.is_active,
 })
 
 const toBidCreditOperationSnapshot = (row: BidCreditOperationRow): BidCreditOperationSnapshot => ({
@@ -103,6 +142,19 @@ const findAuction = async (
   return row === undefined ? null : toSnapshot(row)
 }
 
+const findAuctionAggregate = async (
+  db: AuctionDatabase,
+  auctionId: string,
+): Promise<Auction | null> => {
+  const row = await db
+    .selectFrom('auctions')
+    .selectAll()
+    .where('id', '=', auctionId)
+    .executeTakeFirst()
+
+  return row === undefined ? null : toAuction(row)
+}
+
 const findLeadingBid = async (
   db: AuctionDatabase,
   auctionId: string,
@@ -117,8 +169,47 @@ const findLeadingBid = async (
   return row === undefined ? null : toBidSnapshot(row)
 }
 
-export class PostgresAuctionRepository implements AuctionRepositoryPort {
+export class PostgresAuctionRepository
+  implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
+{
+  /** Consulta determinista para el scheduler de recordatorios de HU-68. */
+  async findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]> {
+    const rows = await this.db
+      .selectFrom('auctions')
+      .selectAll()
+      .where('status', '=', AuctionStatus.Active)
+      .where('closes_at', '>', from)
+      .where('closes_at', '<=', until)
+      .orderBy('closes_at', 'asc')
+      .execute()
+    return rows.map(toSnapshot)
+  }
   constructor(private readonly db: Kysely<Database>) {}
+  async finishAuction(command: FinishAuctionCommand): Promise<void> {
+    const result = command.closingResult.snapshot()
+    const update = await this.db
+      .updateTable('auctions')
+      .set({
+        status: AuctionStatus.Finished,
+        finished_at: command.finishedAt,
+        closing_result_type: result.outcome,
+        winning_bid_id: result.winningBidId,
+        winner_id: result.winnerId,
+        final_amount_credits: result.finalAmountCredits,
+      })
+      .where('id', '=', command.auctionId)
+      .where('status', '=', AuctionStatus.Active)
+      .executeTakeFirst()
+    if (update.numUpdatedRows === 0n) {
+      const current = await this.db
+        .selectFrom('auctions')
+        .select('status')
+        .where('id', '=', command.auctionId)
+        .executeTakeFirst()
+      if (current === undefined) throw new PersistedAuctionNotFoundError(command.auctionId)
+      throw new Error('La subasta ya fue finalizada.')
+    }
+  }
 
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     return this.db.transaction().execute(async (transaction) => {
@@ -520,6 +611,37 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
     return findAuction(this.db, auctionId)
   }
 
+  async findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
+    const rows = await this.db
+      .selectFrom('auctions')
+      .select(['id', 'status', 'closes_at'])
+      .where('closes_at', '<=', now)
+      .where('status', 'in', [AuctionStatus.Active, AuctionStatus.Finished])
+      .orderBy('closes_at', 'asc')
+      .orderBy('id', 'asc')
+      .execute()
+
+    return rows.map((row) => ({
+      auctionId: row.id,
+      status: row.status as AuctionStatus,
+      closesAt: new Date(row.closes_at),
+    }))
+  }
+
+  findAuctionAggregate(auctionId: string): Promise<Auction | null> {
+    return findAuctionAggregate(this.db, auctionId)
+  }
+
+  async findInventoryCommitmentId(auctionId: string): Promise<string | null> {
+    const row = await this.db
+      .selectFrom('auctions')
+      .select('inventory_commitment_id')
+      .where('id', '=', auctionId)
+      .executeTakeFirst()
+
+    return row?.inventory_commitment_id ?? null
+  }
+
   async recordFailure(command: RecordPublicationFailureCommand): Promise<void> {
     await this.db
       .insertInto('auction_publication_failures')
@@ -595,5 +717,71 @@ export class PostgresAuctionRepository implements AuctionRepositoryPort {
       .executeTakeFirstOrThrow()
 
     return row.amount
+  }
+
+  async saveAutoBidConfig(config: AutoBidConfig): Promise<AutoBidConfigSnapshot> {
+    const snapshot = config.snapshot()
+
+    try {
+      const row = await this.db
+        .insertInto('auction_auto_bids')
+        .values({
+          auction_id: snapshot.auctionId,
+          bidder_id: snapshot.bidderId,
+          max_amount_credits: snapshot.maxAmountCredits,
+          is_active: snapshot.isActive,
+          created_at: snapshot.configuredAt,
+          updated_at: snapshot.configuredAt,
+        })
+        .onConflict((conflict) =>
+          conflict.columns(['auction_id', 'bidder_id']).doUpdateSet({
+            max_amount_credits: snapshot.maxAmountCredits,
+            is_active: snapshot.isActive,
+            updated_at: snapshot.configuredAt,
+          }),
+        )
+        .returningAll()
+        .executeTakeFirstOrThrow()
+
+      return toAutoBidConfigSnapshot(row)
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && 'constraint' in error) {
+        if (error.code === '23503' && error.constraint === 'auction_auto_bids_auction_fk') {
+          throw new PersistedAuctionNotFoundError(snapshot.auctionId)
+        }
+      }
+
+      throw error
+    }
+  }
+
+  async findAutoBidConfig(
+    auctionId: string,
+    bidderId: string,
+  ): Promise<AutoBidConfigSnapshot | null> {
+    const row = await this.db
+      .selectFrom('auction_auto_bids')
+      .selectAll()
+      .where('auction_id', '=', auctionId)
+      .where('bidder_id', '=', bidderId)
+      .executeTakeFirst()
+
+    return row === undefined ? null : toAutoBidConfigSnapshot(row)
+  }
+
+  async findActiveAutoBidsForAuction(
+    auctionId: string,
+    excludeBidderId: string,
+  ): Promise<readonly AutoBidConfigSnapshot[]> {
+    const rows = await this.db
+      .selectFrom('auction_auto_bids')
+      .selectAll()
+      .where('auction_id', '=', auctionId)
+      .where('is_active', '=', true)
+      .where('bidder_id', '!=', excludeBidderId)
+      .orderBy('bidder_id', 'asc')
+      .execute()
+
+    return rows.map(toAutoBidConfigSnapshot)
   }
 }

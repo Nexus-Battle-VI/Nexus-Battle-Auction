@@ -29,6 +29,9 @@ const config: Config = {
     'src/adapters/outbound/persistence/Postgres*.ts',
     // TASK 68.1 mide tambien el DDL nuevo, ejercitado con up/down contra PostgreSQL.
     'src/adapters/outbound/persistence/migrations/003-create-auction-watchlist.ts',
+    // HU-67.4 mide el DDL de puja automatica, ejercitado con up/down contra PostgreSQL.
+    'src/adapters/outbound/persistence/migrations/006-create-auction-auto-bids.ts',
+    'src/adapters/outbound/persistence/migrations/011-create-auction-settlement-work.ts',
     'src/infrastructure/persistence/**/*.ts',
     '!src/infrastructure/persistence/migrate.ts',
   ],

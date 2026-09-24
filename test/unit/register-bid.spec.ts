@@ -8,10 +8,12 @@ import type {
   PersistBidResult,
 } from '../../src/application/ports/AuctionRepositoryPort'
 import type {
+  AutoBidLimitReachedNotification,
   OutbidNotification,
   OutbidNotificationPort,
 } from '../../src/application/ports/OutbidNotificationPort'
 import type { PersistBidWithCredits } from '../../src/application/use-cases/PersistBidWithCredits'
+import type { ReactToRivalBid } from '../../src/application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { AuctionStatus, type AuctionSnapshot } from '../../src/domain/entities/Auction'
 import type { BidSnapshot } from '../../src/domain/entities/Bid'
@@ -97,6 +99,14 @@ const dependencies = () => {
 
       return Promise.resolve()
     }),
+
+    publishAutoBidLimitReached: jest.fn(
+      (notification: AutoBidLimitReachedNotification): Promise<void> => {
+        void notification
+
+        return Promise.resolve()
+      },
+    ),
   }
 
   const clock = {
@@ -107,13 +117,25 @@ const dependencies = () => {
     generate: jest.fn(() => 'bid-generated'),
   }
 
-  const useCase = new RegisterBid(repository, persistence, clock, identifiers, notifications)
+  const autoBidReactor: jest.Mocked<ReactToRivalBid> = {
+    execute: jest.fn(() => Promise.resolve()),
+  } as unknown as jest.Mocked<ReactToRivalBid>
+
+  const useCase = new RegisterBid(
+    repository,
+    persistence,
+    clock,
+    identifiers,
+    notifications,
+    autoBidReactor,
+  )
 
   return {
     repository,
     persistence,
     notifications,
     identifiers,
+    autoBidReactor,
     useCase,
   }
 }
@@ -165,6 +187,30 @@ describe('RegisterBid HU-63.4 / HU-63.5', () => {
       bidderId: 'bidder-2',
       amountCredits: 30,
       placedAt: now,
+    })
+  })
+
+  it('dispara el motor de reaccion de pujas automaticas tras persistir', async () => {
+    const { autoBidReactor, useCase } = dependencies()
+
+    await useCase.execute({
+      operationId: 'operation-auto-bid-trigger',
+      auctionId: auction.id,
+      bidderId: 'bidder-2',
+      amountCredits: 30,
+    })
+
+    expect(autoBidReactor.execute).toHaveBeenCalledTimes(1)
+
+    expect(autoBidReactor.execute).toHaveBeenCalledWith({
+      operationId: 'operation-auto-bid-trigger',
+      leadingBid: {
+        id: 'bid-generated',
+        auctionId: auction.id,
+        bidderId: 'bidder-2',
+        amountCredits: 30,
+        placedAt: now,
+      },
     })
   })
 

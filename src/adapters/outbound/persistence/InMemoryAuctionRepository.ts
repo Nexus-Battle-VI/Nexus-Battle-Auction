@@ -4,6 +4,7 @@ import {
   ActiveAuctionLimitExceededError,
   BidAlreadyExistsError,
   IdempotencyConflictError,
+  PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
 import type {
   AuctionRepositoryPort,
@@ -12,14 +13,22 @@ import type {
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
   PersistBidResult,
+  FinishAuctionCommand,
   RecordBidCreditFailureCommand,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
+import type {
+  AuctionSettlementCandidate,
+  AuctionSettlementCandidateReaderPort,
+} from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
 import {
+  Auction,
+  AuctionStatus,
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
+import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 
 interface OperationRecord {
@@ -55,6 +64,11 @@ const cloneBid = (bid: BidSnapshot): BidSnapshot => ({
   placedAt: new Date(bid.placedAt),
 })
 
+const toBidSnapshot = (bid: StoredBid): BidSnapshot => ({
+  ...cloneBid(bid.snapshot),
+  ...(bid.creditReservationId === null ? {} : { creditReservationId: bid.creditReservationId }),
+})
+
 const cloneBidCreditOperation = (
   operation: BidCreditOperationSnapshot,
 ): BidCreditOperationSnapshot => ({
@@ -63,8 +77,33 @@ const cloneBidCreditOperation = (
   updatedAt: new Date(operation.updatedAt),
 })
 
-export class InMemoryAuctionRepository implements AuctionRepositoryPort {
+const cloneAutoBidConfig = (config: AutoBidConfigSnapshot): AutoBidConfigSnapshot => ({
+  ...config,
+  configuredAt: new Date(config.configuredAt),
+})
+
+const autoBidKey = (auctionId: string, bidderId: string): string => `${auctionId}:${bidderId}`
+
+const cloneAuction = (auction: AuctionSnapshot): AuctionSnapshot => ({
+  ...auction,
+  publishedAt: new Date(auction.publishedAt),
+  closesAt: new Date(auction.closesAt),
+  ...(auction.completion === undefined
+    ? {}
+    : {
+        completion: {
+          ...auction.completion,
+          finishedAt: new Date(auction.completion.finishedAt),
+        },
+      }),
+})
+
+export class InMemoryAuctionRepository
+  implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
+{
   private readonly auctions = new Map<string, AuctionSnapshot>()
+
+  private readonly inventoryCommitmentIds = new Map<string, string>()
 
   private readonly operations = new Map<string, OperationRecord>()
 
@@ -77,6 +116,8 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
   private readonly bids = new Map<string, StoredBid>()
 
   private readonly leadingBidByAuction = new Map<string, string>()
+
+  private readonly autoBidConfigs = new Map<string, AutoBidConfigSnapshot>()
 
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     const hash = hashOf(command)
@@ -107,6 +148,7 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     }
 
     this.auctions.set(snapshot.id, snapshot)
+    this.inventoryCommitmentIds.set(snapshot.id, command.inventoryCommitmentId)
 
     this.operations.set(command.operationId, {
       hash,
@@ -203,7 +245,65 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
   }
 
   findById(auctionId: string): Promise<AuctionSnapshot | null> {
-    return Promise.resolve(this.auctions.get(auctionId) ?? null)
+    const auction = this.auctions.get(auctionId)
+
+    return Promise.resolve(auction === undefined ? null : cloneAuction(auction))
+  }
+
+  findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
+    return Promise.resolve(
+      [...this.auctions.values()]
+        .filter((auction) => auction.closesAt.getTime() <= now.getTime())
+        .map((auction) => ({
+          auctionId: auction.id,
+          status: auction.status,
+          closesAt: new Date(auction.closesAt),
+        }))
+        .sort(
+          (left, right) =>
+            left.closesAt.getTime() - right.closesAt.getTime() ||
+            left.auctionId.localeCompare(right.auctionId),
+        ),
+    )
+  }
+
+  findAuctionAggregate(auctionId: string): Promise<Auction | null> {
+    const auction = this.auctions.get(auctionId)
+
+    if (auction === undefined) {
+      return Promise.resolve(null)
+    }
+
+    const snapshot = cloneAuction(auction)
+
+    return Promise.resolve(
+      Auction.rehydrate({
+        ...snapshot,
+        finishedAt:
+          snapshot.status === AuctionStatus.Finished
+            ? (snapshot.completion?.finishedAt ?? null)
+            : null,
+        closingResult:
+          snapshot.status === AuctionStatus.Finished ? (snapshot.completion ?? null) : null,
+      }),
+    )
+  }
+
+  findInventoryCommitmentId(auctionId: string): Promise<string | null> {
+    return Promise.resolve(this.inventoryCommitmentIds.get(auctionId) ?? null)
+  }
+
+  /** Replica la ventana `(from, until]` utilizada por PostgreSQL. */
+  findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]> {
+    return Promise.resolve(
+      [...this.auctions.values()]
+        .filter(
+          (auction) =>
+            auction.closesAt.getTime() > from.getTime() &&
+            auction.closesAt.getTime() <= until.getTime(),
+        )
+        .sort((a, b) => a.closesAt.getTime() - b.closesAt.getTime()),
+    )
   }
 
   countActiveBySeller(sellerId: string): Promise<number> {
@@ -230,7 +330,7 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     const previousStored =
       previousLeaderId === undefined ? null : (this.bids.get(previousLeaderId) ?? null)
 
-    const previousLeader = previousStored === null ? null : cloneBid(previousStored.snapshot)
+    const previousLeader = previousStored === null ? null : toBidSnapshot(previousStored)
 
     const previousLeaderReservationId =
       previousStored === null ? null : previousStored.creditReservationId
@@ -285,7 +385,7 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
     }
 
     return Promise.resolve({
-      bid: cloneBid(stored.snapshot),
+      bid: toBidSnapshot(stored),
       previousLeader,
       previousLeaderReservationId,
     })
@@ -304,15 +404,14 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
       return Promise.resolve(null)
     }
 
-    return Promise.resolve(cloneBid(stored.snapshot))
+    return Promise.resolve(toBidSnapshot(stored))
   }
 
   findBidHistory(auctionId: string): Promise<readonly BidSnapshot[]> {
     const history = [...this.bids.values()]
-      .map((stored) => stored.snapshot)
-      .filter((bid) => bid.auctionId === auctionId)
-      .sort((left, right) => left.placedAt.getTime() - right.placedAt.getTime())
-      .map(cloneBid)
+      .filter((stored) => stored.snapshot.auctionId === auctionId)
+      .sort((left, right) => left.snapshot.placedAt.getTime() - right.snapshot.placedAt.getTime())
+      .map(toBidSnapshot)
 
     return Promise.resolve(history)
   }
@@ -332,6 +431,55 @@ export class InMemoryAuctionRepository implements AuctionRepositoryPort {
       .filter((stored): stored is StoredBid => stored?.snapshot.bidderId === bidderId).length
 
     return Promise.resolve(activeBidCount)
+  }
+
+  saveAutoBidConfig(config: AutoBidConfig): Promise<AutoBidConfigSnapshot> {
+    const snapshot = config.snapshot()
+
+    if (!this.auctions.has(snapshot.auctionId)) {
+      return Promise.reject(new PersistedAuctionNotFoundError(snapshot.auctionId))
+    }
+
+    const stored = cloneAutoBidConfig(snapshot)
+
+    this.autoBidConfigs.set(autoBidKey(snapshot.auctionId, snapshot.bidderId), stored)
+
+    return Promise.resolve(cloneAutoBidConfig(stored))
+  }
+
+  findAutoBidConfig(auctionId: string, bidderId: string): Promise<AutoBidConfigSnapshot | null> {
+    const stored = this.autoBidConfigs.get(autoBidKey(auctionId, bidderId))
+
+    return Promise.resolve(stored === undefined ? null : cloneAutoBidConfig(stored))
+  }
+
+  findActiveAutoBidsForAuction(
+    auctionId: string,
+    excludeBidderId: string,
+  ): Promise<readonly AutoBidConfigSnapshot[]> {
+    const configs = [...this.autoBidConfigs.values()]
+      .filter(
+        (config) =>
+          config.auctionId === auctionId && config.isActive && config.bidderId !== excludeBidderId,
+      )
+      .map(cloneAutoBidConfig)
+
+    return Promise.resolve(configs)
+  }
+
+  finishAuction(command: FinishAuctionCommand): Promise<void> {
+    const auction = this.auctions.get(command.auctionId)
+    if (auction === undefined) throw new Error(`No existe ${command.auctionId}`)
+    if (auction.status !== AuctionStatus.Active) throw new Error('La subasta ya fue finalizada.')
+    this.auctions.set(command.auctionId, {
+      ...auction,
+      status: AuctionStatus.Finished,
+      completion: {
+        ...command.closingResult.snapshot(),
+        finishedAt: new Date(command.finishedAt),
+      },
+    })
+    return Promise.resolve()
   }
 
   private count(sellerId: string): number {

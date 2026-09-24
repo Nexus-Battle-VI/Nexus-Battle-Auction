@@ -15,6 +15,13 @@ import * as createAuctionPublication from '../../adapters/outbound/persistence/m
 import * as addBidCreditReservation from '../../adapters/outbound/persistence/migrations/003-add-bid-credit-reservation'
 import * as createBidCreditFailures from '../../adapters/outbound/persistence/migrations/004-create-bid-credit-failures'
 import * as createBidCreditOperations from '../../adapters/outbound/persistence/migrations/005-create-bid-credit-operations'
+import * as createAuctionAutoBids from '../../adapters/outbound/persistence/migrations/006-create-auction-auto-bids'
+import * as createAuctionSettlements from '../../adapters/outbound/persistence/migrations/007-create-auction-settlements'
+import * as createAuctionPendingClaims from '../../adapters/outbound/persistence/migrations/008-create-auction-pending-claims'
+import * as createAuctionPublicationIntents from '../../adapters/outbound/persistence/migrations/009-create-auction-publication-intents'
+import * as createAuctionInventorySettlementIntents from '../../adapters/outbound/persistence/migrations/010-create-auction-inventory-settlement-intents'
+import * as createAuctionSettlementWork from '../../adapters/outbound/persistence/migrations/011-create-auction-settlement-work'
+import * as allowExpiredAuctionPendingClaims from '../../adapters/outbound/persistence/migrations/012-allow-expired-auction-pending-claims'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
@@ -85,6 +92,13 @@ export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '003-add-bid-credit-reservation': addBidCreditReservation,
   '004-create-bid-credit-failures': createBidCreditFailures,
   '005-create-bid-credit-operations': createBidCreditOperations,
+  '006-create-auction-auto-bids': createAuctionAutoBids,
+  '007-create-auction-settlements': createAuctionSettlements,
+  '008-create-auction-pending-claims': createAuctionPendingClaims,
+  '009-create-auction-publication-intents': createAuctionPublicationIntents,
+  '010-create-auction-inventory-settlement-intents': createAuctionInventorySettlementIntents,
+  '011-create-auction-settlement-work': createAuctionSettlementWork,
+  '012-allow-expired-auction-pending-claims': allowExpiredAuctionPendingClaims,
 }
 
 export interface MigrationOutcome {

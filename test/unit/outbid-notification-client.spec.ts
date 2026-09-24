@@ -5,7 +5,10 @@ import {
   ExternalContractError,
   ExternalDependencyUnavailableError,
 } from '../../src/application/errors/ExternalDependencyError'
-import type { OutbidNotification } from '../../src/application/ports/OutbidNotificationPort'
+import type {
+  AutoBidLimitReachedNotification,
+  OutbidNotification,
+} from '../../src/application/ports/OutbidNotificationPort'
 
 const fixedNow = new Date('2026-09-22T03:00:00.000Z')
 
@@ -230,5 +233,93 @@ describe('HttpOutbidNotificationClient HU-63.5', () => {
     await expect(client(fetchImpl).publish(notification)).rejects.toBeInstanceOf(
       ExternalDependencyUnavailableError,
     )
+  })
+})
+
+describe('HttpOutbidNotificationClient HU-67.3: aviso de limite de puja automatica alcanzado', () => {
+  const limitReached: AutoBidLimitReachedNotification = {
+    notificationId: 'operation-67-2:auto:limit:bidder-auto',
+
+    operationId: 'operation-67-2',
+
+    recipientPlayerId: 'bidder-auto',
+
+    auctionId: 'auction-67-2',
+
+    autoBidLimitCredits: 100,
+
+    requiredAmountCredits: 110,
+
+    leadingBidderId: 'bidder-strong',
+
+    occurredAt: new Date('2026-09-22T02:00:00.000Z'),
+  }
+
+  it('envia el payload correcto al endpoint interno dedicado', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(
+        response(201, {
+          notificationId: limitReached.notificationId,
+
+          status: 'created',
+        }),
+      ),
+    )
+
+    await expect(
+      client(fetchImpl).publishAutoBidLimitReached(limitReached),
+    ).resolves.toBeUndefined()
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+    const [url, request] = fetchImpl.mock.calls[0]!
+
+    expect(url).toBe(
+      'http://notifications:3005/api/internal/v1/notifications/auction/auto-bid-limit-reached',
+    )
+
+    const body = JSON.parse(requireStringBody(request?.body)) as Record<string, unknown>
+
+    expect(body).toEqual({
+      notificationId: 'operation-67-2:auto:limit:bidder-auto',
+
+      operationId: 'operation-67-2',
+
+      recipientPlayerId: 'bidder-auto',
+
+      auctionId: 'auction-67-2',
+
+      autoBidLimitCredits: 100,
+
+      requiredAmountCredits: 110,
+
+      leadingBidderId: 'bidder-strong',
+
+      occurredAt: '2026-09-22T02:00:00.000Z',
+    })
+  })
+
+  it('trata una respuesta no exitosa como dependencia no disponible', async () => {
+    const fetchImpl = mockFetch(() => Promise.resolve(response(503, {})))
+
+    await expect(client(fetchImpl).publishAutoBidLimitReached(limitReached)).rejects.toBeInstanceOf(
+      ExternalDependencyUnavailableError,
+    )
+  })
+
+  it('acepta un replay idempotente confirmado por Notifications', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(
+        response(200, {
+          notificationId: limitReached.notificationId,
+
+          status: 'duplicated',
+        }),
+      ),
+    )
+
+    await expect(
+      client(fetchImpl).publishAutoBidLimitReached(limitReached),
+    ).resolves.toBeUndefined()
   })
 })

@@ -13,6 +13,8 @@ import type { ClockPort } from '../ports/ClockPort'
 import type { IdentifierGeneratorPort } from '../ports/IdentifierGeneratorPort'
 import type { OutbidNotificationPort } from '../ports/OutbidNotificationPort'
 import type { PersistBidWithCredits } from './PersistBidWithCredits'
+import type { NotifyWatchlistChange } from './NotifyWatchlistChange'
+import type { ReactToRivalBid } from './ReactToRivalBid'
 
 export interface RegisterBidCommand {
   readonly operationId: string
@@ -28,6 +30,8 @@ export class RegisterBid {
     private readonly clock: ClockPort,
     private readonly identifiers: IdentifierGeneratorPort,
     private readonly notifications: OutbidNotificationPort,
+    private readonly autoBidReactor: ReactToRivalBid,
+    private readonly watchlistChanges?: NotifyWatchlistChange,
   ) {}
 
   async execute(command: RegisterBidCommand): Promise<BidSnapshot> {
@@ -106,6 +110,12 @@ export class RegisterBid {
     })
 
     await this.notifyPreviousLeader(command.operationId, result)
+    await this.notifyWatchers(command.operationId, result.bid)
+
+    await this.autoBidReactor.execute({
+      operationId: command.operationId,
+      leadingBid: result.bid,
+    })
 
     return result.bid
   }
@@ -155,6 +165,12 @@ export class RegisterBid {
      * Notifications.
      */
     await this.notifyPreviousLeader(command.operationId, result)
+    await this.notifyWatchers(command.operationId, result.bid)
+
+    await this.autoBidReactor.execute({
+      operationId: command.operationId,
+      leadingBid: result.bid,
+    })
 
     return result.bid
   }
@@ -206,6 +222,21 @@ export class RegisterBid {
        * Un replay del mismo Idempotency-Key vuelve a utilizar
        * el mismo notificationId.
        */
+    }
+  }
+
+  /** Una falla de Notifications no revierte una puja ya confirmada. */
+  private async notifyWatchers(operationId: string, bid: BidSnapshot): Promise<void> {
+    if (this.watchlistChanges === undefined) return
+    try {
+      await this.watchlistChanges.execute({
+        eventId: `${operationId}:watchlist-change`,
+        auctionId: bid.auctionId,
+        changeType: 'LEADING_BID_CHANGED',
+        occurredAt: bid.placedAt,
+      })
+    } catch {
+      // El eventId estable permite reintentar la reacción sin duplicar al consumidor.
     }
   }
 

@@ -5,6 +5,7 @@ import type { CatalogProductPolicyPort } from '../ports/CatalogProductPolicyPort
 import type { ClockPort } from '../ports/ClockPort'
 import type { IdentifierGeneratorPort } from '../ports/IdentifierGeneratorPort'
 import type { ProductInventoryPort } from '../ports/ProductInventoryPort'
+import type { AuctionPublicationIntentRepositoryPort } from '../ports/AuctionPublicationIntentRepositoryPort'
 import type { SellerSanctionPort } from '../ports/SellerSanctionPort'
 import type { PersistAuctionPublication } from './PersistAuctionPublication'
 
@@ -26,6 +27,7 @@ export class PublishAuction {
     private readonly persistence: PersistAuctionPublication,
     private readonly clock: ClockPort,
     private readonly identifiers: IdentifierGeneratorPort,
+    private readonly intents: AuctionPublicationIntentRepositoryPort,
   ) {}
 
   async execute(command: PublishAuctionCommand): Promise<AuctionSnapshot> {
@@ -37,14 +39,14 @@ export class PublishAuction {
         this.repository.countActiveBySeller(command.sellerId),
       ])
 
-    const auction = Auction.publish({
-      auctionId: this.identifiers.generate(),
+    const publishedAt = this.clock.now()
+    const publication = {
       sellerId: command.sellerId,
       productId: command.productId,
       durationHours: command.durationHours,
       minimumBidCredits: command.minimumBidCredits,
       buyNowCredits: command.buyNowCredits,
-      publishedAt: this.clock.now(),
+      publishedAt,
       eligibility: {
         productOwnedBySeller: inventoryEligibility.ownedByPlayer,
         productInUse: inventoryEligibility.inUse,
@@ -52,6 +54,23 @@ export class PublishAuction {
         sellerHasActiveSanctions,
         activeAuctionCount,
       },
+    }
+    const proposed = Auction.publish({ auctionId: this.identifiers.generate(), ...publication })
+    const intent = await this.intents.getOrCreate({
+      operationId: command.operationId,
+      auctionId: proposed.id.value,
+      sellerId: command.sellerId,
+      productId: command.productId,
+      closesAt: proposed.closesAt,
+      createdAt: publishedAt,
+    })
+    const resumedPublishedAt = new Date(
+      intent.closesAt.getTime() - command.durationHours * 60 * 60 * 1_000,
+    )
+    const auction = Auction.publish({
+      auctionId: intent.auctionId,
+      ...publication,
+      publishedAt: resumedPublishedAt,
     })
 
     return (await this.persistence.execute({ operationId: command.operationId, auction })).auction
