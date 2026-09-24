@@ -17,12 +17,15 @@ import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpO
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
+import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
+  UnavailableEarlyClosureNotification,
   UnavailableProductInventory,
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
+  UnavailableWallet,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
 import { UnavailableWatchlistEventPublisher } from '../../adapters/outbound/http/UnavailableWatchlistEventPublisher'
@@ -43,6 +46,7 @@ import { InMemoryAuctionSettlementRepository } from '../../adapters/outbound/per
 import { InMemoryAuctionSettlementOutboxRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementOutboxRepository'
 import { InMemoryAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementWorkRepository'
 import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persistence/InMemoryBidCreditOperationReader'
+import { InMemoryEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
 import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
@@ -51,6 +55,7 @@ import { PostgresAuctionSettlementRepository } from '../../adapters/outbound/per
 import { PostgresAuctionSettlementOutboxRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementOutboxRepository'
 import { PostgresAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementWorkRepository'
 import { PostgresBidCreditOperationReader } from '../../adapters/outbound/persistence/PostgresBidCreditOperationReader'
+import { PostgresEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/PostgresEarlyClosureNotificationRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 import { SystemClock } from '../../adapters/outbound/system/SystemClock'
 import { UuidGenerator } from '../../adapters/outbound/system/UuidGenerator'
@@ -69,9 +74,14 @@ import {
 } from '../../application/ports/CatalogProductPolicyPort'
 import { CLOCK, type ClockPort } from '../../application/ports/ClockPort'
 import {
+  EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+  type EarlyClosureNotificationRepositoryPort,
+} from '../../application/ports/EarlyClosureNotificationRepositoryPort'
+import {
   IDENTIFIER_GENERATOR,
   type IdentifierGeneratorPort,
 } from '../../application/ports/IdentifierGeneratorPort'
+import { NOTIFICATION, type NotificationPort } from '../../application/ports/NotificationPort'
 import {
   OUTBID_NOTIFICATION,
   type OutbidNotificationPort,
@@ -132,6 +142,9 @@ import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchli
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
+import { WALLET, type WalletPort } from '../../application/ports/WalletPort'
+import { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
+import { ExecuteBuyNowUseCase } from '../../application/use-cases/ExecuteBuyNowUseCase'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
@@ -145,6 +158,8 @@ import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
+import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
+import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -717,6 +732,33 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
     },
 
     {
+      provide: WALLET,
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): WalletPort =>
+        config.walletBaseUrl === null || config.internalServiceAuthSecret === null
+          ? new UnavailableWallet()
+          : new WalletHttpClient({
+              baseUrl: config.walletBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: config.walletRequestTimeoutMs,
+              logger,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
+      provide: NOTIFICATION,
+      useFactory: (): NotificationPort => new UnavailableEarlyClosureNotification(),
+    },
+    {
+      provide: EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): EarlyClosureNotificationRepositoryPort =>
+        db === null
+          ? new InMemoryEarlyClosureNotificationRepository()
+          : new PostgresEarlyClosureNotificationRepository(db),
+      inject: [DATABASE],
+    },
+    {
       provide: PersistAuctionPublication,
 
       useFactory: (
@@ -900,6 +942,66 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
       inject: [AUCTION_REPOSITORY, CLOCK],
     },
 
+    {
+      provide: TransactionProcessingService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        wallet: WalletPort,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): TransactionProcessingService =>
+        new TransactionProcessingService(repository, wallet, clock, identifiers),
+      inject: [AUCTION_REPOSITORY, WALLET, CLOCK, IDENTIFIER_GENERATOR],
+    },
+    {
+      provide: BuyNowDomainService,
+      useFactory: (): BuyNowDomainService => new BuyNowDomainService(),
+    },
+    {
+      provide: EarlyClosureNotificationService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        notifications: EarlyClosureNotificationRepositoryPort,
+        credits: BidCreditsPort,
+        notifier: NotificationPort,
+        clock: ClockPort,
+      ): EarlyClosureNotificationService =>
+        new EarlyClosureNotificationService(repository, notifications, credits, notifier, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+        BID_CREDITS,
+        NOTIFICATION,
+        CLOCK,
+      ],
+    },
+    {
+      provide: ExecuteBuyNowUseCase,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        wallet: WalletPort,
+        domainService: BuyNowDomainService,
+        transactions: TransactionProcessingService,
+        earlyClosure: EarlyClosureNotificationService,
+        clock: ClockPort,
+      ): ExecuteBuyNowUseCase =>
+        new ExecuteBuyNowUseCase(
+          repository,
+          wallet,
+          domainService,
+          transactions,
+          earlyClosure,
+          clock,
+        ),
+      inject: [
+        AUCTION_REPOSITORY,
+        WALLET,
+        BuyNowDomainService,
+        TransactionProcessingService,
+        EarlyClosureNotificationService,
+        CLOCK,
+      ],
+    },
     {
       provide: TOKEN_VERIFIER,
 

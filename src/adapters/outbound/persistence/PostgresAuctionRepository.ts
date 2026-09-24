@@ -9,11 +9,18 @@ import {
   IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
+import {
+  AuctionAlreadyClosedError,
+  BuyNowIdempotencyConflictError,
+} from '../../../application/errors/BuyNowTransactionError'
 import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
   BidCreditOperationSnapshot,
   BidCreditOperationStatus,
+  BuyNowOperationRecord,
+  CloseAuctionByBuyNowCommand,
+  CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
@@ -21,6 +28,7 @@ import type {
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
+  RecordBuyNowFailureCommand,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
@@ -156,6 +164,11 @@ const findAuctionAggregate = async (
 
   return row === undefined ? null : toAuction(row)
 }
+
+const buyNowRequestHash = (command: CloseAuctionByBuyNowCommand): string =>
+  createHash('sha256')
+    .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]), 'utf8')
+    .digest('hex')
 
 const findLeadingBid = async (
   db: AuctionDatabase,
@@ -466,6 +479,16 @@ export class PostgresAuctionRepository
       .selectFrom('auction_bid_credit_operations')
       .selectAll()
       .where('operation_id', '=', operationId)
+      .executeTakeFirst()
+
+    return row === undefined ? null : toBidCreditOperationSnapshot(row)
+  }
+
+  async findBidCreditOperationByBid(bidId: string): Promise<BidCreditOperationSnapshot | null> {
+    const row = await this.db
+      .selectFrom('auction_bid_credit_operations')
+      .selectAll()
+      .where('bid_id', '=', bidId)
       .executeTakeFirst()
 
     return row === undefined ? null : toBidCreditOperationSnapshot(row)
@@ -834,5 +857,191 @@ export class PostgresAuctionRepository
       .execute()
 
     return rows.map(toAutoBidConfigSnapshot)
+  }
+
+  closeByBuyNow(command: CloseAuctionByBuyNowCommand): Promise<CloseAuctionByBuyNowResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const hash = buyNowRequestHash(command)
+
+      // Serializa reintentos de la misma operacion.
+      await sql`
+          select pg_advisory_xact_lock(
+            hashtext(${command.operationId})
+          )
+        `.execute(transaction)
+
+      const previousOperation = await transaction
+        .selectFrom('auction_buy_now_operations')
+        .select(['request_hash', 'auction_id', 'transaction_id'])
+        .where('operation_id', '=', command.operationId)
+        .executeTakeFirst()
+
+      if (previousOperation !== undefined) {
+        if (previousOperation.request_hash !== hash) {
+          throw new BuyNowIdempotencyConflictError()
+        }
+
+        const auction = await findAuction(transaction, previousOperation.auction_id)
+
+        if (auction === null) {
+          throw new PersistedAuctionNotFoundError(previousOperation.auction_id)
+        }
+
+        return {
+          auction,
+          transactionId: previousOperation.transaction_id,
+          replayed: true,
+        }
+      }
+
+      // Serializa cualquier otra compra inmediata (o cierre) que compita por
+      // la MISMA subasta: solo una gana la carrera.
+      await sql`
+          select pg_advisory_xact_lock(
+            hashtext(${command.auctionId})
+          )
+        `.execute(transaction)
+
+      const auctionRow = await transaction
+        .selectFrom('auctions')
+        .selectAll()
+        .where('id', '=', command.auctionId)
+        .executeTakeFirst()
+
+      if (auctionRow === undefined) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      if (auctionRow.status !== (AuctionStatus.Active as string)) {
+        throw new AuctionAlreadyClosedError(command.auctionId)
+      }
+
+      await transaction
+        .updateTable('auctions')
+        .set({ status: AuctionStatus.SoldByBuyNow, closes_at: command.closedAt })
+        .where('id', '=', command.auctionId)
+        .execute()
+
+      await transaction
+        .insertInto('auction_buy_now_operations')
+        .values({
+          operation_id: command.operationId,
+          request_hash: hash,
+          auction_id: command.auctionId,
+          buyer_id: command.buyerId,
+          transfer_id: command.transferId,
+          price_credits: command.priceCredits,
+          remaining_credits: command.remainingCredits,
+          transaction_id: command.transactionId,
+          completed_at: command.closedAt,
+        })
+        .execute()
+
+      await transaction
+        .insertInto('auction_audit_log')
+        .values({
+          auction_id: command.auctionId,
+          operation_id: command.operationId,
+          action: 'AUCTION_CLOSED_BY_BUY_NOW',
+          actor_id: command.buyerId,
+          occurred_at: command.closedAt,
+          details: {
+            transferId: command.transferId,
+            priceCredits: command.priceCredits,
+            transactionId: command.transactionId,
+          },
+        })
+        .execute()
+
+      // HU-64.5 consume este evento para notificar a los demas participantes y
+      // liberar los creditos reservados de sus pujas perdedoras. `productId`
+      // viaja en el payload -y no solo `auctionId`- para que un consumidor
+      // como HU-65.3/HU-69 (Nexus-Battle-Commerce, "pendientes de recoger")
+      // pueda registrar el producto ganado sin una consulta adicional.
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: randomUUID(),
+          aggregate_id: command.auctionId,
+          event_type: 'auction.closed_by_buy_now.v1',
+          payload: {
+            auctionId: command.auctionId,
+            productId: auctionRow.product_id,
+            sellerId: auctionRow.seller_id,
+            buyerId: command.buyerId,
+            priceCredits: command.priceCredits,
+            transactionId: command.transactionId,
+            closedAt: command.closedAt,
+          },
+          occurred_at: command.closedAt,
+          published_at: null,
+        })
+        .execute()
+
+      const auction = await findAuction(transaction, command.auctionId)
+
+      if (auction === null) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      return {
+        auction,
+        transactionId: command.transactionId,
+        replayed: false,
+      }
+    })
+  }
+
+  async recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {
+    await this.db
+      .insertInto('auction_buy_now_failures')
+      .values({
+        operation_id: command.operationId,
+        auction_id: command.auctionId,
+        buyer_id: command.buyerId,
+        stage: command.stage,
+        reason: command.reason,
+        transfer_id: command.transferId,
+        credits_reversed: command.creditsReversed,
+        occurred_at: command.occurredAt,
+      })
+      .onConflict((conflict) =>
+        conflict.column('operation_id').doUpdateSet({
+          stage: command.stage,
+          reason: command.reason,
+          transfer_id: command.transferId,
+          credits_reversed: command.creditsReversed,
+          occurred_at: command.occurredAt,
+        }),
+      )
+      .execute()
+  }
+
+  async findBuyNowOperation(operationId: string): Promise<BuyNowOperationRecord | null> {
+    const operation = await this.db
+      .selectFrom('auction_buy_now_operations')
+      .selectAll()
+      .where('operation_id', '=', operationId)
+      .executeTakeFirst()
+
+    if (operation === undefined) {
+      return null
+    }
+
+    const auction = await findAuction(this.db, operation.auction_id)
+
+    if (auction === null) {
+      throw new PersistedAuctionNotFoundError(operation.auction_id)
+    }
+
+    return {
+      auction,
+      transactionId: operation.transaction_id,
+      buyerId: operation.buyer_id,
+      transferId: operation.transfer_id,
+      priceCredits: operation.price_credits,
+      remainingCredits: operation.remaining_credits,
+      completedAt: new Date(operation.completed_at),
+    }
   }
 }

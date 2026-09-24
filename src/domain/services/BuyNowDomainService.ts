@@ -37,9 +37,15 @@ export interface BuyNowApproval {
  * modo que ante varias fallas se informe siempre la misma:
  * 1. datos de entrada validos;
  * 2. subasta activa;
- * 3. precio de compra inmediata existente y valido (CA-03);
- * 4. confirmacion marcada (CA-04);
- * 5. saldo suficiente (CA-02).
+ * 3. el comprador no es el propio vendedor;
+ * 4. precio de compra inmediata existente y valido (CA-03);
+ * 5. confirmacion marcada (CA-04);
+ * 6. saldo suficiente (CA-02).
+ *
+ * La regla 3 no figuraba en el alcance original de HU-64.2: se anadio aqui, al
+ * integrar el endpoint (HU-64.4), porque sin ella un vendedor podia ejecutar
+ * `buy-now` sobre su propia subasta y pagarse a si mismo -el mismo defecto que
+ * `Bid.assertBidderIsNotSeller` ya evita para las pujas (HU-63.1)-.
  */
 export class BuyNowDomainService {
   evaluate(request: BuyNowRequest): BuyNowApproval {
@@ -50,6 +56,8 @@ export class BuyNowDomainService {
     const balance = CreditBalance.of(request.buyerAvailableCredits)
 
     BuyNowDomainService.assertAuctionActive(auction)
+
+    BuyNowDomainService.assertBuyerIsNotSeller(buyerId.value, auction.sellerId.value)
 
     const price = requireBuyNowPrice(auction)
 
@@ -83,6 +91,15 @@ export class BuyNowDomainService {
       throw new BuyNowRuleViolation(
         BuyNowRuleCode.AuctionNotActive,
         'La subasta debe estar activa para ejecutar la compra inmediata.',
+      )
+    }
+  }
+
+  private static assertBuyerIsNotSeller(buyerId: string, sellerId: string): void {
+    if (buyerId === sellerId) {
+      throw new BuyNowRuleViolation(
+        BuyNowRuleCode.SellerCannotBuyOwnAuction,
+        'El vendedor no puede ejecutar la compra inmediata de su propia subasta.',
       )
     }
   }

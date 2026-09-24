@@ -21,7 +21,17 @@ import type {
   PublicationFeeCharge,
   PublicationFeePort,
 } from '../../../application/ports/PublicationFeePort'
+import type {
+  NotificationDispatch,
+  NotificationPort,
+  NotifyAuctionClosedEarlyCommand,
+} from '../../../application/ports/NotificationPort'
 import type { SellerSanctionPort } from '../../../application/ports/SellerSanctionPort'
+import type {
+  BuyNowCreditTransfer,
+  BuyNowCreditTransferCommand,
+  WalletPort,
+} from '../../../application/ports/WalletPort'
 
 /**
  * Adaptadores deliberadamente cerrados mientras los servicios propietarios no
@@ -109,5 +119,43 @@ export class UnavailableBidCredits implements BidCreditsPort {
     void operationId
     void reservationId
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+}
+
+/**
+ * Wallet (HU-64) todavia no publica ningun contrato HTTP de negocio: solo
+ * andamiaje. Fallar cerrado evita simular un saldo o una transferencia que
+ * nadie respalda.
+ */
+export class UnavailableWallet implements WalletPort {
+  getAvailableCredits(buyerId: string): Promise<number> {
+    void buyerId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  transferBuyNowCredits(command: BuyNowCreditTransferCommand): Promise<BuyNowCreditTransfer> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  reverseBuyNowCredits(operationId: string, transferId: string): Promise<void> {
+    void operationId
+    void transferId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+}
+
+/**
+ * Notifications no tiene, hoy, ningun endpoint para el cierre anticipado por
+ * compra inmediata (HU-64.5) -a diferencia de la puja superada, HU-63.5, que
+ * si publico el suyo-. Fallar cerrado evita simular una entrega que nadie
+ * realizo.
+ */
+export class UnavailableEarlyClosureNotification implements NotificationPort {
+  notifyAuctionClosedEarly(
+    command: NotifyAuctionClosedEarlyCommand,
+  ): Promise<NotificationDispatch> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('notifications'))
   }
 }
