@@ -172,6 +172,18 @@ const findLeadingBid = async (
 export class PostgresAuctionRepository
   implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
 {
+  /** Consulta determinista para el scheduler de recordatorios de HU-68. */
+  async findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]> {
+    const rows = await this.db
+      .selectFrom('auctions')
+      .selectAll()
+      .where('status', '=', AuctionStatus.Active)
+      .where('closes_at', '>', from)
+      .where('closes_at', '<=', until)
+      .orderBy('closes_at', 'asc')
+      .execute()
+    return rows.map(toSnapshot)
+  }
   constructor(private readonly db: Kysely<Database>) {}
   async finishAuction(command: FinishAuctionCommand): Promise<void> {
     const result = command.closingResult.snapshot()

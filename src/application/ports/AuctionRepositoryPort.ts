@@ -108,6 +108,9 @@ export interface AuctionRepositoryPort {
   findInventoryCommitmentId(auctionId: string): Promise<string | null>
   finishAuction(command: FinishAuctionCommand): Promise<void>
 
+  /** Subastas activas cuyo cierre cae en `(from, until]`. */
+  findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]>
+
   countActiveBySeller(sellerId: string): Promise<number>
 
   persistBid(bid: Bid, reservationId?: string, operationId?: string): Promise<PersistBidResult>

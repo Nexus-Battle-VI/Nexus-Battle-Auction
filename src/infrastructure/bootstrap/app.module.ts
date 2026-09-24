@@ -9,9 +9,11 @@ import { JwtAuthGuard } from '../../adapters/inbound/http/auth/jwt-auth.guard'
 import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
 import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
+import { WatchlistController } from '../../adapters/inbound/http/watchlist.controller'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpAuctionInventoryClient } from '../../adapters/outbound/http/HttpAuctionInventoryClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
+import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
 import {
@@ -22,6 +24,7 @@ import {
   UnavailableSellerSanctions,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
+import { UnavailableWatchlistEventPublisher } from '../../adapters/outbound/http/UnavailableWatchlistEventPublisher'
 import { SqsAuctionSettlementEventPublisher } from '../../adapters/outbound/messaging/SqsAuctionSettlementEventPublisher'
 import { UnavailableAuctionSettlementEventPublisher } from '../../adapters/outbound/messaging/UnavailableAuctionSettlementEventPublisher'
 import { CognitoTokenVerifier } from '../../adapters/outbound/identity/CognitoTokenVerifier'
@@ -115,9 +118,17 @@ import {
   type SellerSanctionPort,
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
+import {
+  WATCHLIST_EVENT_PUBLISHER,
+  type WatchlistEventPublisherPort,
+} from '../../application/ports/WatchlistEventPublisherPort'
+import { DispatchClosingSoonReminders } from '../../application/use-cases/DispatchClosingSoonReminders'
+import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
+import { FollowAuction } from '../../application/use-cases/FollowAuction'
+import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
+import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchlistChange'
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
-import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
@@ -129,6 +140,7 @@ import { ProcessExpiredAuctions } from '../../application/use-cases/ProcessExpir
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
+import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
@@ -136,6 +148,7 @@ import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
 import { createLogger, type Logger } from '../observability/logger'
 import { createDatabase, pingDatabase } from '../persistence/database'
+import { AuctionReminderScheduler } from '../scheduling/AuctionReminderScheduler'
 import { AuctionPendingClaimExpirationScheduler } from '../scheduling/AuctionPendingClaimExpirationScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
 import {
@@ -155,7 +168,8 @@ export const DATABASE_LIFECYCLE = Symbol('DatabaseLifecycle')
 export const INTERNAL_CALLERS: readonly string[] = []
 
 @Module({
-  controllers: [HealthController, AuctionController],
+  // La ruta estatica /watchlist debe registrarse antes de /:auctionId.
+  controllers: [HealthController, WatchlistController, AuctionController],
 
   providers: [
     {
@@ -381,6 +395,33 @@ export const INTERNAL_CALLERS: readonly string[] = []
           : new PostgresWatchlistRepository(db),
       inject: [DATABASE, AUCTION_REPOSITORY],
     },
+
+    {
+      provide: FollowAuction,
+      useFactory: (
+        watchlist: WatchlistRepositoryPort,
+        auctions: AuctionRepositoryPort,
+        clock: ClockPort,
+      ): FollowAuction => new FollowAuction(watchlist, auctions, clock),
+      inject: [WATCHLIST_REPOSITORY, AUCTION_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: ListFollowedAuctions,
+      useFactory: (
+        watchlist: WatchlistRepositoryPort,
+        auctions: AuctionRepositoryPort,
+      ): ListFollowedAuctions => new ListFollowedAuctions(watchlist, auctions),
+      inject: [WATCHLIST_REPOSITORY, AUCTION_REPOSITORY],
+    },
+
+    {
+      provide: UnfollowAuction,
+      useFactory: (watchlist: WatchlistRepositoryPort): UnfollowAuction =>
+        new UnfollowAuction(watchlist),
+      inject: [WATCHLIST_REPOSITORY],
+    },
+
     {
       provide: CATALOG_PRODUCT_POLICY,
 
@@ -609,6 +650,50 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: WATCHLIST_EVENT_PUBLISHER,
+      useFactory: (config: AppConfig, clock: ClockPort): WatchlistEventPublisherPort =>
+        config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null
+          ? new UnavailableWatchlistEventPublisher()
+          : new HttpWatchlistEventPublisher({
+              baseUrl: config.notificationsBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: config.notificationsTimeoutMs,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, CLOCK],
+    },
+
+    {
+      provide: NotifyWatchlistChange,
+      useFactory: (
+        watchlist: WatchlistRepositoryPort,
+        publisher: WatchlistEventPublisherPort,
+      ): NotifyWatchlistChange => new NotifyWatchlistChange(watchlist, publisher),
+      inject: [WATCHLIST_REPOSITORY, WATCHLIST_EVENT_PUBLISHER],
+    },
+
+    {
+      provide: DispatchClosingSoonReminders,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        publisher: WatchlistEventPublisherPort,
+        clock: ClockPort,
+      ): DispatchClosingSoonReminders =>
+        new DispatchClosingSoonReminders(auctions, publisher, clock),
+      inject: [AUCTION_REPOSITORY, WATCHLIST_EVENT_PUBLISHER, CLOCK],
+    },
+
+    {
+      provide: AuctionReminderScheduler,
+      useFactory: (
+        reminders: DispatchClosingSoonReminders,
+        logger: Logger,
+      ): AuctionReminderScheduler => new AuctionReminderScheduler(reminders, logger),
+      inject: [DispatchClosingSoonReminders, LOGGER],
+    },
+
+    {
       provide: PersistAuctionPublication,
 
       useFactory: (
@@ -760,8 +845,17 @@ export const INTERNAL_CALLERS: readonly string[] = []
         identifiers: IdentifierGeneratorPort,
         notifications: OutbidNotificationPort,
         autoBidReactor: ReactToRivalBid,
+        watchlistChanges: NotifyWatchlistChange,
       ): RegisterBid =>
-        new RegisterBid(repository, persistence, clock, identifiers, notifications, autoBidReactor),
+        new RegisterBid(
+          repository,
+          persistence,
+          clock,
+          identifiers,
+          notifications,
+          autoBidReactor,
+          watchlistChanges,
+        ),
 
       inject: [
         AUCTION_REPOSITORY,
@@ -770,6 +864,7 @@ export const INTERNAL_CALLERS: readonly string[] = []
         IDENTIFIER_GENERATOR,
         OUTBID_NOTIFICATION,
         ReactToRivalBid,
+        NotifyWatchlistChange,
       ],
     },
 
