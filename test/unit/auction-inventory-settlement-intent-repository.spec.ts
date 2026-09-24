@@ -70,6 +70,37 @@ describe('InMemoryAuctionInventorySettlementIntentRepository', () => {
     expect(replay.confirmedAt).toEqual(first.confirmedAt)
   })
 
+  it('no degrada CONFIRMED cuando otro worker marca retryable', async () => {
+    const repository = new InMemoryAuctionInventorySettlementIntentRepository()
+    await repository.getOrCreate(pendingClaim)
+    await repository.markRetryable('auction-2', 'timeout', now)
+    await repository.markConfirmed('auction-2', now)
+    await expect(repository.markRetryable('auction-2', 'late timeout', now)).resolves.toMatchObject(
+      { status: 'CONFIRMED' },
+    )
+  })
+
+  it('lista solo pending claims retryable ordenados y limitados', async () => {
+    const repository = new InMemoryAuctionInventorySettlementIntentRepository()
+    await repository.getOrCreate({
+      ...pendingClaim,
+      auctionId: 'b',
+      createdAt: new Date('2026-01-01'),
+    })
+    await repository.getOrCreate({
+      ...pendingClaim,
+      auctionId: 'a',
+      operationId: 'op-a',
+      createdAt: new Date('2026-01-01'),
+    })
+    await repository.getOrCreate(release)
+    await repository.markRetryable('a', 'timeout', new Date('2026-01-02'))
+    await repository.markRetryable('b', 'timeout', new Date('2026-01-01'))
+    await expect(repository.findRetryablePendingClaims(1)).resolves.toMatchObject([
+      { auctionId: 'b', action: 'PENDING_CLAIM', status: 'RETRYABLE' },
+    ])
+  })
+
   it('persiste un error terminal', async () => {
     const repository = new InMemoryAuctionInventorySettlementIntentRepository()
     await repository.getOrCreate(release)

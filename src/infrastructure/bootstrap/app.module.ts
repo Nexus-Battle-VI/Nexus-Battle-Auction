@@ -171,6 +171,7 @@ import { SettleAuction } from '../../application/use-cases/SettleAuction'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
 import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
 import { BuyNowPendingClaimRegistrationService } from '../../application/services/BuyNowPendingClaimRegistrationService'
+import { RetryBuyNowPendingClaims } from '../../application/use-cases/RetryBuyNowPendingClaims'
 import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
@@ -180,6 +181,7 @@ import { createDatabase, pingDatabase } from '../persistence/database'
 import { AuctionReminderScheduler } from '../scheduling/AuctionReminderScheduler'
 import { AuctionPendingClaimExpirationScheduler } from '../scheduling/AuctionPendingClaimExpirationScheduler'
 import { EarlyClosureRetryScheduler } from '../scheduling/EarlyClosureRetryScheduler'
+import { BuyNowPendingClaimRetryScheduler } from '../scheduling/BuyNowPendingClaimRetryScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
 import {
   NodeSchedulerTimer,
@@ -1115,6 +1117,38 @@ export const createWatchlistEventPublisher = (
         AUCTION_PENDING_CLAIM_REPOSITORY,
         CLOCK,
       ],
+    },
+    {
+      provide: RetryBuyNowPendingClaims,
+      useFactory: (
+        intents: AuctionInventorySettlementIntentRepositoryPort,
+        auctions: AuctionRepositoryPort,
+        registration: BuyNowPendingClaimRegistrationService,
+        config: AppConfig,
+      ): RetryBuyNowPendingClaims =>
+        new RetryBuyNowPendingClaims(intents, auctions, registration, {
+          batchSize: config.auctionBuyNowPendingClaimRetryBatchSize,
+        }),
+      inject: [
+        AUCTION_INVENTORY_SETTLEMENT_INTENT_REPOSITORY,
+        AUCTION_REPOSITORY,
+        BuyNowPendingClaimRegistrationService,
+        APP_CONFIG,
+      ],
+    },
+    {
+      provide: BuyNowPendingClaimRetryScheduler,
+      useFactory: (
+        worker: RetryBuyNowPendingClaims,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): BuyNowPendingClaimRetryScheduler =>
+        new BuyNowPendingClaimRetryScheduler(worker, timer, logger, {
+          enabled: config.auctionBuyNowPendingClaimRetrySchedulerEnabled,
+          pollIntervalMs: config.auctionBuyNowPendingClaimRetryPollIntervalMs,
+        }),
+      inject: [RetryBuyNowPendingClaims, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
     },
     {
       provide: ExecuteBuyNowUseCase,

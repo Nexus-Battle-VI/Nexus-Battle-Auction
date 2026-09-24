@@ -1276,4 +1276,13 @@ export class PostgresAuctionRepository
       completedAt: new Date(operation.completed_at),
     }
   }
+
+  async findBuyNowOperationByAuctionId(auctionId: string): Promise<BuyNowOperationRecord | null> {
+    const operation = await this.db
+      .selectFrom('auction_buy_now_operations')
+      .select('operation_id')
+      .where('auction_id', '=', auctionId)
+      .executeTakeFirst()
+    return operation === undefined ? null : this.findBuyNowOperation(operation.operation_id)
+  }
 }

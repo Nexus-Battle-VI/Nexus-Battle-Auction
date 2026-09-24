@@ -58,6 +58,12 @@ describe('Configuracion del servicio', () => {
       auctionEarlyClosureRetrySchedulerEnabled: false,
 
       auctionEarlyClosureRetryPollIntervalMs: 30_000,
+
+      auctionBuyNowPendingClaimRetrySchedulerEnabled: false,
+
+      auctionBuyNowPendingClaimRetryPollIntervalMs: 30_000,
+
+      auctionBuyNowPendingClaimRetryBatchSize: 50,
     })
   })
 
@@ -483,6 +489,40 @@ describe('Configuracion del servicio', () => {
         AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED: 'true',
       }),
     ).toThrow(/WALLET_BASE_URL/)
+  })
+
+  it('configura fail-closed el retry de pending claim de compra inmediata', () => {
+    expect(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        INVENTORY_BASE_URL: 'http://inventory:3006',
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED: 'true',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_POLL_INTERVAL_MS: '90000',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_BATCH_SIZE: '25',
+      }),
+    ).toMatchObject({
+      auctionBuyNowPendingClaimRetrySchedulerEnabled: true,
+      auctionBuyNowPendingClaimRetryPollIntervalMs: 90_000,
+      auctionBuyNowPendingClaimRetryBatchSize: 25,
+    })
+    expect(() =>
+      loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED: 'true' }),
+    ).toThrow(/PERSISTENCE_DRIVER/)
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED: 'true',
+      }),
+    ).toThrow(/INVENTORY_BASE_URL/)
+    expect(() =>
+      loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_POLL_INTERVAL_MS: '999' }),
+    ).toThrow(ConfigurationError)
+    expect(() => loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_BATCH_SIZE: '501' })).toThrow(
+      ConfigurationError,
+    )
   })
 
   it.each(['999', '3600001', 'invalid'])(

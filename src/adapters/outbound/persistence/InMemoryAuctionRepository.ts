@@ -723,6 +723,13 @@ export class InMemoryAuctionRepository
     })
   }
 
+  findBuyNowOperationByAuctionId(auctionId: string): Promise<BuyNowOperationRecord | null> {
+    const entry = [...this.buyNowOperations.entries()].find(
+      ([, value]) => value.auctionId === auctionId,
+    )
+    return entry === undefined ? Promise.resolve(null) : this.findBuyNowOperation(entry[0])
+  }
+
   private count(sellerId: string): number {
     return [...this.auctions.values()].filter((auction) => auction.sellerId === sellerId).length
   }

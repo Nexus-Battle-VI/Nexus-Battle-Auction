@@ -1,4 +1,4 @@
-import type { AuctionRepositoryPort } from '../ports/AuctionRepositoryPort'
+import type { AuctionRepositoryPort, BuyNowOperationRecord } from '../ports/AuctionRepositoryPort'
 import type { ClockPort } from '../ports/ClockPort'
 import {
   ExternalContractError,
@@ -67,10 +67,39 @@ export class BuyNowPendingClaimRegistrationService {
       createdAt: this.clock.now(),
     })
 
+    await this.completeIntent(intent, command)
+  }
+
+  /** Reintenta un intent ya durable usando exclusivamente los datos buy-now persistidos. */
+  async retryClaim(
+    intent: AuctionInventorySettlementIntentSnapshot,
+    operation: BuyNowOperationRecord,
+  ): Promise<AuctionInventorySettlementIntentSnapshot> {
+    if (intent.winnerId === null || intent.winnerId !== operation.buyerId) {
+      return this.inventoryIntents.markTerminalError(
+        intent.auctionId,
+        'El ganador del intent no coincide con el comprador durable.',
+        this.clock.now(),
+      )
+    }
+    return this.completeIntent(intent, {
+      auctionId: intent.auctionId,
+      sellerId: intent.sellerId,
+      productId: intent.productId,
+      winnerId: operation.buyerId,
+      priceCredits: operation.priceCredits,
+      closedAt: operation.completedAt,
+    })
+  }
+
+  private async completeIntent(
+    intent: AuctionInventorySettlementIntentSnapshot,
+    command: RegisterBuyNowPendingClaimCommand,
+  ): Promise<AuctionInventorySettlementIntentSnapshot> {
     const resolved = await this.resolveInventoryIntent(intent)
 
     if (resolved.status !== 'CONFIRMED') {
-      return
+      return resolved
     }
 
     await this.pendingClaims.createIfAbsent({
@@ -82,6 +111,7 @@ export class BuyNowPendingClaimRegistrationService {
       settledAt: command.closedAt,
       createdAt: command.closedAt,
     })
+    return resolved
   }
 
   private async resolveInventoryIntent(

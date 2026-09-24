@@ -1940,6 +1940,33 @@ describe('Persistencia PostgreSQL', () => {
         })
       })
 
+      it('findBuyNowOperationByAuctionId busca por subasta, no por operationId', async () => {
+        const repository = new PostgresAuctionRepository(db)
+        await repository.publish(publication('auction-buy-now-by-auction-a'))
+        await repository.publish(publication('auction-buy-now-by-auction-b'))
+        await repository.closeByBuyNow(closeCommand('auction-buy-now-by-auction-a'))
+        await repository.closeByBuyNow(
+          closeCommand('auction-buy-now-by-auction-b', {
+            buyerId: 'buyer-2',
+            transactionId: 'txn-b',
+          }),
+        )
+
+        await expect(
+          repository.findBuyNowOperationByAuctionId('auction-no-existe'),
+        ).resolves.toBeNull()
+        await expect(
+          repository.findBuyNowOperationByAuctionId('auction-buy-now-by-auction-a'),
+        ).resolves.toMatchObject({
+          transactionId: 'txn-auction-buy-now-by-auction-a',
+          buyerId: 'buyer-1',
+          priceCredits: 20,
+          remainingCredits: 80,
+          completedAt: new Date('2026-09-21T15:00:00.000Z'),
+          auction: expect.objectContaining({ id: 'auction-buy-now-by-auction-a' }),
+        })
+      })
+
       it('registra y actualiza de forma idempotente un fallo de compra inmediata', async () => {
         const repository = new PostgresAuctionRepository(db)
 
