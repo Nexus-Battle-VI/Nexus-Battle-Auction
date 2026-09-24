@@ -3,7 +3,10 @@ import { InMemoryEarlyClosureNotificationRepository } from '../../src/adapters/o
 import { InMemoryAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
 import { InMemoryAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
 import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
-import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
+import {
+  AuctionAlreadyClosedError,
+  BuyNowIdempotencyConflictError,
+} from '../../src/application/errors/BuyNowTransactionError'
 import type { AuctionRepositoryPort } from '../../src/application/ports/AuctionRepositoryPort'
 import type {
   BidCreditBalance,
@@ -324,6 +327,35 @@ describe('ExecuteBuyNowUseCase HU-64.4', () => {
     const second = await useCase.execute(command(auctionId))
 
     expect(second).toEqual({ ...first, replayed: true })
+  })
+
+  /**
+   * Sin esta comparacion, `findBuyNowOperation` devolveria la confirmacion de
+   * la PRIMERA compra sin importar que la segunda solicitud sea de otra
+   * subasta -un cliente que reusa la Idempotency-Key por error, o un ataque
+   * que intenta apropiarse de la confirmacion de otra operacion-.
+   */
+  it('rechaza reutilizar el operationId para otra subasta', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+    const otraSubasta = await seedActiveAuction(repository, { auctionId: 'auction-otra' })
+
+    await useCase.execute(command(auctionId))
+
+    await expect(
+      useCase.execute(command(otraSubasta, { operationId: 'operation-1' })),
+    ).rejects.toBeInstanceOf(BuyNowIdempotencyConflictError)
+  })
+
+  it('rechaza reutilizar el operationId para otro comprador', async () => {
+    const { repository, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    await useCase.execute(command(auctionId))
+
+    await expect(
+      useCase.execute(command(auctionId, { operationId: 'operation-1', buyerId: 'buyer-2' })),
+    ).rejects.toBeInstanceOf(BuyNowIdempotencyConflictError)
   })
 
   it('propaga un fallo de validacion de entrada como BuyNowRuleViolation', async () => {
