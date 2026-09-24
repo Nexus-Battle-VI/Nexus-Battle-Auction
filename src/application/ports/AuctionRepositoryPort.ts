@@ -39,6 +39,29 @@ export interface FinishAuctionCommand {
   readonly closingResult: AuctionClosingResult
 }
 
+export interface ActiveAuctionListItem {
+  readonly id: string
+  readonly sellerId: string
+  readonly productId: string
+  readonly minimumBidCredits: number
+  readonly buyNowCredits: number | null
+  readonly status: 'ACTIVE'
+  readonly publishedAt: Date
+  readonly closesAt: Date
+  readonly currentBidAmount: number | null
+}
+
+export interface ListActiveAuctionsInput {
+  readonly now: Date
+  readonly page: number
+  readonly pageSize: number
+}
+
+export interface ActiveAuctionList {
+  readonly items: readonly ActiveAuctionListItem[]
+  readonly total: number
+}
+
 export type BidCreditOperationStatus =
   | 'PENDING_RESERVATION'
   | 'RESERVED'
@@ -110,6 +133,9 @@ export interface AuctionRepositoryPort {
 
   /** Subastas activas cuyo cierre cae en `(from, until]`. */
   findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]>
+
+  /** Marketplace: activas no vencidas, ordenadas y paginadas. */
+  listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList>
 
   countActiveBySeller(sellerId: string): Promise<number>
 

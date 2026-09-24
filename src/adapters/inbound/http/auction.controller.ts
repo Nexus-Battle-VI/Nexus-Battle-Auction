@@ -10,6 +10,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Query,
 } from '@nestjs/common'
 import {
   ApiBearerAuth,
@@ -21,6 +22,7 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiQuery,
   ApiParam,
   ApiServiceUnavailableResponse,
   ApiTags,
@@ -35,12 +37,14 @@ import { ClaimPendingProduct } from '../../../application/use-cases/ClaimPending
 import { ClaimPendingProductsBatch } from '../../../application/use-cases/ClaimPendingProductsBatch'
 import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
+import { ListActiveAuctions } from '../../../application/use-cases/ListActiveAuctions'
 import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
 import { PublishAuction } from '../../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../../application/use-cases/RegisterBid'
 import { CurrentIdentity, Roles } from './auth/decorators'
 import {
   AuctionDetailResponseDto,
+  ActiveAuctionPageResponseDto,
   AuctionResponseDto,
   AutoBidConfigResponseDto,
   BidResponseDto,
@@ -49,6 +53,7 @@ import {
   ClaimPendingProductsBatchResponseDto,
   ConfigureAutoBidRequestDto,
   PendingClaimResponseDto,
+  ListActiveAuctionsQueryDto,
   PublishAuctionRequestDto,
   RegisterBidRequestDto,
   assertIdempotencyKey,
@@ -65,6 +70,7 @@ export class AuctionController {
     private readonly publishAuction: PublishAuction,
     private readonly registerBid: RegisterBid,
     private readonly getAuctionDetail: GetAuctionDetail,
+    private readonly listActiveAuctions: ListActiveAuctions,
     private readonly configureAutoBid: ConfigureAutoBid,
     private readonly getPendingClaims: GetPendingClaims,
     private readonly claimPendingProduct: ClaimPendingProduct,
@@ -105,6 +111,32 @@ export class AuctionController {
     const now = this.clock.now()
 
     return claims.map((claim) => this.toPendingClaimResponse(claim, now))
+  }
+
+  /** Marketplace de subastas activas y no vencidas. */
+  @Get()
+  @Roles(Role.Player)
+  @ApiOperation({ summary: 'Listar subastas activas disponibles' })
+  @ApiQuery({ name: 'page', required: false, type: Number, minimum: 1, example: 1 })
+  @ApiQuery({
+    name: 'pageSize',
+    required: false,
+    type: Number,
+    minimum: 1,
+    maximum: 100,
+    example: 16,
+  })
+  @ApiOkResponse({ type: ActiveAuctionPageResponseDto })
+  @ApiBadRequestResponse({ description: 'Parametros de paginacion invalidos.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
+  async listActive(
+    @Query() query: ListActiveAuctionsQueryDto,
+  ): Promise<ActiveAuctionPageResponseDto> {
+    const page = query.page ?? 1
+    const pageSize = query.pageSize ?? 16
+    const result = await this.listActiveAuctions.execute({ page, pageSize })
+    return { ...result, page, pageSize, items: [...result.items] }
   }
 
   /**

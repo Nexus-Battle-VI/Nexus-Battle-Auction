@@ -11,11 +11,13 @@ import {
 } from '../../../application/errors/AuctionPersistenceError'
 import type {
   AuctionRepositoryPort,
+  ActiveAuctionList,
   BidCreditOperationSnapshot,
   BidCreditOperationStatus,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
+  ListActiveAuctionsInput,
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
@@ -183,6 +185,55 @@ export class PostgresAuctionRepository
       .orderBy('closes_at', 'asc')
       .execute()
     return rows.map(toSnapshot)
+  }
+
+  async listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
+    const offset = (input.page - 1) * input.pageSize
+    const [rows, count] = await Promise.all([
+      this.db
+        .selectFrom('auctions')
+        .leftJoin('auction_bids as leader', (join) =>
+          join.onRef('leader.auction_id', '=', 'auctions.id').on('leader.is_leader', '=', true),
+        )
+        .select([
+          'auctions.id',
+          'auctions.seller_id',
+          'auctions.product_id',
+          'auctions.minimum_bid_credits',
+          'auctions.buy_now_credits',
+          'auctions.status',
+          'auctions.published_at',
+          'auctions.closes_at',
+          'leader.amount_credits as current_bid_amount',
+        ])
+        .where('auctions.status', '=', AuctionStatus.Active)
+        .where('auctions.closes_at', '>', input.now)
+        .orderBy('auctions.closes_at', 'asc')
+        .orderBy('auctions.id', 'asc')
+        .limit(input.pageSize)
+        .offset(offset)
+        .execute(),
+      this.db
+        .selectFrom('auctions')
+        .select(sql<number>`count(*)::integer`.as('total'))
+        .where('status', '=', AuctionStatus.Active)
+        .where('closes_at', '>', input.now)
+        .executeTakeFirstOrThrow(),
+    ])
+    return {
+      total: count.total,
+      items: rows.map((row) => ({
+        id: row.id,
+        sellerId: row.seller_id,
+        productId: row.product_id,
+        minimumBidCredits: row.minimum_bid_credits,
+        buyNowCredits: row.buy_now_credits,
+        status: AuctionStatus.Active,
+        publishedAt: new Date(row.published_at),
+        closesAt: new Date(row.closes_at),
+        currentBidAmount: row.current_bid_amount,
+      })),
+    }
   }
   constructor(private readonly db: Kysely<Database>) {}
   async finishAuction(command: FinishAuctionCommand): Promise<void> {

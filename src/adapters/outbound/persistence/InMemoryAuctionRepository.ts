@@ -8,10 +8,12 @@ import {
 } from '../../../application/errors/AuctionPersistenceError'
 import type {
   AuctionRepositoryPort,
+  ActiveAuctionList,
   BidCreditOperationSnapshot,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
+  ListActiveAuctionsInput,
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
@@ -304,6 +306,38 @@ export class InMemoryAuctionRepository
         )
         .sort((a, b) => a.closesAt.getTime() - b.closesAt.getTime()),
     )
+  }
+
+  listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
+    const active = [...this.auctions.values()]
+      .filter(
+        (auction) =>
+          auction.status === AuctionStatus.Active &&
+          auction.closesAt.getTime() > input.now.getTime(),
+      )
+      .sort(
+        (left, right) =>
+          left.closesAt.getTime() - right.closesAt.getTime() || left.id.localeCompare(right.id),
+      )
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({
+      total: active.length,
+      items: active.slice(offset, offset + input.pageSize).map((auction) => {
+        const leaderId = this.leadingBidByAuction.get(auction.id)
+        const leader = leaderId === undefined ? undefined : this.bids.get(leaderId)
+        return {
+          id: auction.id,
+          sellerId: auction.sellerId,
+          productId: auction.productId,
+          minimumBidCredits: auction.minimumBidCredits,
+          buyNowCredits: auction.buyNowCredits,
+          status: AuctionStatus.Active,
+          publishedAt: new Date(auction.publishedAt),
+          closesAt: new Date(auction.closesAt),
+          currentBidAmount: leader?.snapshot.amountCredits ?? null,
+        }
+      }),
+    })
   }
 
   countActiveBySeller(sellerId: string): Promise<number> {

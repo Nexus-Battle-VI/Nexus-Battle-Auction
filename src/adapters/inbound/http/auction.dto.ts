@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
+import { Type } from 'class-transformer'
 import {
   ArrayMaxSize,
   IsArray,
@@ -7,6 +8,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -92,6 +94,55 @@ export class AuctionResponseDto {
     format: 'date-time',
   })
   closesAt!: Date
+}
+
+export class ListActiveAuctionsQueryDto {
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number
+
+  @ApiPropertyOptional({ default: 16, minimum: 1, maximum: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  pageSize?: number
+}
+
+export class ActiveAuctionSummaryResponseDto {
+  @ApiProperty()
+  id!: string
+  @ApiProperty()
+  sellerId!: string
+  @ApiProperty()
+  productId!: string
+  @ApiProperty({ minimum: 1 })
+  minimumBidCredits!: number
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  buyNowCredits!: number | null
+  @ApiProperty({ enum: ['ACTIVE'] })
+  status!: 'ACTIVE'
+  @ApiProperty({ type: String, format: 'date-time' })
+  publishedAt!: Date
+  @ApiProperty({ type: String, format: 'date-time' })
+  closesAt!: Date
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  currentBidAmount!: number | null
+}
+
+export class ActiveAuctionPageResponseDto {
+  @ApiProperty({ type: [ActiveAuctionSummaryResponseDto] })
+  items!: ActiveAuctionSummaryResponseDto[]
+  @ApiProperty({ minimum: 1 })
+  page!: number
+  @ApiProperty({ minimum: 1, maximum: 100 })
+  pageSize!: number
+  @ApiProperty({ minimum: 0 })
+  total!: number
 }
 
 export class RegisterBidRequestDto {
