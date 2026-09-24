@@ -14,6 +14,7 @@ import { WatchlistController } from '../../adapters/inbound/http/watchlist.contr
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpAuctionInventoryClient } from '../../adapters/outbound/http/HttpAuctionInventoryClient'
 import { HttpBidCreditsClient } from '../../adapters/outbound/http/HttpBidCreditsClient'
+import { HttpEarlyClosureNotificationClient } from '../../adapters/outbound/http/HttpEarlyClosureNotificationClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
@@ -204,6 +205,29 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
     baseUrl: config.walletBaseUrl,
     secret: config.internalServiceAuthSecret,
     timeoutMs: config.walletRequestTimeoutMs,
+    now: () => clock.now(),
+  })
+}
+
+/**
+ * HU-64.5: con URL de Notifications y secreto se usa el endpoint real de
+ * cierre por compra inmediata; sin ellos se conserva el fallback fail-closed
+ * para desarrollo local.
+ */
+export const createEarlyClosureNotificationPort = (
+  config: AppConfig,
+  logger: Logger,
+  clock: ClockPort,
+): NotificationPort => {
+  if (config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null) {
+    return new UnavailableEarlyClosureNotification()
+  }
+  return new HttpEarlyClosureNotificationClient({
+    baseUrl: config.notificationsBaseUrl,
+    secret: config.internalServiceAuthSecret,
+    serviceName: 'auction',
+    timeoutMs: config.notificationsTimeoutMs,
+    logger,
     now: () => clock.now(),
   })
 }
@@ -809,7 +833,8 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
     },
     {
       provide: NOTIFICATION,
-      useFactory: (): NotificationPort => new UnavailableEarlyClosureNotification(),
+      useFactory: createEarlyClosureNotificationPort,
+      inject: [APP_CONFIG, LOGGER, CLOCK],
     },
     {
       provide: EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
