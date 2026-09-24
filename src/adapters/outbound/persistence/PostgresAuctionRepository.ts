@@ -300,16 +300,22 @@ export class PostgresAuctionRepository
           'auctions.id',
           'auctions.seller_id',
           'auctions.product_id',
+          'auctions.publisher_type',
+          'auctions.price_kind',
           'auctions.minimum_bid_credits',
           'auctions.buy_now_credits',
+          'auctions.currency',
+          'auctions.minimum_bid_amount_minor',
+          'auctions.buy_now_amount_minor',
+          'auctions.official_mark',
           'auctions.status',
           'auctions.published_at',
           'auctions.closes_at',
           'leader.amount_credits as current_bid_amount',
         ])
-        .where('auctions.price_kind', '=', 'CREDITS')
         .where('auctions.status', '=', AuctionStatus.Active)
         .where('auctions.closes_at', '>', input.now)
+        .orderBy(sql`case when auctions.publisher_type = 'GAME_MASTER' then 0 else 1 end`)
         .orderBy('auctions.closes_at', 'asc')
         .orderBy('auctions.id', 'asc')
         .limit(input.pageSize)
@@ -318,7 +324,6 @@ export class PostgresAuctionRepository
       this.db
         .selectFrom('auctions')
         .select(sql<number>`count(*)::integer`.as('total'))
-        .where('price_kind', '=', 'CREDITS')
         .where('status', '=', AuctionStatus.Active)
         .where('closes_at', '>', input.now)
         .executeTakeFirstOrThrow(),
@@ -326,22 +331,52 @@ export class PostgresAuctionRepository
     return {
       total: count.total,
       items: rows.map((row) => {
-        // Filtrado por price_kind = 'CREDITS' arriba: nunca null en esta rama.
-        if (row.minimum_bid_credits === null) {
-          throw new Error(`La subasta ${row.id} no tiene precio en creditos.`)
-        }
-
-        return {
+        const base = {
           id: row.id,
           sellerId: row.seller_id,
           productId: row.product_id,
-          minimumBidCredits: row.minimum_bid_credits,
-          buyNowCredits: row.buy_now_credits,
-          status: AuctionStatus.Active,
+          status: 'ACTIVE' as const,
           publishedAt: new Date(row.published_at),
           closesAt: new Date(row.closes_at),
           currentBidAmount: row.current_bid_amount,
         }
+
+        if (row.price_kind === 'CREDITS' && row.minimum_bid_credits !== null) {
+          return {
+            ...base,
+            publisherType: 'PLAYER' as const,
+            priceKind: 'CREDITS' as const,
+            minimumBidCredits: row.minimum_bid_credits,
+            buyNowCredits: row.buy_now_credits,
+            currency: null,
+            minimumBidAmountMinor: null,
+            buyNowAmountMinor: null,
+            officialMark: null,
+          }
+        }
+
+        if (
+          row.price_kind === 'REAL_MONEY' &&
+          row.publisher_type === 'GAME_MASTER' &&
+          row.currency !== null &&
+          row.minimum_bid_amount_minor !== null &&
+          (row.official_mark === 'OFFICIAL' || row.official_mark === 'PREMIUM')
+        ) {
+          return {
+            ...base,
+            publisherType: 'GAME_MASTER' as const,
+            priceKind: 'REAL_MONEY' as const,
+            minimumBidCredits: null,
+            buyNowCredits: null,
+            currency: row.currency,
+            minimumBidAmountMinor: row.minimum_bid_amount_minor,
+            buyNowAmountMinor: row.buy_now_amount_minor,
+            officialMark: row.official_mark,
+            currentBidAmount: null,
+          }
+        }
+
+        throw new Error(`La subasta ${row.id} tiene una configuracion de precio invalida.`)
       }),
     }
   }

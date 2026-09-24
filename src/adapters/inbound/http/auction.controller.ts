@@ -119,7 +119,7 @@ export class AuctionController {
 
   /** Marketplace de subastas activas y no vencidas. */
   @Get()
-  @Roles(Role.Player)
+  @Roles(Role.Player, Role.GameMaster)
   @ApiOperation({ summary: 'Listar subastas activas disponibles' })
   @ApiQuery({ name: 'page', required: false, type: Number, minimum: 1, example: 1 })
   @ApiQuery({

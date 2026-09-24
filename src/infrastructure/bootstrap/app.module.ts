@@ -3,6 +3,7 @@ import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
 
 import { AuctionController } from '../../adapters/inbound/http/auction.controller'
+import { OfficialAuctionController } from '../../adapters/inbound/http/official-auction.controller'
 import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymous.guard'
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
 import { JwtAuthGuard } from '../../adapters/inbound/http/auth/jwt-auth.guard'
@@ -159,6 +160,7 @@ import { PrepareAuctionLoserReleaseTasks } from '../../application/use-cases/Pre
 import { ExpirePendingClaims } from '../../application/use-cases/ExpirePendingClaims'
 import { ProcessExpiredAuctions } from '../../application/use-cases/ProcessExpiredAuctions'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
+import { PublishOfficialAuction } from '../../application/use-cases/PublishOfficialAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
@@ -206,7 +208,12 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
 
 @Module({
   // La ruta estatica /watchlist debe registrarse antes de /:auctionId.
-  controllers: [HealthController, WatchlistController, AuctionController],
+  controllers: [
+    HealthController,
+    WatchlistController,
+    AuctionController,
+    OfficialAuctionController,
+  ],
 
   providers: [
     {
@@ -903,6 +910,20 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
         IDENTIFIER_GENERATOR,
         AUCTION_PUBLICATION_INTENT_REPOSITORY,
       ],
+    },
+
+    {
+      provide: PublishOfficialAuction,
+
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        eligibility: OfficialAuctionEligibilityPort,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): PublishOfficialAuction =>
+        new PublishOfficialAuction(repository, eligibility, clock, identifiers),
+
+      inject: [AUCTION_REPOSITORY, OFFICIAL_AUCTION_ELIGIBILITY, CLOCK, IDENTIFIER_GENERATOR],
     },
 
     {

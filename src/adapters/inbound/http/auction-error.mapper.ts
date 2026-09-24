@@ -14,6 +14,7 @@ import {
   IdempotencyConflictError,
   InsufficientPublicationFundsError,
   PersistedAuctionNotFoundError,
+  ProductNotEligibleForOfficialAuctionError,
 } from '../../../application/errors/AuctionPersistenceError'
 import {
   PendingClaimNotFoundError,
@@ -70,6 +71,10 @@ export const toAuctionHttpException = (error: unknown): HttpException => {
 
   if (error instanceof PersistedAuctionNotFoundError) {
     return new UnprocessableEntityException(body(422, 'AUCTION_NOT_FOUND', error.message))
+  }
+
+  if (error instanceof ProductNotEligibleForOfficialAuctionError) {
+    return new UnprocessableEntityException(body(422, 'PRODUCT_NOT_ELIGIBLE', error.message))
   }
 
   if (error instanceof InsufficientBidCreditsError) {

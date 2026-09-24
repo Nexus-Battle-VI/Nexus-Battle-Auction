@@ -53,17 +53,39 @@ export interface FinishAuctionCommand {
   readonly closingResult: AuctionClosingResult
 }
 
-export interface ActiveAuctionListItem {
+interface ActiveAuctionListItemBase {
   readonly id: string
   readonly sellerId: string
   readonly productId: string
-  readonly minimumBidCredits: number
-  readonly buyNowCredits: number | null
   readonly status: 'ACTIVE'
   readonly publishedAt: Date
   readonly closesAt: Date
   readonly currentBidAmount: number | null
 }
+
+export interface PlayerActiveAuctionListItem extends ActiveAuctionListItemBase {
+  readonly publisherType: 'PLAYER'
+  readonly priceKind: 'CREDITS'
+  readonly minimumBidCredits: number
+  readonly buyNowCredits: number | null
+  readonly currency: null
+  readonly minimumBidAmountMinor: null
+  readonly buyNowAmountMinor: null
+  readonly officialMark: null
+}
+
+export interface OfficialActiveAuctionListItem extends ActiveAuctionListItemBase {
+  readonly publisherType: 'GAME_MASTER'
+  readonly priceKind: 'REAL_MONEY'
+  readonly minimumBidCredits: null
+  readonly buyNowCredits: null
+  readonly currency: string
+  readonly minimumBidAmountMinor: number
+  readonly buyNowAmountMinor: number | null
+  readonly officialMark: 'OFFICIAL' | 'PREMIUM'
+}
+
+export type ActiveAuctionListItem = PlayerActiveAuctionListItem | OfficialActiveAuctionListItem
 
 export interface ListActiveAuctionsInput {
   readonly now: Date
