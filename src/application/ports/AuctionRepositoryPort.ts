@@ -2,6 +2,10 @@ import type { Auction, AuctionSnapshot } from '../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../domain/entities/AutoBidConfig'
 import type { AuctionClosingResult } from '../../domain/entities/AuctionClosingResult'
 import type { Bid, BidSnapshot } from '../../domain/entities/Bid'
+import type {
+  OfficialAuction,
+  OfficialAuctionSnapshot,
+} from '../../domain/entities/OfficialAuction'
 
 export interface PersistAuctionPublicationCommand {
   readonly operationId: string
@@ -12,6 +16,16 @@ export interface PersistAuctionPublicationCommand {
 
 export interface PersistAuctionPublicationResult {
   readonly auction: AuctionSnapshot
+  readonly replayed: boolean
+}
+
+export interface PersistOfficialAuctionPublicationCommand {
+  readonly operationId: string
+  readonly auction: OfficialAuction
+}
+
+export interface PersistOfficialAuctionPublicationResult {
+  readonly auction: OfficialAuctionSnapshot
   readonly replayed: boolean
 }
 
@@ -175,10 +189,13 @@ export interface RecordBuyNowFailureCommand {
 
 export interface AuctionRepositoryPort {
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult>
-
+  publishOfficial(
+    command: PersistOfficialAuctionPublicationCommand,
+  ): Promise<PersistOfficialAuctionPublicationResult>
   recordFailure(command: RecordPublicationFailureCommand): Promise<void>
 
   findById(auctionId: string): Promise<AuctionSnapshot | null>
+  findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null>
   findAuctionAggregate(auctionId: string): Promise<Auction | null>
   findInventoryCommitmentId(auctionId: string): Promise<string | null>
   finishAuction(command: FinishAuctionCommand): Promise<void>

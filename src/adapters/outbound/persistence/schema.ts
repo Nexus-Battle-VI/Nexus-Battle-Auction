@@ -20,14 +20,27 @@ export interface AuctionTable {
   seller_id: string
   product_id: string
   duration_hours: number
+  /** PLAYER o GAME_MASTER (HU-66). Discrimina, junto a `price_kind`, la fila. */
+  publisher_type: string
+  /** CREDITS (HU-62) o REAL_MONEY (HU-66); ver la restriccion discriminada de la migracion. */
+  price_kind: string
   publication_fee_credits: number
-  minimum_bid_credits: number
+  /** Solo CREDITS. Nulo en una publicacion oficial (REAL_MONEY). */
+  minimum_bid_credits: number | null
   buy_now_credits: number | null
+  /** Solo REAL_MONEY: moneda ISO 4217 del precio. */
+  currency: string | null
+  minimum_bid_amount_minor: number | null
+  buy_now_amount_minor: number | null
+  /** Solo REAL_MONEY: OFFICIAL o PREMIUM. */
+  official_mark: string | null
   status: string
   published_at: Timestamp
   closes_at: Timestamp
-  inventory_commitment_id: string
-  fee_charge_id: string
+  /** Solo CREDITS: una publicacion oficial no reserva inventario de jugador. */
+  inventory_commitment_id: string | null
+  /** Solo CREDITS: una publicacion oficial no cobra comision. */
+  fee_charge_id: string | null
   finished_at: Date | null
   closing_result_type: string | null
   winning_bid_id: string | null

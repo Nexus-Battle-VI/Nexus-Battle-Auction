@@ -25,6 +25,8 @@ import type {
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
   RecordBuyNowFailureCommand,
+  PersistOfficialAuctionPublicationCommand,
+  PersistOfficialAuctionPublicationResult,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
@@ -40,6 +42,7 @@ import {
 } from '../../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
+import type { OfficialAuctionSnapshot } from '../../../domain/entities/OfficialAuction'
 
 interface OperationRecord {
   readonly hash: string
@@ -49,6 +52,24 @@ interface OperationRecord {
 interface StoredBid {
   readonly snapshot: BidSnapshot
   readonly creditReservationId: string | null
+}
+
+const officialHashOf = (command: PersistOfficialAuctionPublicationCommand): string => {
+  const auction = command.auction.snapshot()
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        auction.publisherId,
+        auction.productId,
+        auction.durationHours,
+        auction.currency,
+        auction.minimumBidAmountMinor,
+        auction.buyNowAmountMinor,
+        auction.mark,
+        auction.status,
+      ]),
+    )
+    .digest('hex')
 }
 
 const hashOf = (command: PersistAuctionPublicationCommand): string => {
@@ -131,6 +152,8 @@ export class InMemoryAuctionRepository
 
   private readonly inventoryCommitmentIds = new Map<string, string>()
 
+  private readonly officialAuctions = new Map<string, OfficialAuctionSnapshot>()
+
   private readonly operations = new Map<string, OperationRecord>()
 
   private readonly failures = new Map<string, RecordPublicationFailureCommand>()
@@ -189,6 +212,26 @@ export class InMemoryAuctionRepository
       auction: snapshot,
       replayed: false,
     })
+  }
+
+  publishOfficial(
+    command: PersistOfficialAuctionPublicationCommand,
+  ): Promise<PersistOfficialAuctionPublicationResult> {
+    const hash = officialHashOf(command)
+    const previous = this.operations.get(command.operationId)
+    if (previous !== undefined) {
+      if (previous.hash !== hash) return Promise.reject(new IdempotencyConflictError())
+      const auction = this.officialAuctions.get(previous.auctionId)
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+      return Promise.resolve({ auction, replayed: true })
+    }
+
+    const snapshot = command.auction.snapshot()
+    this.officialAuctions.set(snapshot.id, snapshot)
+    this.operations.set(command.operationId, { hash, auctionId: snapshot.id })
+    return Promise.resolve({ auction: snapshot, replayed: false })
   }
 
   recordFailure(command: RecordPublicationFailureCommand): Promise<void> {
@@ -374,6 +417,10 @@ export class InMemoryAuctionRepository
         }
       }),
     })
+  }
+
+  findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null> {
+    return Promise.resolve(this.officialAuctions.get(auctionId) ?? null)
   }
 
   countActiveBySeller(sellerId: string): Promise<number> {

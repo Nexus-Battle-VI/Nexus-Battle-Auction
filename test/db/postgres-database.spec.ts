@@ -52,6 +52,12 @@ import type {
   ReleaseInventoryProductCommand,
 } from '../../src/application/ports/ProductInventoryPort'
 import {
+  AuctionPublisherType,
+  OfficialAuction,
+  OfficialAuctionMark,
+} from '../../src/domain/entities/OfficialAuction'
+import { AuctionPriceKind } from '../../src/domain/value-objects/AuctionPublicationPricing'
+import {
   MIGRATIONS,
   createDatabase,
   migrateToLatest,
@@ -2129,6 +2135,8 @@ describe('Persistencia PostgreSQL', () => {
           seller_id: 'seller',
           product_id: `product-${auctionId}`,
           duration_hours: 24,
+          publisher_type: 'PLAYER',
+          price_kind: 'CREDITS',
           publication_fee_credits: 1,
           minimum_bid_credits: 1,
           buy_now_credits: null,
@@ -2326,6 +2334,8 @@ describe('Persistencia PostgreSQL', () => {
           seller_id: 'seller',
           product_id: `product-${auctionId}`,
           duration_hours: 24,
+          publisher_type: 'PLAYER',
+          price_kind: 'CREDITS',
           publication_fee_credits: 1,
           minimum_bid_credits: 1,
           buy_now_credits: null,
@@ -2518,6 +2528,8 @@ describe('Persistencia PostgreSQL', () => {
           seller_id: 'seller',
           product_id: 'product-empty',
           duration_hours: 24,
+          publisher_type: 'PLAYER',
+          price_kind: 'CREDITS',
           publication_fee_credits: 1,
           minimum_bid_credits: 1,
           buy_now_credits: null,
@@ -2626,6 +2638,235 @@ describe('Persistencia PostgreSQL', () => {
           .where('id', '=', older.eventId)
           .executeTakeFirstOrThrow(),
       ).resolves.toMatchObject({ published_at: new Date('2026-01-03') })
+    })
+  })
+
+  describe('repositorio de publicaciones oficiales (HU-66)', () => {
+    const officialPublication = (
+      id: string,
+      options: { readonly productId?: string; readonly mark?: OfficialAuctionMark } = {},
+    ) => ({
+      operationId: `operation-${id}`,
+      auction: OfficialAuction.publish({
+        auctionId: id,
+        publisherId: 'upb-company-subject',
+        publisherType: AuctionPublisherType.GameMaster,
+        productId: options.productId ?? `exclusive-${id}`,
+        durationHours: 48,
+        pricing: {
+          kind: AuctionPriceKind.RealMoney,
+          minimumBid: { amountMinor: 150_000, currency: 'COP' },
+          buyNow: { amountMinor: 300_000, currency: 'COP' },
+        },
+        mark: options.mark ?? OfficialAuctionMark.Official,
+        publishedAt: new Date('2026-09-21T12:00:00.000Z'),
+      }),
+    })
+
+    beforeEach(async () => {
+      await sql`
+        truncate auction_publication_operations, auction_audit_log,
+        auction_publication_failures, outbox_events, auctions restart identity cascade
+      `.execute(db)
+    })
+
+    it.each([OfficialAuctionMark.Official, OfficialAuctionMark.Premium])(
+      'persiste una subasta %s en dinero real, auditoria y outbox en una unidad atomica',
+      async (mark) => {
+        const repository = new PostgresAuctionRepository(db)
+        const result = await repository.publishOfficial(officialPublication('official-1', { mark }))
+
+        expect(result.replayed).toBe(false)
+        expect(result.auction).toMatchObject({
+          publisherId: 'upb-company-subject',
+          publisherType: AuctionPublisherType.GameMaster,
+          publicationFeeCredits: 0,
+          currency: 'COP',
+          minimumBidAmountMinor: 150_000,
+          buyNowAmountMinor: 300_000,
+          mark,
+        })
+        await expect(repository.findOfficialById('official-1')).resolves.toEqual(result.auction)
+
+        const audit = await db
+          .selectFrom('auction_audit_log')
+          .selectAll()
+          .where('auction_id', '=', 'official-1')
+          .execute()
+        const outbox = await db
+          .selectFrom('outbox_events')
+          .selectAll()
+          .where('aggregate_id', '=', 'official-1')
+          .execute()
+        expect(audit).toHaveLength(1)
+        expect(audit[0]).toMatchObject({
+          auction_id: 'official-1',
+          operation_id: 'operation-official-1',
+          action: 'OFFICIAL_AUCTION_PUBLISHED',
+          actor_id: 'upb-company-subject',
+        })
+        expect(outbox).toHaveLength(1)
+        expect(outbox[0]).toMatchObject({
+          aggregate_id: 'official-1',
+          event_type: 'auction.official-published.v1',
+          published_at: null,
+        })
+      },
+    )
+
+    it('un reintento devuelve la publicacion sin duplicar efectos locales', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const command = officialPublication('official-idempotent')
+      const retry = {
+        ...officialPublication('official-generated-again', {
+          productId: 'exclusive-official-idempotent',
+        }),
+        operationId: command.operationId,
+      }
+
+      await expect(repository.publishOfficial(command)).resolves.toMatchObject({
+        replayed: false,
+      })
+      await expect(repository.publishOfficial(retry)).resolves.toMatchObject({
+        replayed: true,
+        auction: { id: 'official-idempotent' },
+      })
+
+      const { amount } = await db
+        .selectFrom('outbox_events')
+        .select(sql<number>`count(*)::integer`.as('amount'))
+        .executeTakeFirstOrThrow()
+      expect(amount).toBe(1)
+    })
+
+    it('rechaza reutilizar la operacion con otra intencion funcional', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(officialPublication('official-1'))
+
+      await expect(
+        repository.publishOfficial({
+          ...officialPublication('official-2', { mark: OfficialAuctionMark.Premium }),
+          operationId: 'operation-official-1',
+        }),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+    })
+
+    it('revierte todos los registros si la publicacion oficial viola una restriccion', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(
+        officialPublication('official-first', { productId: 'same-exclusive-product' }),
+      )
+
+      await expect(
+        repository.publishOfficial(
+          officialPublication('official-failed', { productId: 'same-exclusive-product' }),
+        ),
+      ).rejects.toBeDefined()
+
+      await expect(repository.findOfficialById('official-failed')).resolves.toBeNull()
+      const operation = await db
+        .selectFrom('auction_publication_operations')
+        .selectAll()
+        .where('operation_id', '=', 'operation-official-failed')
+        .executeTakeFirst()
+      expect(operation).toBeUndefined()
+      const audit = await db
+        .selectFrom('auction_audit_log')
+        .selectAll()
+        .where('auction_id', '=', 'official-failed')
+        .execute()
+      expect(audit).toHaveLength(0)
+    })
+
+    it('mantiene disponible la lectura de subastas HU-62 junto a publicaciones oficiales', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const playerCommand = {
+        operationId: 'operation-player-1',
+        auction: Auction.publish({
+          auctionId: 'player-1',
+          sellerId: 'seller-1',
+          productId: 'player-product-1',
+          durationHours: 24,
+          minimumBidCredits: 10,
+          buyNowCredits: 20,
+          publishedAt: new Date('2026-09-21T12:00:00.000Z'),
+          eligibility: {
+            productOwnedBySeller: true,
+            productInUse: false,
+            productTradable: true,
+            sellerHasActiveSanctions: false,
+            activeAuctionCount: 0,
+          },
+        }),
+        inventoryCommitmentId: 'commitment-1',
+        feeChargeId: 'charge-1',
+      }
+
+      await repository.publish(playerCommand)
+      await repository.publishOfficial(officialPublication('official-1'))
+
+      await expect(repository.findById('player-1')).resolves.toMatchObject({
+        id: 'player-1',
+        minimumBidCredits: 10,
+      })
+      await expect(repository.findById('official-1')).resolves.toBeNull()
+      await expect(repository.findOfficialById('official-1')).resolves.toMatchObject({
+        id: 'official-1',
+        publisherType: AuctionPublisherType.GameMaster,
+      })
+      await expect(repository.findOfficialById('player-1')).resolves.toBeNull()
+    })
+
+    it('permanece disponible desde una conexion nueva', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(officialPublication('official-durable'))
+
+      const restarted = createDatabase({ connectionString: container.getConnectionUri() })
+      try {
+        await expect(
+          new PostgresAuctionRepository(restarted).findOfficialById('official-durable'),
+        ).resolves.toMatchObject({ id: 'official-durable', status: 'ACTIVE' })
+      } finally {
+        await restarted.destroy()
+      }
+    })
+
+    it('la restriccion discriminada rechaza combinaciones invalidas de columnas', async () => {
+      const base = {
+        id: 'invalid-row',
+        seller_id: 'upb-company-subject',
+        product_id: 'exclusive-invalid',
+        duration_hours: 48,
+        publisher_type: 'GAME_MASTER',
+        price_kind: 'REAL_MONEY',
+        publication_fee_credits: 0,
+        currency: 'COP',
+        minimum_bid_amount_minor: 150_000,
+        buy_now_amount_minor: null,
+        official_mark: 'OFFICIAL',
+        status: 'ACTIVE',
+        published_at: new Date('2026-09-21T12:00:00.000Z'),
+        closes_at: new Date('2026-09-23T12:00:00.000Z'),
+        inventory_commitment_id: null,
+        fee_charge_id: null,
+      }
+
+      // Una fila REAL_MONEY con un precio en creditos tambien puesto es la
+      // mezcla que la restriccion existe para impedir.
+      await expect(
+        db
+          .insertInto('auctions')
+          .values({ ...base, minimum_bid_credits: 10 })
+          .execute(),
+      ).rejects.toBeDefined()
+
+      // Un GAME_MASTER sin marca oficial tampoco es una fila valida.
+      await expect(
+        db
+          .insertInto('auctions')
+          .values({ ...base, minimum_bid_credits: null, official_mark: null })
+          .execute(),
+      ).rejects.toBeDefined()
     })
   })
 })
