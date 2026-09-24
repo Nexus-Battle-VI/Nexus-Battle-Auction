@@ -17,6 +17,8 @@ import { HttpBidCreditsClient } from '../../adapters/outbound/http/HttpBidCredit
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
+import { HttpPublicationFeeClient } from '../../adapters/outbound/http/HttpPublicationFeeClient'
+import { HttpSellerSanctionClient } from '../../adapters/outbound/http/HttpSellerSanctionClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
 import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
 import { OfficialAuctionEligibilityClient } from '../../adapters/outbound/http/OfficialAuctionEligibilityClient'
@@ -538,7 +540,20 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
     {
       provide: PUBLICATION_FEE,
 
-      useFactory: (): PublicationFeePort => new UnavailablePublicationFee(),
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): PublicationFeePort => {
+        if (config.walletBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailablePublicationFee()
+        }
+        return new HttpPublicationFeeClient({
+          baseUrl: config.walletBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.walletRequestTimeoutMs,
+          logger,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, LOGGER, CLOCK],
     },
 
     {
@@ -717,7 +732,20 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
     {
       provide: SELLER_SANCTIONS,
 
-      useFactory: (): SellerSanctionPort => new UnavailableSellerSanctions(),
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): SellerSanctionPort => {
+        if (config.accountBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailableSellerSanctions()
+        }
+        return new HttpSellerSanctionClient({
+          baseUrl: config.accountBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.accountRequestTimeoutMs,
+          logger,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, LOGGER, CLOCK],
     },
 
     {

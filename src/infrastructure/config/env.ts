@@ -55,6 +55,17 @@ export interface AppConfig {
   readonly catalogBaseUrl: string
 
   /**
+   * HU-62.
+   *
+   * URL interna de Account, para consultar si un vendedor tiene una sancion
+   * activa antes de publicar. null deja el chequeo fail-closed (mismo
+   * criterio que `walletBaseUrl`/`inventoryBaseUrl`).
+   */
+  readonly accountBaseUrl: string | null
+
+  readonly accountRequestTimeoutMs: number
+
+  /**
    * HU-63.5.
    *
    * URL interna del servidor de Notifications que recibe
@@ -244,6 +255,14 @@ export const loadConfig = (env: RawEnv): AppConfig => {
 
   const walletRequestTimeoutMs = readInteger(env, 'WALLET_REQUEST_TIMEOUT_MS', 3_000, 1, 60_000)
 
+  const accountBaseUrl = readString(env, 'ACCOUNT_BASE_URL', '')
+
+  if (env.ACCOUNT_REQUEST_TIMEOUT_MS === '') {
+    throw new ConfigurationError('ACCOUNT_REQUEST_TIMEOUT_MS no puede estar vacio.')
+  }
+
+  const accountRequestTimeoutMs = readInteger(env, 'ACCOUNT_REQUEST_TIMEOUT_MS', 3_000, 1, 60_000)
+
   const inventoryBaseUrl = readString(env, 'INVENTORY_BASE_URL', '')
 
   if (env.INVENTORY_REQUEST_TIMEOUT_MS === '') {
@@ -333,6 +352,14 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  if (accountBaseUrl !== '') {
+    try {
+      new URL(accountBaseUrl)
+    } catch {
+      throw new ConfigurationError('ACCOUNT_BASE_URL debe ser una URL valida.')
+    }
+  }
+
   if (walletBaseUrl !== '' && internalServiceAuthSecret === '') {
     throw new ConfigurationError(
       'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando WALLET_BASE_URL esta configurado.',
@@ -342,6 +369,12 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   if (inventoryBaseUrl !== '' && internalServiceAuthSecret === '') {
     throw new ConfigurationError(
       'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando INVENTORY_BASE_URL esta configurado.',
+    )
+  }
+
+  if (accountBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando ACCOUNT_BASE_URL esta configurado.',
     )
   }
 
@@ -439,6 +472,10 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     inventoryBaseUrl: inventoryBaseUrl === '' ? null : inventoryBaseUrl,
 
     inventoryRequestTimeoutMs,
+
+    accountBaseUrl: accountBaseUrl === '' ? null : accountBaseUrl,
+
+    accountRequestTimeoutMs,
 
     auctionSettlementBatchSize,
 
