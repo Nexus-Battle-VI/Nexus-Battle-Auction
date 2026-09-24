@@ -19,6 +19,7 @@ import {
   IdempotencyConflictError,
   InsufficientPublicationFundsError,
   PersistedAuctionNotFoundError,
+  ProductNotEligibleForOfficialAuctionError,
 } from '../../src/application/errors/AuctionPersistenceError'
 import { InsufficientBidCreditsError } from '../../src/application/errors/BidCreditError'
 import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
@@ -35,6 +36,7 @@ import { ConfigureAutoBid } from '../../src/application/use-cases/ConfigureAutoB
 import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
 import { ExecuteBuyNowUseCase } from '../../src/application/use-cases/ExecuteBuyNowUseCase'
 import { PublishAuction } from '../../src/application/use-cases/PublishAuction'
+import { PublishOfficialAuction } from '../../src/application/use-cases/PublishOfficialAuction'
 import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
 import { AutoBidRuleCode, AutoBidRuleViolation } from '../../src/domain/errors/AutoBidRuleViolation'
@@ -172,6 +174,39 @@ const publishAuctionStub = {
 
     return Promise.resolve({
       ...publishedAuction,
+      productId: command.productId,
+    })
+  }),
+}
+
+const publishedOfficialAuction = {
+  id: 'official-auction-created',
+  publisherId: 'subject-upb-company',
+  publisherType: 'GAME_MASTER' as const,
+  productId: 'exclusive-ok',
+  durationHours: 48 as const,
+  publicationFeeCredits: 0,
+  currency: 'COP',
+  minimumBidAmountMinor: 150_000,
+  buyNowAmountMinor: 300_000,
+  mark: 'OFFICIAL' as const,
+  status: 'ACTIVE' as const,
+  publishedAt: new Date('2026-09-23T12:00:00.000Z'),
+  closesAt: new Date('2026-09-25T12:00:00.000Z'),
+}
+
+const publishOfficialAuctionStub = {
+  execute: jest.fn((command: { productId: string }) => {
+    if (command.productId === 'exclusive-not-eligible') {
+      return Promise.reject(new ProductNotEligibleForOfficialAuctionError(command.productId))
+    }
+
+    if (command.productId === 'exclusive-unavailable') {
+      return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
+    }
+
+    return Promise.resolve({
+      ...publishedOfficialAuction,
       productId: command.productId,
     })
   }),
@@ -395,6 +430,8 @@ const buildApp = async (): Promise<INestApplication> => {
     .useValue(stubVerifier)
     .overrideProvider(PublishAuction)
     .useValue(publishAuctionStub)
+    .overrideProvider(PublishOfficialAuction)
+    .useValue(publishOfficialAuctionStub)
     .overrideProvider(RegisterBid)
     .useValue(registerBidStub)
     .overrideProvider(ConfigureAutoBid)
@@ -657,6 +694,136 @@ describe('Servicio con autenticacion activa', () => {
       expect(Object.keys(operation?.responses ?? {})).toEqual(
         expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
       )
+    })
+  })
+
+  describe('Publicacion de subastas oficiales HU-66.5', () => {
+    const validBody = {
+      productId: 'exclusive-ok',
+      durationHours: 48,
+      currency: 'COP',
+      minimumBidAmountMinor: 150_000,
+      buyNowAmountMinor: 300_000,
+    }
+
+    const publish = (
+      token = 'token-maestro',
+      body: Record<string, unknown> = validBody,
+      operationId = 'operation-official-1',
+    ) =>
+      request(app.getHttpServer())
+        .post('/api/v1/official-auctions')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', operationId)
+        .send(body)
+
+    beforeEach(() => {
+      publishOfficialAuctionStub.execute.mockClear()
+    })
+
+    it('responde 201 y deriva el publicador de la identidad autorizada', async () => {
+      const response = await publish()
+
+      expect(response.status).toBe(201)
+      expect(response.body).toMatchObject({
+        id: 'official-auction-created',
+        publisherId: 'subject-upb-company',
+        publisherType: 'GAME_MASTER',
+        publicationFeeCredits: 0,
+        mark: 'OFFICIAL',
+      })
+      expect(publishOfficialAuctionStub.execute).toHaveBeenCalledWith({
+        operationId: 'operation-official-1',
+        publisherId: 'subject-upb-company',
+        productId: 'exclusive-ok',
+        durationHours: 48,
+        currency: 'COP',
+        minimumBidAmountMinor: 150_000,
+        buyNowAmountMinor: 300_000,
+      })
+    })
+
+    it('rechaza token ausente o invalido con 401', async () => {
+      const missing = await request(app.getHttpServer())
+        .post('/api/v1/official-auctions')
+        .set('Idempotency-Key', 'operation-official-1')
+        .send(validBody)
+
+      expect(missing.status).toBe(401)
+      expect((await publish('token-falso')).status).toBe(401)
+      expect(publishOfficialAuctionStub.execute).not.toHaveBeenCalled()
+    })
+
+    it.each(['token-jugador', 'token-admin', 'token-super', 'token-maestro-ajeno'])(
+      'rechaza con 403 la identidad no autorizada %s',
+      async (token) => {
+        expect((await publish(token)).status).toBe(403)
+      },
+    )
+
+    it.each([
+      ['marca inyectada', { ...validBody, mark: 'PREMIUM' }],
+      ['publicador inyectado', { ...validBody, publisherId: 'attacker' }],
+      ['comision inyectada', { ...validBody, publicationFeeCredits: 99 }],
+      ['duracion invalida', { ...validBody, durationHours: 72 }],
+      ['moneda invalida', { ...validBody, currency: 'cop' }],
+      ['precio decimal', { ...validBody, minimumBidAmountMinor: 1.5 }],
+    ])('rechaza %s con contrato estricto', async (_case, body) => {
+      const response = await publish('token-maestro', body)
+
+      expect(response.status).toBe(400)
+      expect(response.body).toMatchObject({ code: 'INVALID_REQUEST' })
+      expect(publishOfficialAuctionStub.execute).not.toHaveBeenCalled()
+    })
+
+    it('exige Idempotency-Key y propaga la misma clave en los reintentos', async () => {
+      const missing = await request(app.getHttpServer())
+        .post('/api/v1/official-auctions')
+        .set('Authorization', 'Bearer token-maestro')
+        .send(validBody)
+
+      expect(missing.status).toBe(400)
+      expect(missing.body).toMatchObject({ code: 'INVALID_IDEMPOTENCY_KEY' })
+
+      const first = await publish('token-maestro', validBody, 'official-retry-1')
+      const retry = await publish('token-maestro', validBody, 'official-retry-1')
+      expect(first.status).toBe(201)
+      expect(retry.status).toBe(201)
+      expect(retry.body).toEqual(first.body)
+      expect(publishOfficialAuctionStub.execute).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ operationId: 'official-retry-1' }),
+      )
+    })
+
+    it.each([
+      ['exclusive-not-eligible', 422, 'PRODUCT_NOT_ELIGIBLE'],
+      ['exclusive-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
+    ])('mapea %s a HTTP %i con codigo estable', async (productId, status, code) => {
+      const response = await publish('token-maestro', { ...validBody, productId })
+
+      expect(response.status).toBe(status)
+      expect(response.body).toMatchObject({ statusCode: status, code })
+    })
+
+    it('publica en OpenAPI seguridad, idempotencia, DTO y respuestas estables', () => {
+      const document = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().addBearerAuth().build(),
+      )
+      const operation = document.paths['/api/v1/official-auctions']?.post
+
+      expect(operation).toBeDefined()
+      expect(operation?.security).toEqual([{ bearer: [] }])
+      expect(operation?.parameters).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'Idempotency-Key', in: 'header', required: true }),
+        ]),
+      )
+      expect(Object.keys(operation?.responses ?? {})).toEqual(
+        expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
+      )
+      expect(operation?.requestBody).toBeDefined()
     })
   })
 
