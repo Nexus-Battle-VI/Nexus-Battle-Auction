@@ -29,6 +29,8 @@ import type {
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
   RecordBuyNowFailureCommand,
+  PersistOfficialAuctionPublicationCommand,
+  PersistOfficialAuctionPublicationResult,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
@@ -45,6 +47,11 @@ import {
 } from '../../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
+import type { OfficialAuctionMark } from '../../../domain/entities/OfficialAuction'
+import {
+  AuctionPublisherType,
+  type OfficialAuctionSnapshot,
+} from '../../../domain/entities/OfficialAuction'
 import type { Database } from './schema'
 
 type AuctionRow = Selectable<Database['auctions']>
@@ -76,26 +83,84 @@ const requestHash = (command: PersistAuctionPublicationCommand): string => {
     .digest('hex')
 }
 
-const toSnapshot = (row: AuctionRow): AuctionSnapshot => ({
-  id: row.id,
-  sellerId: row.seller_id,
-  productId: row.product_id,
-  durationHours: row.duration_hours as 24 | 48,
-  publicationFeeCredits: row.publication_fee_credits,
-  minimumBidCredits: row.minimum_bid_credits,
-  buyNowCredits: row.buy_now_credits,
-  status: row.status as AuctionStatus,
-  publishedAt: new Date(row.published_at),
-  closesAt: new Date(row.closes_at),
-})
+const officialRequestHash = (command: PersistOfficialAuctionPublicationCommand): string => {
+  const auction = command.auction.snapshot()
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        auction.publisherId,
+        auction.productId,
+        auction.durationHours,
+        auction.currency,
+        auction.minimumBidAmountMinor,
+        auction.buyNowAmountMinor,
+        auction.mark,
+        auction.status,
+      ]),
+      'utf8',
+    )
+    .digest('hex')
+}
 
+/** `null` si la fila no pertenece a la rama de creditos (HU-62). */
+const toSnapshot = (row: AuctionRow): AuctionSnapshot | null => {
+  if (row.price_kind !== 'CREDITS' || row.minimum_bid_credits === null) return null
+
+  return {
+    id: row.id,
+    sellerId: row.seller_id,
+    productId: row.product_id,
+    durationHours: row.duration_hours as 24 | 48,
+    publicationFeeCredits: row.publication_fee_credits,
+    minimumBidCredits: row.minimum_bid_credits,
+    buyNowCredits: row.buy_now_credits,
+    status: row.status as AuctionStatus,
+    publishedAt: new Date(row.published_at),
+    closesAt: new Date(row.closes_at),
+  }
+}
+
+/** `null` si la fila no pertenece a la rama de dinero real (HU-66). */
+const toOfficialSnapshot = (row: AuctionRow): OfficialAuctionSnapshot | null => {
+  if (
+    row.price_kind !== 'REAL_MONEY' ||
+    row.currency === null ||
+    row.minimum_bid_amount_minor === null ||
+    row.official_mark === null
+  ) {
+    return null
+  }
+
+  return {
+    id: row.id,
+    publisherId: row.seller_id,
+    publisherType: AuctionPublisherType.GameMaster,
+    productId: row.product_id,
+    durationHours: row.duration_hours as 24 | 48,
+    publicationFeeCredits: 0,
+    currency: row.currency,
+    minimumBidAmountMinor: row.minimum_bid_amount_minor,
+    buyNowAmountMinor: row.buy_now_amount_minor,
+    mark: row.official_mark as OfficialAuctionMark,
+    status: row.status as AuctionStatus,
+    publishedAt: new Date(row.published_at),
+    closesAt: new Date(row.closes_at),
+  }
+}
+
+/** Solo se llama con filas CREDITS; una fila REAL_MONEY aqui es un error del llamador. */
 const toAuction = (row: AuctionRow): Auction => {
+  const snapshot = toSnapshot(row)
+  if (snapshot === null) {
+    throw new PersistedAuctionNotFoundError(row.id)
+  }
+
   if (row.status !== 'FINISHED' || row.finished_at === null) {
-    return Auction.rehydrate({ ...toSnapshot(row), finishedAt: null, closingResult: null })
+    return Auction.rehydrate({ ...snapshot, finishedAt: null, closingResult: null })
   }
 
   return Auction.rehydrate({
-    ...toSnapshot(row),
+    ...snapshot,
     finishedAt: row.finished_at,
     closingResult: {
       outcome: row.closing_result_type as AuctionClosingOutcome,
@@ -170,6 +235,19 @@ const buyNowRequestHash = (command: CloseAuctionByBuyNowCommand): string =>
     .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]), 'utf8')
     .digest('hex')
 
+const findOfficialAuction = async (
+  db: AuctionDatabase,
+  auctionId: string,
+): Promise<OfficialAuctionSnapshot | null> => {
+  const row = await db
+    .selectFrom('auctions')
+    .selectAll()
+    .where('id', '=', auctionId)
+    .executeTakeFirst()
+
+  return row === undefined ? null : toOfficialSnapshot(row)
+}
+
 const findLeadingBid = async (
   db: AuctionDatabase,
   auctionId: string,
@@ -187,19 +265,29 @@ const findLeadingBid = async (
 export class PostgresAuctionRepository
   implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
 {
-  /** Consulta determinista para el scheduler de recordatorios de HU-68. */
+  /**
+   * Consulta determinista para el scheduler de recordatorios de HU-68.
+   *
+   * Solo CREDITS: una publicacion oficial (HU-66) no tiene pujas ni
+   * recordatorios de cierre en este incremento.
+   */
   async findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]> {
     const rows = await this.db
       .selectFrom('auctions')
       .selectAll()
+      .where('price_kind', '=', 'CREDITS')
       .where('status', '=', AuctionStatus.Active)
       .where('closes_at', '>', from)
       .where('closes_at', '<=', until)
       .orderBy('closes_at', 'asc')
       .execute()
-    return rows.map(toSnapshot)
+    return rows.flatMap((row) => {
+      const snapshot = toSnapshot(row)
+      return snapshot === null ? [] : [snapshot]
+    })
   }
 
+  /** Marketplace de jugador (HU-62): una publicacion oficial no aparece aqui. */
   async listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
     const offset = (input.page - 1) * input.pageSize
     const [rows, count] = await Promise.all([
@@ -219,6 +307,7 @@ export class PostgresAuctionRepository
           'auctions.closes_at',
           'leader.amount_credits as current_bid_amount',
         ])
+        .where('auctions.price_kind', '=', 'CREDITS')
         .where('auctions.status', '=', AuctionStatus.Active)
         .where('auctions.closes_at', '>', input.now)
         .orderBy('auctions.closes_at', 'asc')
@@ -229,25 +318,34 @@ export class PostgresAuctionRepository
       this.db
         .selectFrom('auctions')
         .select(sql<number>`count(*)::integer`.as('total'))
+        .where('price_kind', '=', 'CREDITS')
         .where('status', '=', AuctionStatus.Active)
         .where('closes_at', '>', input.now)
         .executeTakeFirstOrThrow(),
     ])
     return {
       total: count.total,
-      items: rows.map((row) => ({
-        id: row.id,
-        sellerId: row.seller_id,
-        productId: row.product_id,
-        minimumBidCredits: row.minimum_bid_credits,
-        buyNowCredits: row.buy_now_credits,
-        status: AuctionStatus.Active,
-        publishedAt: new Date(row.published_at),
-        closesAt: new Date(row.closes_at),
-        currentBidAmount: row.current_bid_amount,
-      })),
+      items: rows.map((row) => {
+        // Filtrado por price_kind = 'CREDITS' arriba: nunca null en esta rama.
+        if (row.minimum_bid_credits === null) {
+          throw new Error(`La subasta ${row.id} no tiene precio en creditos.`)
+        }
+
+        return {
+          id: row.id,
+          sellerId: row.seller_id,
+          productId: row.product_id,
+          minimumBidCredits: row.minimum_bid_credits,
+          buyNowCredits: row.buy_now_credits,
+          status: AuctionStatus.Active,
+          publishedAt: new Date(row.published_at),
+          closesAt: new Date(row.closes_at),
+          currentBidAmount: row.current_bid_amount,
+        }
+      }),
     }
   }
+
   constructor(private readonly db: Kysely<Database>) {}
   async finishAuction(command: FinishAuctionCommand): Promise<void> {
     const result = command.closingResult.snapshot()
@@ -340,9 +438,15 @@ export class PostgresAuctionRepository
           seller_id: snapshot.sellerId,
           product_id: snapshot.productId,
           duration_hours: snapshot.durationHours,
+          publisher_type: AuctionPublisherType.Player,
+          price_kind: 'CREDITS',
           publication_fee_credits: snapshot.publicationFeeCredits,
           minimum_bid_credits: snapshot.minimumBidCredits,
           buy_now_credits: snapshot.buyNowCredits,
+          currency: null,
+          minimum_bid_amount_minor: null,
+          buy_now_amount_minor: null,
+          official_mark: null,
           status: snapshot.status,
           published_at: snapshot.publishedAt,
           closes_at: snapshot.closesAt,
@@ -392,6 +496,90 @@ export class PostgresAuctionRepository
         auction: snapshot,
         replayed: false,
       }
+    })
+  }
+
+  publishOfficial(
+    command: PersistOfficialAuctionPublicationCommand,
+  ): Promise<PersistOfficialAuctionPublicationResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const snapshot = command.auction.snapshot()
+      const hash = officialRequestHash(command)
+
+      // Mismo bloqueo por operacion que HU-62; una publicacion oficial no
+      // comparte el limite de diez subastas activas de PLAYER, asi que no hay
+      // bloqueo por publicador aqui.
+      await sql`select pg_advisory_xact_lock(hashtext(${command.operationId}))`.execute(transaction)
+      const previous = await transaction
+        .selectFrom('auction_publication_operations')
+        .select(['request_hash', 'auction_id'])
+        .where('operation_id', '=', command.operationId)
+        .executeTakeFirst()
+
+      if (previous !== undefined) {
+        if (previous.request_hash !== hash) throw new IdempotencyConflictError()
+        const auction = await findOfficialAuction(transaction, previous.auction_id)
+        if (auction === null) throw new PersistedAuctionNotFoundError(previous.auction_id)
+        return { auction, replayed: true }
+      }
+
+      await transaction
+        .insertInto('auctions')
+        .values({
+          id: snapshot.id,
+          seller_id: snapshot.publisherId,
+          product_id: snapshot.productId,
+          duration_hours: snapshot.durationHours,
+          publisher_type: AuctionPublisherType.GameMaster,
+          price_kind: 'REAL_MONEY',
+          publication_fee_credits: snapshot.publicationFeeCredits,
+          minimum_bid_credits: null,
+          buy_now_credits: null,
+          currency: snapshot.currency,
+          minimum_bid_amount_minor: snapshot.minimumBidAmountMinor,
+          buy_now_amount_minor: snapshot.buyNowAmountMinor,
+          official_mark: snapshot.mark,
+          status: snapshot.status,
+          published_at: snapshot.publishedAt,
+          closes_at: snapshot.closesAt,
+          inventory_commitment_id: null,
+          fee_charge_id: null,
+        })
+        .execute()
+
+      await transaction
+        .insertInto('auction_publication_operations')
+        .values({
+          operation_id: command.operationId,
+          request_hash: hash,
+          auction_id: snapshot.id,
+          completed_at: snapshot.publishedAt,
+        })
+        .execute()
+      await transaction
+        .insertInto('auction_audit_log')
+        .values({
+          auction_id: snapshot.id,
+          operation_id: command.operationId,
+          action: 'OFFICIAL_AUCTION_PUBLISHED',
+          actor_id: snapshot.publisherId,
+          occurred_at: snapshot.publishedAt,
+          details: { mark: snapshot.mark },
+        })
+        .execute()
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: randomUUID(),
+          aggregate_id: snapshot.id,
+          event_type: 'auction.official-published.v1',
+          payload: snapshot,
+          occurred_at: snapshot.publishedAt,
+          published_at: null,
+        })
+        .execute()
+
+      return { auction: snapshot, replayed: false }
     })
   }
 
@@ -516,9 +704,12 @@ export class PostgresAuctionRepository
         .selectFrom('auctions')
         .select(['id', 'minimum_bid_credits'])
         .where('id', '=', snapshot.auctionId)
+        .where('price_kind', '=', 'CREDITS')
         .executeTakeFirst()
 
-      if (auction === undefined) {
+      // Una publicacion oficial (HU-66) no admite pujas en este incremento:
+      // para persistBid es como si la subasta no existiera.
+      if (auction?.minimum_bid_credits === undefined || auction.minimum_bid_credits === null) {
         throw new PersistedAuctionNotFoundError(snapshot.auctionId)
       }
 
@@ -685,10 +876,16 @@ export class PostgresAuctionRepository
     return findAuction(this.db, auctionId)
   }
 
+  findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null> {
+    return findOfficialAuction(this.db, auctionId)
+  }
+
+  /** Solo CREDITS: la liquidacion en dinero real de una publicacion oficial no existe todavia. */
   async findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
     const rows = await this.db
       .selectFrom('auctions')
       .select(['id', 'status', 'closes_at'])
+      .where('price_kind', '=', 'CREDITS')
       .where('closes_at', '<=', now)
       .where('status', 'in', [AuctionStatus.Active, AuctionStatus.Finished])
       .orderBy('closes_at', 'asc')

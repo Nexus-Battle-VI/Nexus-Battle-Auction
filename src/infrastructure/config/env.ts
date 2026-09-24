@@ -51,7 +51,7 @@ export interface AppConfig {
   readonly cognito: CognitoConfig | null
 
   readonly internalServiceAuthSecret: string | null
-
+  readonly gameMasterSubject: string | null
   readonly catalogBaseUrl: string
 
   /**
@@ -230,6 +230,7 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   }
 
   const internalServiceAuthSecret = readString(env, 'INTERNAL_SERVICE_AUTH_SECRET', '')
+  const gameMasterSubject = readString(env, 'GAME_MASTER_SUBJECT', '').trim()
 
   const notificationsBaseUrl = readString(env, 'NOTIFICATIONS_BASE_URL', '')
 
@@ -424,7 +425,7 @@ export const loadConfig = (env: RawEnv): AppConfig => {
         : null,
 
     internalServiceAuthSecret: internalServiceAuthSecret === '' ? null : internalServiceAuthSecret,
-
+    gameMasterSubject: gameMasterSubject === '' ? null : gameMasterSubject,
     catalogBaseUrl: readString(env, 'CATALOG_BASE_URL', 'http://catalog:3003'),
 
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,

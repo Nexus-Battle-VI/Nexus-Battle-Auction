@@ -18,10 +18,12 @@ import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWa
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
 import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
+import { OfficialAuctionEligibilityClient } from '../../adapters/outbound/http/OfficialAuctionEligibilityClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
   UnavailableEarlyClosureNotification,
+  UnavailableOfficialAuctionEligibility,
   UnavailableProductInventory,
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
@@ -116,6 +118,10 @@ import {
   type AuctionSettlementCandidateReaderPort,
   type AuctionSettlementWorkRepositoryPort,
 } from '../../application/ports/AuctionSettlementWorkRepositoryPort'
+import {
+  OFFICIAL_AUCTION_ELIGIBILITY,
+  type OfficialAuctionEligibilityPort,
+} from '../../application/ports/OfficialAuctionEligibilityPort'
 import {
   PRODUCT_INVENTORY,
   type ProductInventoryPort,
@@ -487,6 +493,25 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
       inject: [APP_CONFIG, LOGGER, CLOCK],
     },
 
+    {
+      provide: OFFICIAL_AUCTION_ELIGIBILITY,
+      useFactory: (
+        config: AppConfig,
+        logger: Logger,
+        clock: ClockPort,
+      ): OfficialAuctionEligibilityPort =>
+        config.internalServiceAuthSecret === null
+          ? new UnavailableOfficialAuctionEligibility()
+          : new OfficialAuctionEligibilityClient({
+              baseUrl: config.catalogBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: 3_000,
+              logger,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
     {
       provide: PRODUCT_INVENTORY,
       useFactory: (config: AppConfig, clock: ClockPort): ProductInventoryPort => {
@@ -1071,10 +1096,8 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
 
       useFactory: (config: AppConfig, reflector: Reflector): CanActivate =>
         config.authMode === AuthMode.Jwt
-          ? new RolesGuard(reflector)
-          : {
-              canActivate: (): boolean => true,
-            },
+          ? new RolesGuard(reflector, config.gameMasterSubject)
+          : { canActivate: (): boolean => true },
 
       inject: [APP_CONFIG, Reflector],
     },

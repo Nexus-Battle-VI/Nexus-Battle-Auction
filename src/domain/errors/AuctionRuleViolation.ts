@@ -16,6 +16,9 @@ export enum AuctionRuleCode {
   AuctionNotExpired = 'AUCTION_NOT_EXPIRED',
   AuctionAlreadyFinished = 'AUCTION_ALREADY_FINISHED',
   LeadingBidDoesNotBelongToAuction = 'LEADING_BID_DOES_NOT_BELONG_TO_AUCTION',
+  InvalidMoney = 'INVALID_MONEY',
+  CurrencyMismatch = 'CURRENCY_MISMATCH',
+  InvalidOfficialMark = 'INVALID_OFFICIAL_MARK',
 }
 
 export class AuctionRuleViolation extends DomainError {
