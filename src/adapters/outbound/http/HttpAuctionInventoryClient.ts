@@ -48,15 +48,22 @@ export class HttpAuctionInventoryClient implements ProductInventoryPort {
     this.now = options.now ?? (() => new Date())
   }
 
-  inspect(ownerId: string, productId: string): Promise<InventoryProductEligibility> {
-    void ownerId
-    void productId
-    return Promise.reject(
-      new ExternalDependencyUnavailableError(
+  async inspect(ownerId: string, productId: string): Promise<InventoryProductEligibility> {
+    const path = `/api/internal/v1/inventory/auction-eligibility/${encodeURIComponent(ownerId)}/${encodeURIComponent(productId)}`
+    const payload = await this.get(path)
+    if (
+      Object.keys(payload).length !== 4 ||
+      payload.ownerId !== ownerId ||
+      payload.productId !== productId ||
+      typeof payload.ownedByPlayer !== 'boolean' ||
+      typeof payload.inUse !== 'boolean'
+    ) {
+      throw new ExternalContractError(
         'player-inventory',
-        'Player-Inventory no expone un endpoint de inspect en el contrato HU-65.',
-      ),
-    )
+        'Respuesta invalida al consultar elegibilidad de inventario.',
+      )
+    }
+    return { ownedByPlayer: payload.ownedByPlayer, inUse: payload.inUse }
   }
 
   async commit(command: CommitInventoryProductCommand): Promise<InventoryProductCommitment> {
@@ -197,7 +204,7 @@ export class HttpAuctionInventoryClient implements ProductInventoryPort {
       controller.abort()
     }, this.options.timeoutMs)
     try {
-      const response = await this.fetchImpl(`${this.options.baseUrl.replace(/\/+$/, '')}${path}`, {
+      const response = await this.fetchImpl(this.url(path), {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -246,5 +253,74 @@ export class HttpAuctionInventoryClient implements ProductInventoryPort {
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  private async get(path: string): Promise<ResponsePayload> {
+    const timestamp = String(this.now().getTime())
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      controller.abort()
+    }, this.options.timeoutMs)
+    try {
+      const response = await this.fetchImpl(this.url(path), {
+        method: 'GET',
+        headers: {
+          [INTERNAL_SERVICE_HEADER]: 'auction',
+          [INTERNAL_TIMESTAMP_HEADER]: timestamp,
+          [INTERNAL_SIGNATURE_HEADER]: signInternalRequest(this.options.secret, {
+            service: 'auction',
+            method: 'GET',
+            path,
+            timestamp,
+            body: {},
+          }),
+        },
+        signal: controller.signal,
+      })
+      if (response.status >= 500) throw new ExternalDependencyUnavailableError('player-inventory')
+      if (response.status === 404) {
+        throw new ExternalResourceNotFoundError('player-inventory', path)
+      }
+      if (response.status !== 200) {
+        throw new ExternalContractError(
+          'player-inventory',
+          `Player-Inventory respondio HTTP ${String(response.status)}.`,
+        )
+      }
+      let payload: unknown
+      try {
+        payload = await response.json()
+      } catch {
+        throw new ExternalContractError(
+          'player-inventory',
+          'Player-Inventory devolvio JSON invalido.',
+        )
+      }
+      if (!isPayload(payload)) {
+        throw new ExternalContractError(
+          'player-inventory',
+          'Player-Inventory devolvio JSON invalido.',
+        )
+      }
+      return payload
+    } catch (error: unknown) {
+      if (
+        error instanceof ExternalContractError ||
+        error instanceof ExternalDependencyUnavailableError ||
+        error instanceof ExternalResourceNotFoundError
+      ) {
+        throw error
+      }
+      throw new ExternalDependencyUnavailableError('player-inventory')
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  private url(path: string): string {
+    const base = this.options.baseUrl.replace(/\/+$/, '')
+    const baseContainsApi = new URL(base).pathname.replace(/\/+$/, '').endsWith('/api')
+    const suffix = baseContainsApi && path.startsWith('/api/') ? path.slice('/api'.length) : path
+    return `${base}${suffix}`
   }
 }
