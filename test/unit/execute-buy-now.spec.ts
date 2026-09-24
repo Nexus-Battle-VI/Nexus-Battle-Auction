@@ -1,5 +1,7 @@
 import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
 import { InMemoryEarlyClosureNotificationRepository } from '../../src/adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
+import { InMemoryAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
+import { InMemoryAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
 import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
 import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
 import type { AuctionRepositoryPort } from '../../src/application/ports/AuctionRepositoryPort'
@@ -21,6 +23,7 @@ import type {
 } from '../../src/application/ports/WalletPort'
 import { EarlyClosureNotificationService } from '../../src/application/services/EarlyClosureNotificationService'
 import { TransactionProcessingService } from '../../src/application/services/TransactionProcessingService'
+import { BuyNowPendingClaimRegistrationService } from '../../src/application/services/BuyNowPendingClaimRegistrationService'
 import {
   ExecuteBuyNowUseCase,
   type ExecuteBuyNowCommand,
@@ -28,6 +31,7 @@ import {
 import { Auction } from '../../src/domain/entities/Auction'
 import { BuyNowRuleCode, BuyNowRuleViolation } from '../../src/domain/errors/BuyNowRuleViolation'
 import { BuyNowDomainService } from '../../src/domain/services/BuyNowDomainService'
+import { FakeProductInventory } from '../support/fake-product-inventory'
 
 /**
  * No hay pujas en ninguno de estos escenarios: `EarlyClosureNotificationService`
@@ -138,16 +142,27 @@ const fixture = () => {
     new UnreachableNotification(),
     clock,
   )
+  const inventory = new FakeProductInventory()
+  const inventoryIntents = new InMemoryAuctionInventorySettlementIntentRepository()
+  const pendingClaims = new InMemoryAuctionPendingClaimRepository()
+  const pendingClaimRegistration = new BuyNowPendingClaimRegistrationService(
+    repository,
+    inventory,
+    inventoryIntents,
+    pendingClaims,
+    clock,
+  )
   const useCase = new ExecuteBuyNowUseCase(
     repository,
     wallet,
     domainService,
     transactions,
     earlyClosure,
+    pendingClaimRegistration,
     clock,
   )
 
-  return { repository, wallet, clock, useCase }
+  return { repository, wallet, clock, inventory, pendingClaims, useCase }
 }
 
 const command = (
@@ -175,6 +190,48 @@ describe('ExecuteBuyNowUseCase HU-64.4', () => {
       debitedCredits: 2500,
       remainingCredits: 2500,
       replayed: false,
+    })
+  })
+
+  it('CA-01: deja el producto pendiente de recoger del comprador', async () => {
+    const { repository, pendingClaims, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    const confirmation = await useCase.execute(command(auctionId))
+
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toMatchObject({
+      auctionId,
+      winnerId: 'buyer-1',
+      productId: 'product-1',
+      finalAmountCredits: 2500,
+      claimStatus: 'PENDING',
+    })
+
+    await expect(pendingClaims.findPendingByWinnerId('buyer-1')).resolves.toEqual([
+      expect.objectContaining({ auctionId, productId: 'product-1' }),
+    ])
+
+    void confirmation
+  })
+
+  it('reintenta el registro del pendiente de recoger cuando el primer intento fallo', async () => {
+    const { repository, inventory, pendingClaims, useCase } = fixture()
+    const auctionId = await seedActiveAuction(repository)
+
+    inventory.markPendingClaim.mockImplementationOnce(() =>
+      Promise.reject(new Error('Inventario no disponible, simulado en el test.')),
+    )
+
+    await useCase.execute(command(auctionId))
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toBeNull()
+
+    // Mismo operationId: entra por la rama de reintento/replay, que vuelve a
+    // intentar el registro del pendiente de reclamo (idempotente).
+    await useCase.execute(command(auctionId))
+
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toMatchObject({
+      auctionId,
+      winnerId: 'buyer-1',
     })
   })
 

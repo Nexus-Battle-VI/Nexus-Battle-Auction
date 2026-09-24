@@ -1,5 +1,7 @@
 import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
 import { InMemoryEarlyClosureNotificationRepository } from '../../src/adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
+import { InMemoryAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
+import { InMemoryAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
 import { InsufficientPublicationFundsError } from '../../src/application/errors/AuctionPersistenceError'
 import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
 import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
@@ -23,6 +25,7 @@ import type {
 } from '../../src/application/ports/WalletPort'
 import { EarlyClosureNotificationService } from '../../src/application/services/EarlyClosureNotificationService'
 import { TransactionProcessingService } from '../../src/application/services/TransactionProcessingService'
+import { BuyNowPendingClaimRegistrationService } from '../../src/application/services/BuyNowPendingClaimRegistrationService'
 import {
   ExecuteBuyNowUseCase,
   type ExecuteBuyNowCommand,
@@ -31,6 +34,7 @@ import { Auction } from '../../src/domain/entities/Auction'
 import { BuyNowRuleCode } from '../../src/domain/errors/BuyNowRuleViolation'
 import { InsufficientCreditsViolation } from '../../src/domain/errors/BuyNowRuleViolation'
 import { BuyNowDomainService } from '../../src/domain/services/BuyNowDomainService'
+import { FakeProductInventory } from '../support/fake-product-inventory'
 
 /** Ningun escenario de esta suite coloca pujas: nada que liberar ni notificar. */
 class UnreachableBidCredits implements BidCreditsPort {
@@ -166,16 +170,26 @@ const fixture = () => {
     new UnreachableNotification(),
     clock,
   )
+  const inventory = new FakeProductInventory()
+  const pendingClaims = new InMemoryAuctionPendingClaimRepository()
+  const pendingClaimRegistration = new BuyNowPendingClaimRegistrationService(
+    repository,
+    inventory,
+    new InMemoryAuctionInventorySettlementIntentRepository(),
+    pendingClaims,
+    clock,
+  )
   const useCase = new ExecuteBuyNowUseCase(
     repository,
     wallet,
     domainService,
     transactions,
     earlyClosure,
+    pendingClaimRegistration,
     clock,
   )
 
-  return { repository, wallet, useCase }
+  return { repository, wallet, pendingClaims, useCase }
 }
 
 const command = (

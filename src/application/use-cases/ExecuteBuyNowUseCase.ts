@@ -3,6 +3,7 @@ import type {
   TransactionProcessingService,
 } from '../services/TransactionProcessingService'
 import type { EarlyClosureNotificationService } from '../services/EarlyClosureNotificationService'
+import type { BuyNowPendingClaimRegistrationService } from '../services/BuyNowPendingClaimRegistrationService'
 import type { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
 import { AuctionNotFoundError } from '../errors/BuyNowRequestError'
 import type { AuctionRepositoryPort, BuyNowOperationRecord } from '../ports/AuctionRepositoryPort'
@@ -31,6 +32,10 @@ export interface ExecuteBuyNowCommand {
  * invocado al completar la transaccion para liberar creditos"-, y es este
  * caso de uso, no `TransactionProcessingService`, quien conoce el momento
  * exacto en que la compra ya se completo de verdad.
+ *
+ * Por el mismo motivo invoca `BuyNowPendingClaimRegistrationService`
+ * (CA-01): el producto comprado debe quedar "pendiente de recoger" del
+ * comprador, igual que ya ocurre en el cierre por vencimiento (HU-65.3).
  */
 export class ExecuteBuyNowUseCase {
   constructor(
@@ -39,6 +44,7 @@ export class ExecuteBuyNowUseCase {
     private readonly domainService: BuyNowDomainService,
     private readonly transactions: TransactionProcessingService,
     private readonly earlyClosure: EarlyClosureNotificationService,
+    private readonly pendingClaimRegistration: BuyNowPendingClaimRegistrationService,
     private readonly clock: ClockPort,
   ) {}
 
@@ -54,10 +60,12 @@ export class ExecuteBuyNowUseCase {
     if (existing !== null) {
       const confirmation = ExecuteBuyNowUseCase.toReplayedConfirmation(existing)
 
-      // Reintentar tambien reintenta avisar del cierre: si el primer intento
-      // no llego a completar HU-64.5 -el proceso murio justo despues de
-      // pagar-, este es el unico momento en que algo lo vuelve a disparar.
+      // Reintentar tambien reintenta avisar del cierre y registrar el
+      // pendiente de recoger: si el primer intento no llego a completarlos
+      // -el proceso murio justo despues de pagar-, este es el unico momento
+      // en que algo los vuelve a disparar.
       await this.notifyEarlyClosure(confirmation)
+      await this.registerPendingClaim(confirmation)
 
       return confirmation
     }
@@ -90,6 +98,7 @@ export class ExecuteBuyNowUseCase {
     })
 
     await this.notifyEarlyClosure(confirmation)
+    await this.registerPendingClaim(confirmation)
 
     return confirmation
   }
@@ -106,6 +115,28 @@ export class ExecuteBuyNowUseCase {
         auctionId: confirmation.auctionId,
         buyerId: confirmation.buyerId,
         transactionId: confirmation.transactionId,
+        closedAt: confirmation.closedAt,
+      })
+    } catch {
+      // Intencionalmente ignorado; ver el comentario de arriba.
+    }
+  }
+
+  /**
+   * Best-effort, igual que `notifyEarlyClosure`: la compra YA se completo y
+   * el comprador YA pago. Un fallo al confirmar el inventario nunca debe
+   * convertir esa compra en un error para quien la hizo -el intento queda
+   * RETRYABLE/TERMINAL_ERROR y se reintenta solo en el proximo reintento con
+   * el mismo `operationId` (ver el bloque `replayed` de arriba)-.
+   */
+  private async registerPendingClaim(confirmation: BuyNowTransactionConfirmation): Promise<void> {
+    try {
+      await this.pendingClaimRegistration.registerClaim({
+        auctionId: confirmation.auctionId,
+        sellerId: confirmation.sellerId,
+        productId: confirmation.productId,
+        winnerId: confirmation.buyerId,
+        priceCredits: confirmation.debitedCredits,
         closedAt: confirmation.closedAt,
       })
     } catch {

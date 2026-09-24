@@ -159,6 +159,7 @@ import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
 import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
+import { BuyNowPendingClaimRegistrationService } from '../../application/services/BuyNowPendingClaimRegistrationService'
 import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
@@ -976,6 +977,30 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
       ],
     },
     {
+      provide: BuyNowPendingClaimRegistrationService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        inventory: ProductInventoryPort,
+        inventoryIntents: AuctionInventorySettlementIntentRepositoryPort,
+        pendingClaims: AuctionPendingClaimRepositoryPort,
+        clock: ClockPort,
+      ): BuyNowPendingClaimRegistrationService =>
+        new BuyNowPendingClaimRegistrationService(
+          repository,
+          inventory,
+          inventoryIntents,
+          pendingClaims,
+          clock,
+        ),
+      inject: [
+        AUCTION_REPOSITORY,
+        PRODUCT_INVENTORY,
+        AUCTION_INVENTORY_SETTLEMENT_INTENT_REPOSITORY,
+        AUCTION_PENDING_CLAIM_REPOSITORY,
+        CLOCK,
+      ],
+    },
+    {
       provide: ExecuteBuyNowUseCase,
       useFactory: (
         repository: AuctionRepositoryPort,
@@ -983,6 +1008,7 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
         domainService: BuyNowDomainService,
         transactions: TransactionProcessingService,
         earlyClosure: EarlyClosureNotificationService,
+        pendingClaimRegistration: BuyNowPendingClaimRegistrationService,
         clock: ClockPort,
       ): ExecuteBuyNowUseCase =>
         new ExecuteBuyNowUseCase(
@@ -991,6 +1017,7 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
           domainService,
           transactions,
           earlyClosure,
+          pendingClaimRegistration,
           clock,
         ),
       inject: [
@@ -999,6 +1026,7 @@ export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCr
         BuyNowDomainService,
         TransactionProcessingService,
         EarlyClosureNotificationService,
+        BuyNowPendingClaimRegistrationService,
         CLOCK,
       ],
     },

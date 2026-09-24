@@ -3,6 +3,8 @@ import type { Kysely } from 'kysely'
 
 import { PostgresAuctionRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionRepository'
 import { InMemoryEarlyClosureNotificationRepository } from '../../src/adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
+import { PostgresAuctionInventorySettlementIntentRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
+import { PostgresAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
 import type { Database } from '../../src/adapters/outbound/persistence/schema'
 import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
 import { BuyNowRuleCode, BuyNowRuleViolation } from '../../src/domain/errors/BuyNowRuleViolation'
@@ -24,12 +26,14 @@ import type {
 } from '../../src/application/ports/WalletPort'
 import { EarlyClosureNotificationService } from '../../src/application/services/EarlyClosureNotificationService'
 import { TransactionProcessingService } from '../../src/application/services/TransactionProcessingService'
+import { BuyNowPendingClaimRegistrationService } from '../../src/application/services/BuyNowPendingClaimRegistrationService'
 import { describeError } from '../../src/infrastructure/observability/describe-error'
 import {
   ExecuteBuyNowUseCase,
   type ExecuteBuyNowCommand,
 } from '../../src/application/use-cases/ExecuteBuyNowUseCase'
 import { Auction } from '../../src/domain/entities/Auction'
+import { FakeProductInventory } from '../support/fake-product-inventory'
 import { BuyNowDomainService } from '../../src/domain/services/BuyNowDomainService'
 import { createDatabase, migrateToLatest } from '../../src/infrastructure/persistence/database'
 
@@ -133,12 +137,20 @@ describe('HU-64 - concurrencia de compra inmediata contra PostgreSQL real', () =
       new UnreachableNotification(),
       clock,
     )
+    const pendingClaimRegistration = new BuyNowPendingClaimRegistrationService(
+      repository,
+      new FakeProductInventory(),
+      new PostgresAuctionInventorySettlementIntentRepository(db),
+      new PostgresAuctionPendingClaimRepository(db),
+      clock,
+    )
     const useCase = new ExecuteBuyNowUseCase(
       repository,
       wallet,
       domainService,
       transactions,
       earlyClosure,
+      pendingClaimRegistration,
       clock,
     )
 
