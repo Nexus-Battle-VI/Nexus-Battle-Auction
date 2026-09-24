@@ -2739,6 +2739,58 @@ describe('Persistencia PostgreSQL', () => {
       expect(amount).toBe(1)
     })
 
+    /**
+     * HU-66.7: el reintento de arriba prueba la idempotencia en SERIE; esta
+     * prueba la prueba bajo la misma carrera real que sufriria un doble clic
+     * o un reintento automatico solapado -dos conexiones que llegan a la vez
+     * con identica operationId-. El `pg_advisory_xact_lock` de
+     * `publishOfficial` (mismo mecanismo que HU-62) debe serializarlas: una
+     * sola crea la fila, la otra se reproduce sobre ella, y ninguna deja
+     * auditoria ni outbox duplicados.
+     */
+    it('serializa dos publicaciones oficiales concurrentes con la misma operationId', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const command = officialPublication('official-concurrent')
+      const sameOperation = {
+        ...officialPublication('official-concurrent-generated-again', {
+          productId: 'exclusive-official-concurrent',
+        }),
+        operationId: command.operationId,
+      }
+
+      const [first, second] = await Promise.all([
+        repository.publishOfficial(command),
+        repository.publishOfficial(sameOperation),
+      ])
+
+      expect([first.replayed, second.replayed].sort()).toEqual([false, true])
+      expect(first.auction.id).toBe('official-concurrent')
+      expect(second.auction.id).toBe('official-concurrent')
+
+      const operations = await db
+        .selectFrom('auction_publication_operations')
+        .selectAll()
+        .where('operation_id', '=', command.operationId)
+        .execute()
+      expect(operations).toHaveLength(1)
+
+      const audit = await db
+        .selectFrom('auction_audit_log')
+        .selectAll()
+        .where('auction_id', '=', 'official-concurrent')
+        .execute()
+      expect(audit).toHaveLength(1)
+
+      const outbox = await db
+        .selectFrom('outbox_events')
+        .selectAll()
+        .where('aggregate_id', '=', 'official-concurrent')
+        .execute()
+      expect(outbox).toHaveLength(1)
+
+      await expect(repository.findOfficialById('official-concurrent-generated-again')).resolves.toBeNull()
+    })
+
     it('rechaza reutilizar la operacion con otra intencion funcional', async () => {
       const repository = new PostgresAuctionRepository(db)
       await repository.publishOfficial(officialPublication('official-1'))
