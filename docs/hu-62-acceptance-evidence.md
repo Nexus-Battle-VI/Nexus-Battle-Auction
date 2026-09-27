@@ -24,7 +24,9 @@ Los casos CP-01 y CP-02 quedan cubiertos respectivamente por la publicación de 
 - Si Inventory falla después del cobro, Wallet recibe la devolución. Si la persistencia falla, se liberan inventario y cobro y se registra el estado de la compensación.
 - La ruta exige JWT, rol `PLAYER`, identidad tomada de `sub` y una clave de idempotencia; también cubre 401, 403, 409, 422 y 503.
 
-Los contratos HTTP productivos de Account, Inventory y Wallet aún no existen en sus repositorios propietarios. Por ello, sus escenarios se prueban con dobles fieles a los puertos y el servicio falla de forma cerrada en ejecución. Catalog sí cuenta con cliente HMAC contractual. Esta limitación impide afirmar una prueba desplegada entre los cuatro servicios, pero no deja efectos parciales silenciosos.
+Auction cuenta con clientes HTTP HMAC contractuales para Catalog, Account (`HttpSellerSanctionClient`), Wallet (`HttpPublicationFeeClient`) e Inventory (`HttpAuctionInventoryClient`). Cada uno se activa solo si están configuradas su URL base (`CATALOG_BASE_URL`, `ACCOUNT_BASE_URL`, `WALLET_BASE_URL`, `INVENTORY_BASE_URL`) y `INTERNAL_SERVICE_AUTH_SECRET`; sin ellas el servicio falla de forma cerrada.
+
+Los escenarios de esta matriz se prueban con dobles fieles a los puertos y con pruebas unitarias de cada cliente contra su contrato. Esta suite no levanta los cuatro servicios reales a la vez, por lo que no equivale a una prueba desplegada entre ellos, pero tampoco deja efectos parciales silenciosos.
 
 ## Ejecución reproducible
 

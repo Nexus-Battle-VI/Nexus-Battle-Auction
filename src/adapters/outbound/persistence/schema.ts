@@ -20,14 +20,27 @@ export interface AuctionTable {
   seller_id: string
   product_id: string
   duration_hours: number
+  /** PLAYER o GAME_MASTER (HU-66). Discrimina, junto a `price_kind`, la fila. */
+  publisher_type: string
+  /** CREDITS (HU-62) o REAL_MONEY (HU-66); ver la restriccion discriminada de la migracion. */
+  price_kind: string
   publication_fee_credits: number
-  minimum_bid_credits: number
+  /** Solo CREDITS. Nulo en una publicacion oficial (REAL_MONEY). */
+  minimum_bid_credits: number | null
   buy_now_credits: number | null
+  /** Solo REAL_MONEY: moneda ISO 4217 del precio. */
+  currency: string | null
+  minimum_bid_amount_minor: number | null
+  buy_now_amount_minor: number | null
+  /** Solo REAL_MONEY: OFFICIAL o PREMIUM. */
+  official_mark: string | null
   status: string
   published_at: Timestamp
   closes_at: Timestamp
-  inventory_commitment_id: string
-  fee_charge_id: string
+  /** Solo CREDITS: una publicacion oficial no reserva inventario de jugador. */
+  inventory_commitment_id: string | null
+  /** Solo CREDITS: una publicacion oficial no cobra comision. */
+  fee_charge_id: string | null
   finished_at: Date | null
   closing_result_type: string | null
   winning_bid_id: string | null
@@ -108,6 +121,46 @@ export interface AuctionPublicationFailureTable {
   occurred_at: Timestamp
 }
 
+export interface AuctionBuyNowOperationTable {
+  operation_id: string
+  request_hash: string
+  auction_id: string
+  buyer_id: string
+  transfer_id: string
+  price_credits: number
+  remaining_credits: number
+  transaction_id: string
+  completed_at: Timestamp
+}
+
+export interface AuctionBuyNowFailureTable {
+  operation_id: string
+  auction_id: string
+  buyer_id: string
+  stage: string
+  reason: string
+  transfer_id: string | null
+  credits_reversed: boolean
+  occurred_at: Timestamp
+}
+
+export interface AuctionEarlyClosureNotificationTable {
+  auction_id: string
+  bidder_id: string
+  transaction_id: string
+  bid_id: string
+  amount_credits: number
+  closed_at: Timestamp
+  credit_operation_id: string | null
+  credit_reservation_id: string | null
+  status: string
+  attempts: number
+  credits_released: boolean
+  last_error: string | null
+  created_at: GeneratedTimestamp
+  updated_at: GeneratedTimestamp
+}
+
 export interface AuctionAuditLogTable {
   id: Generated<number>
   auction_id: string
@@ -137,6 +190,9 @@ export interface Database {
   auction_publication_failures: AuctionPublicationFailureTable
   auction_bid_credit_operations: AuctionBidCreditOperationTable
   auction_bid_credit_failures: AuctionBidCreditFailureTable
+  auction_buy_now_operations: AuctionBuyNowOperationTable
+  auction_buy_now_failures: AuctionBuyNowFailureTable
+  auction_early_closure_notifications: AuctionEarlyClosureNotificationTable
   auction_audit_log: AuctionAuditLogTable
   outbox_events: OutboxEventTable
   auction_settlements: AuctionSettlementTable

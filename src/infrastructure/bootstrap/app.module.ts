@@ -3,6 +3,7 @@ import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
 
 import { AuctionController } from '../../adapters/inbound/http/auction.controller'
+import { OfficialAuctionController } from '../../adapters/inbound/http/official-auction.controller'
 import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymous.guard'
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
 import { JwtAuthGuard } from '../../adapters/inbound/http/auth/jwt-auth.guard'
@@ -12,16 +13,25 @@ import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/to
 import { WatchlistController } from '../../adapters/inbound/http/watchlist.controller'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpAuctionInventoryClient } from '../../adapters/outbound/http/HttpAuctionInventoryClient'
+import { HttpBidCreditsClient } from '../../adapters/outbound/http/HttpBidCreditsClient'
+import { HttpEarlyClosureNotificationClient } from '../../adapters/outbound/http/HttpEarlyClosureNotificationClient'
 import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpOutbidNotificationClient'
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
+import { HttpPublicationFeeClient } from '../../adapters/outbound/http/HttpPublicationFeeClient'
+import { HttpSellerSanctionClient } from '../../adapters/outbound/http/HttpSellerSanctionClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
+import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
+import { OfficialAuctionEligibilityClient } from '../../adapters/outbound/http/OfficialAuctionEligibilityClient'
 import {
   UnavailableBidCredits,
   UnavailableCatalogProductPolicy,
+  UnavailableEarlyClosureNotification,
+  UnavailableOfficialAuctionEligibility,
   UnavailableProductInventory,
   UnavailablePublicationFee,
   UnavailableSellerSanctions,
+  UnavailableWallet,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
 import { UnavailableOutbidNotification } from '../../adapters/outbound/http/UnavailableOutbidNotification'
 import { UnavailableWatchlistEventPublisher } from '../../adapters/outbound/http/UnavailableWatchlistEventPublisher'
@@ -42,6 +52,7 @@ import { InMemoryAuctionSettlementRepository } from '../../adapters/outbound/per
 import { InMemoryAuctionSettlementOutboxRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementOutboxRepository'
 import { InMemoryAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/InMemoryAuctionSettlementWorkRepository'
 import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persistence/InMemoryBidCreditOperationReader'
+import { InMemoryEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
 import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
@@ -50,6 +61,7 @@ import { PostgresAuctionSettlementRepository } from '../../adapters/outbound/per
 import { PostgresAuctionSettlementOutboxRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementOutboxRepository'
 import { PostgresAuctionSettlementWorkRepository } from '../../adapters/outbound/persistence/PostgresAuctionSettlementWorkRepository'
 import { PostgresBidCreditOperationReader } from '../../adapters/outbound/persistence/PostgresBidCreditOperationReader'
+import { PostgresEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/PostgresEarlyClosureNotificationRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 import { SystemClock } from '../../adapters/outbound/system/SystemClock'
 import { UuidGenerator } from '../../adapters/outbound/system/UuidGenerator'
@@ -68,9 +80,14 @@ import {
 } from '../../application/ports/CatalogProductPolicyPort'
 import { CLOCK, type ClockPort } from '../../application/ports/ClockPort'
 import {
+  EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+  type EarlyClosureNotificationRepositoryPort,
+} from '../../application/ports/EarlyClosureNotificationRepositoryPort'
+import {
   IDENTIFIER_GENERATOR,
   type IdentifierGeneratorPort,
 } from '../../application/ports/IdentifierGeneratorPort'
+import { NOTIFICATION, type NotificationPort } from '../../application/ports/NotificationPort'
 import {
   OUTBID_NOTIFICATION,
   type OutbidNotificationPort,
@@ -106,6 +123,10 @@ import {
   type AuctionSettlementWorkRepositoryPort,
 } from '../../application/ports/AuctionSettlementWorkRepositoryPort'
 import {
+  OFFICIAL_AUCTION_ELIGIBILITY,
+  type OfficialAuctionEligibilityPort,
+} from '../../application/ports/OfficialAuctionEligibilityPort'
+import {
   PRODUCT_INVENTORY,
   type ProductInventoryPort,
 } from '../../application/ports/ProductInventoryPort'
@@ -126,10 +147,14 @@ import { DispatchClosingSoonReminders } from '../../application/use-cases/Dispat
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { FollowAuction } from '../../application/use-cases/FollowAuction'
 import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
+import { ListActiveAuctions } from '../../application/use-cases/ListActiveAuctions'
 import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchlistChange'
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
+import { WALLET, type WalletPort } from '../../application/ports/WalletPort'
+import { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
+import { ExecuteBuyNowUseCase } from '../../application/use-cases/ExecuteBuyNowUseCase'
 import { PersistAuctionPublication } from '../../application/use-cases/PersistAuctionPublication'
 import { PersistBidWithCredits } from '../../application/use-cases/PersistBidWithCredits'
 import { ConfigureAutoBid } from '../../application/use-cases/ConfigureAutoBid'
@@ -138,11 +163,16 @@ import { PrepareAuctionLoserReleaseTasks } from '../../application/use-cases/Pre
 import { ExpirePendingClaims } from '../../application/use-cases/ExpirePendingClaims'
 import { ProcessExpiredAuctions } from '../../application/use-cases/ProcessExpiredAuctions'
 import { PublishAuction } from '../../application/use-cases/PublishAuction'
+import { PublishOfficialAuction } from '../../application/use-cases/PublishOfficialAuction'
 import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
+import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
+import { BuyNowPendingClaimRegistrationService } from '../../application/services/BuyNowPendingClaimRegistrationService'
+import { RetryBuyNowPendingClaims } from '../../application/use-cases/RetryBuyNowPendingClaims'
+import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
 import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
@@ -150,6 +180,8 @@ import { createLogger, type Logger } from '../observability/logger'
 import { createDatabase, pingDatabase } from '../persistence/database'
 import { AuctionReminderScheduler } from '../scheduling/AuctionReminderScheduler'
 import { AuctionPendingClaimExpirationScheduler } from '../scheduling/AuctionPendingClaimExpirationScheduler'
+import { EarlyClosureRetryScheduler } from '../scheduling/EarlyClosureRetryScheduler'
+import { BuyNowPendingClaimRetryScheduler } from '../scheduling/BuyNowPendingClaimRetryScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
 import {
   NodeSchedulerTimer,
@@ -167,9 +199,70 @@ export const DATABASE_LIFECYCLE = Symbol('DatabaseLifecycle')
 
 export const INTERNAL_CALLERS: readonly string[] = []
 
+/** Seleccion fail-closed del contrato de creditos usado exclusivamente por pujas. */
+export const createBidCreditsPort = (config: AppConfig, clock: ClockPort): BidCreditsPort => {
+  if (config.walletBaseUrl === null || config.internalServiceAuthSecret === null) {
+    return new UnavailableBidCredits()
+  }
+  return new HttpBidCreditsClient({
+    baseUrl: config.walletBaseUrl,
+    secret: config.internalServiceAuthSecret,
+    timeoutMs: config.walletRequestTimeoutMs,
+    now: () => clock.now(),
+  })
+}
+
+/**
+ * HU-64.5: con URL de Notifications y secreto se usa el endpoint real de
+ * cierre por compra inmediata; sin ellos se conserva el fallback fail-closed
+ * para desarrollo local.
+ */
+export const createEarlyClosureNotificationPort = (
+  config: AppConfig,
+  logger: Logger,
+  clock: ClockPort,
+): NotificationPort => {
+  if (config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null) {
+    return new UnavailableEarlyClosureNotification()
+  }
+  return new HttpEarlyClosureNotificationClient({
+    baseUrl: config.notificationsBaseUrl,
+    secret: config.internalServiceAuthSecret,
+    serviceName: 'auction',
+    timeoutMs: config.notificationsTimeoutMs,
+    logger,
+    now: () => clock.now(),
+  })
+}
+
+/**
+ * HU-68: watchlist-events vive en un servidor/puerto de Notifications
+ * DISTINTO del de outbid/closed-by-buy-now/auto-bid-limit-reached (ver el
+ * comentario de `notificationsWatchlistBaseUrl` en env.ts), asi que usa su
+ * propia variable de entorno en vez de `notificationsBaseUrl`.
+ */
+export const createWatchlistEventPublisher = (
+  config: AppConfig,
+  clock: ClockPort,
+): WatchlistEventPublisherPort =>
+  config.notificationsWatchlistBaseUrl === null || config.internalServiceAuthSecret === null
+    ? new UnavailableWatchlistEventPublisher()
+    : new HttpWatchlistEventPublisher({
+        baseUrl: config.notificationsWatchlistBaseUrl,
+        secret: config.internalServiceAuthSecret,
+        serviceName: 'auction',
+        timeoutMs: config.notificationsTimeoutMs,
+        now: () => clock.now(),
+      })
+
 @Module({
   // La ruta estatica /watchlist debe registrarse antes de /:auctionId.
-  controllers: [HealthController, WatchlistController, AuctionController],
+  controllers: [
+    HealthController,
+    WatchlistController,
+    AuctionController,
+    OfficialAuctionController,
+  ],
 
   providers: [
     {
@@ -416,6 +509,13 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: ListActiveAuctions,
+      useFactory: (auctions: AuctionRepositoryPort, clock: ClockPort): ListActiveAuctions =>
+        new ListActiveAuctions(auctions, clock),
+      inject: [AUCTION_REPOSITORY, CLOCK],
+    },
+
+    {
       provide: UnfollowAuction,
       useFactory: (watchlist: WatchlistRepositoryPort): UnfollowAuction =>
         new UnfollowAuction(watchlist),
@@ -450,6 +550,25 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: OFFICIAL_AUCTION_ELIGIBILITY,
+      useFactory: (
+        config: AppConfig,
+        logger: Logger,
+        clock: ClockPort,
+      ): OfficialAuctionEligibilityPort =>
+        config.internalServiceAuthSecret === null
+          ? new UnavailableOfficialAuctionEligibility()
+          : new OfficialAuctionEligibilityClient({
+              baseUrl: config.catalogBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: 3_000,
+              logger,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
       provide: PRODUCT_INVENTORY,
       useFactory: (config: AppConfig, clock: ClockPort): ProductInventoryPort => {
         if (config.inventoryBaseUrl === null || config.internalServiceAuthSecret === null) {
@@ -468,13 +587,27 @@ export const INTERNAL_CALLERS: readonly string[] = []
     {
       provide: PUBLICATION_FEE,
 
-      useFactory: (): PublicationFeePort => new UnavailablePublicationFee(),
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): PublicationFeePort => {
+        if (config.walletBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailablePublicationFee()
+        }
+        return new HttpPublicationFeeClient({
+          baseUrl: config.walletBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.walletRequestTimeoutMs,
+          logger,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, LOGGER, CLOCK],
     },
 
     {
       provide: BID_CREDITS,
 
-      useFactory: (): BidCreditsPort => new UnavailableBidCredits(),
+      useFactory: createBidCreditsPort,
+      inject: [APP_CONFIG, CLOCK],
     },
 
     /**
@@ -646,21 +779,25 @@ export const INTERNAL_CALLERS: readonly string[] = []
     {
       provide: SELLER_SANCTIONS,
 
-      useFactory: (): SellerSanctionPort => new UnavailableSellerSanctions(),
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): SellerSanctionPort => {
+        if (config.accountBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailableSellerSanctions()
+        }
+        return new HttpSellerSanctionClient({
+          baseUrl: config.accountBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.accountRequestTimeoutMs,
+          logger,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, LOGGER, CLOCK],
     },
 
     {
       provide: WATCHLIST_EVENT_PUBLISHER,
-      useFactory: (config: AppConfig, clock: ClockPort): WatchlistEventPublisherPort =>
-        config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null
-          ? new UnavailableWatchlistEventPublisher()
-          : new HttpWatchlistEventPublisher({
-              baseUrl: config.notificationsBaseUrl,
-              secret: config.internalServiceAuthSecret,
-              serviceName: 'auction',
-              timeoutMs: config.notificationsTimeoutMs,
-              now: () => clock.now(),
-            }),
+      useFactory: createWatchlistEventPublisher,
       inject: [APP_CONFIG, CLOCK],
     },
 
@@ -694,6 +831,34 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: WALLET,
+      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): WalletPort =>
+        config.walletBaseUrl === null || config.internalServiceAuthSecret === null
+          ? new UnavailableWallet()
+          : new WalletHttpClient({
+              baseUrl: config.walletBaseUrl,
+              secret: config.internalServiceAuthSecret,
+              serviceName: 'auction',
+              timeoutMs: config.walletRequestTimeoutMs,
+              logger,
+              now: () => clock.now(),
+            }),
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
+      provide: NOTIFICATION,
+      useFactory: createEarlyClosureNotificationPort,
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+    {
+      provide: EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): EarlyClosureNotificationRepositoryPort =>
+        db === null
+          ? new InMemoryEarlyClosureNotificationRepository()
+          : new PostgresEarlyClosureNotificationRepository(db),
+      inject: [DATABASE],
+    },
+    {
       provide: PersistAuctionPublication,
 
       useFactory: (
@@ -724,15 +889,6 @@ export const INTERNAL_CALLERS: readonly string[] = []
       ): PersistBidWithCredits => new PersistBidWithCredits(repository, credits, clock),
 
       inject: [AUCTION_REPOSITORY, BID_CREDITS, CLOCK],
-    },
-
-    {
-      provide: GetAuctionDetail,
-
-      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
-        new GetAuctionDetail(repository),
-
-      inject: [AUCTION_REPOSITORY],
     },
 
     {
@@ -815,6 +971,20 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: PublishOfficialAuction,
+
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        eligibility: OfficialAuctionEligibilityPort,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): PublishOfficialAuction =>
+        new PublishOfficialAuction(repository, eligibility, clock, identifiers),
+
+      inject: [AUCTION_REPOSITORY, OFFICIAL_AUCTION_ELIGIBILITY, CLOCK, IDENTIFIER_GENERATOR],
+    },
+
+    {
       provide: ReactToRivalBid,
 
       useFactory: (
@@ -878,6 +1048,139 @@ export const INTERNAL_CALLERS: readonly string[] = []
     },
 
     {
+      provide: TransactionProcessingService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        wallet: WalletPort,
+        clock: ClockPort,
+        identifiers: IdentifierGeneratorPort,
+      ): TransactionProcessingService =>
+        new TransactionProcessingService(repository, wallet, clock, identifiers),
+      inject: [AUCTION_REPOSITORY, WALLET, CLOCK, IDENTIFIER_GENERATOR],
+    },
+    {
+      provide: BuyNowDomainService,
+      useFactory: (): BuyNowDomainService => new BuyNowDomainService(),
+    },
+    {
+      provide: EarlyClosureNotificationService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        notifications: EarlyClosureNotificationRepositoryPort,
+        credits: BidCreditsPort,
+        notifier: NotificationPort,
+        clock: ClockPort,
+      ): EarlyClosureNotificationService =>
+        new EarlyClosureNotificationService(repository, notifications, credits, notifier, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        EARLY_CLOSURE_NOTIFICATION_REPOSITORY,
+        BID_CREDITS,
+        NOTIFICATION,
+        CLOCK,
+      ],
+    },
+    {
+      provide: EarlyClosureRetryScheduler,
+      useFactory: (
+        worker: EarlyClosureNotificationService,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): EarlyClosureRetryScheduler =>
+        new EarlyClosureRetryScheduler(worker, timer, logger, {
+          enabled: config.auctionEarlyClosureRetrySchedulerEnabled,
+          pollIntervalMs: config.auctionEarlyClosureRetryPollIntervalMs,
+        }),
+      inject: [EarlyClosureNotificationService, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+    {
+      provide: BuyNowPendingClaimRegistrationService,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        inventory: ProductInventoryPort,
+        inventoryIntents: AuctionInventorySettlementIntentRepositoryPort,
+        pendingClaims: AuctionPendingClaimRepositoryPort,
+        clock: ClockPort,
+      ): BuyNowPendingClaimRegistrationService =>
+        new BuyNowPendingClaimRegistrationService(
+          repository,
+          inventory,
+          inventoryIntents,
+          pendingClaims,
+          clock,
+        ),
+      inject: [
+        AUCTION_REPOSITORY,
+        PRODUCT_INVENTORY,
+        AUCTION_INVENTORY_SETTLEMENT_INTENT_REPOSITORY,
+        AUCTION_PENDING_CLAIM_REPOSITORY,
+        CLOCK,
+      ],
+    },
+    {
+      provide: RetryBuyNowPendingClaims,
+      useFactory: (
+        intents: AuctionInventorySettlementIntentRepositoryPort,
+        auctions: AuctionRepositoryPort,
+        registration: BuyNowPendingClaimRegistrationService,
+        config: AppConfig,
+      ): RetryBuyNowPendingClaims =>
+        new RetryBuyNowPendingClaims(intents, auctions, registration, {
+          batchSize: config.auctionBuyNowPendingClaimRetryBatchSize,
+        }),
+      inject: [
+        AUCTION_INVENTORY_SETTLEMENT_INTENT_REPOSITORY,
+        AUCTION_REPOSITORY,
+        BuyNowPendingClaimRegistrationService,
+        APP_CONFIG,
+      ],
+    },
+    {
+      provide: BuyNowPendingClaimRetryScheduler,
+      useFactory: (
+        worker: RetryBuyNowPendingClaims,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): BuyNowPendingClaimRetryScheduler =>
+        new BuyNowPendingClaimRetryScheduler(worker, timer, logger, {
+          enabled: config.auctionBuyNowPendingClaimRetrySchedulerEnabled,
+          pollIntervalMs: config.auctionBuyNowPendingClaimRetryPollIntervalMs,
+        }),
+      inject: [RetryBuyNowPendingClaims, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+    {
+      provide: ExecuteBuyNowUseCase,
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        wallet: WalletPort,
+        domainService: BuyNowDomainService,
+        transactions: TransactionProcessingService,
+        earlyClosure: EarlyClosureNotificationService,
+        pendingClaimRegistration: BuyNowPendingClaimRegistrationService,
+        clock: ClockPort,
+      ): ExecuteBuyNowUseCase =>
+        new ExecuteBuyNowUseCase(
+          repository,
+          wallet,
+          domainService,
+          transactions,
+          earlyClosure,
+          pendingClaimRegistration,
+          clock,
+        ),
+      inject: [
+        AUCTION_REPOSITORY,
+        WALLET,
+        BuyNowDomainService,
+        TransactionProcessingService,
+        EarlyClosureNotificationService,
+        BuyNowPendingClaimRegistrationService,
+        CLOCK,
+      ],
+    },
+    {
       provide: TOKEN_VERIFIER,
 
       useFactory: (config: AppConfig, logger: Logger): TokenVerifierPort => {
@@ -918,10 +1221,8 @@ export const INTERNAL_CALLERS: readonly string[] = []
 
       useFactory: (config: AppConfig, reflector: Reflector): CanActivate =>
         config.authMode === AuthMode.Jwt
-          ? new RolesGuard(reflector)
-          : {
-              canActivate: (): boolean => true,
-            },
+          ? new RolesGuard(reflector, config.gameMasterSubject)
+          : { canActivate: (): boolean => true },
 
       inject: [APP_CONFIG, Reflector],
     },

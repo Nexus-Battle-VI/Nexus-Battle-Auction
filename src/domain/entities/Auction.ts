@@ -13,6 +13,8 @@ export { AuctionClosingOutcome } from './AuctionClosingResult'
 export enum AuctionStatus {
   Active = 'ACTIVE',
   Finished = 'FINISHED',
+  /** Cerrada de forma anticipada por una compra inmediata ejecutada (HU-64). */
+  SoldByBuyNow = 'SOLD',
 }
 
 export const MAX_ACTIVE_AUCTIONS_PER_SELLER = 10

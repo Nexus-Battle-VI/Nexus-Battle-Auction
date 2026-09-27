@@ -1,0 +1,68 @@
+import type {
+  EarlyClosureNotificationKey,
+  EarlyClosureNotificationRecord,
+  EarlyClosureNotificationRepositoryPort,
+  EnsurePendingNotificationInput,
+  RecordNotificationAttemptCommand,
+} from '../../../application/ports/EarlyClosureNotificationRepositoryPort'
+
+const keyOf = (key: EarlyClosureNotificationKey): string =>
+  `${key.auctionId}\0${key.bidderId}\0${key.transactionId}`
+
+export class InMemoryEarlyClosureNotificationRepository implements EarlyClosureNotificationRepositoryPort {
+  private readonly records = new Map<string, EarlyClosureNotificationRecord>()
+
+  ensurePending(input: EnsurePendingNotificationInput): Promise<EarlyClosureNotificationRecord> {
+    const key = keyOf(input)
+    const existing = this.records.get(key)
+
+    if (existing !== undefined) {
+      return Promise.resolve(existing)
+    }
+
+    const created: EarlyClosureNotificationRecord = {
+      ...input,
+      status: 'PENDING',
+      attempts: 0,
+      creditsReleased: input.creditReservationId === null,
+      lastError: null,
+    }
+
+    this.records.set(key, created)
+
+    return Promise.resolve(created)
+  }
+
+  recordAttempt(command: RecordNotificationAttemptCommand): Promise<void> {
+    const key = keyOf(command)
+    const existing = this.records.get(key)
+
+    if (existing === undefined) {
+      return Promise.reject(
+        new Error(`No existe una notificacion pendiente para ${key.replace('\0', '/')}.`),
+      )
+    }
+
+    this.records.set(key, {
+      ...existing,
+      status: command.status,
+      attempts: command.attempts,
+      creditsReleased: command.creditsReleased,
+      lastError: command.lastError,
+    })
+
+    return Promise.resolve()
+  }
+
+  findByAuction(auctionId: string): Promise<readonly EarlyClosureNotificationRecord[]> {
+    return Promise.resolve(
+      [...this.records.values()].filter((record) => record.auctionId === auctionId),
+    )
+  }
+
+  findFailed(): Promise<readonly EarlyClosureNotificationRecord[]> {
+    return Promise.resolve(
+      [...this.records.values()].filter((record) => record.status === 'FAILED'),
+    )
+  }
+}

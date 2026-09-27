@@ -2,6 +2,7 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { sql, type Kysely, type Migration } from 'kysely'
 
 import { PostgresAuctionRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionRepository'
+import { PostgresEarlyClosureNotificationRepository } from '../../src/adapters/outbound/persistence/PostgresEarlyClosureNotificationRepository'
 import type { Database } from '../../src/adapters/outbound/persistence/schema'
 import {
   ActiveAuctionLimitExceededError,
@@ -10,6 +11,10 @@ import {
   IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../src/application/errors/AuctionPersistenceError'
+import {
+  AuctionAlreadyClosedError,
+  BuyNowIdempotencyConflictError,
+} from '../../src/application/errors/BuyNowTransactionError'
 import type {
   BidCreditsPort,
   ReserveBidCreditsCommand,
@@ -24,7 +29,7 @@ import {
   CaptureStatus,
   ReleaseStatus,
 } from '../../src/application/ports/AuctionSettlementRepositoryPort'
-import { Auction, AuctionClosingOutcome } from '../../src/domain/entities/Auction'
+import { Auction, AuctionClosingOutcome, AuctionStatus } from '../../src/domain/entities/Auction'
 import { AuctionClosingResult } from '../../src/domain/entities/AuctionClosingResult'
 import { Bid } from '../../src/domain/entities/Bid'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
@@ -46,6 +51,12 @@ import type {
   ProductInventoryPort,
   ReleaseInventoryProductCommand,
 } from '../../src/application/ports/ProductInventoryPort'
+import {
+  AuctionPublisherType,
+  OfficialAuction,
+  OfficialAuctionMark,
+} from '../../src/domain/entities/OfficialAuction'
+import { AuctionPriceKind } from '../../src/domain/value-objects/AuctionPublicationPricing'
 import {
   MIGRATIONS,
   createDatabase,
@@ -240,6 +251,9 @@ describe('Persistencia PostgreSQL', () => {
         truncate
           auction_settlement_releases,
           auction_settlements,
+          auction_early_closure_notifications,
+          auction_bid_credit_failures,
+          auction_bid_credit_operations,
           auction_bids,
           auction_publication_operations,
           auction_audit_log,
@@ -1732,6 +1746,411 @@ describe('Persistencia PostgreSQL', () => {
         status: lowerResult.status === 'fulfilled' ? 'COMPLETED' : 'COMPENSATED',
       })
     })
+
+    describe('compra inmediata HU-64', () => {
+      const closeCommand = (
+        auctionId: string,
+        overrides: Partial<Parameters<PostgresAuctionRepository['closeByBuyNow']>[0]> = {},
+      ) => ({
+        operationId: `operation-buy-now-${auctionId}`,
+        transactionId: `txn-${auctionId}`,
+        auctionId,
+        buyerId: 'buyer-1',
+        transferId: `transfer-${auctionId}`,
+        priceCredits: 20,
+        remainingCredits: 80,
+        closedAt: new Date('2026-09-21T15:00:00.000Z'),
+        ...overrides,
+      })
+
+      it('CA-01: cierra la subasta y deja auditoria y outbox para HU-64.5', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await repository.publish(publication('auction-buy-now-1'))
+
+        const result = await repository.closeByBuyNow(closeCommand('auction-buy-now-1'))
+
+        expect(result).toEqual({
+          auction: expect.objectContaining({
+            id: 'auction-buy-now-1',
+            status: AuctionStatus.SoldByBuyNow,
+            closesAt: new Date('2026-09-21T15:00:00.000Z'),
+          }),
+          transactionId: 'txn-auction-buy-now-1',
+          replayed: false,
+        })
+
+        const audit = await db
+          .selectFrom('auction_audit_log')
+          .selectAll()
+          .where('action', '=', 'AUCTION_CLOSED_BY_BUY_NOW')
+          .execute()
+
+        expect(audit).toHaveLength(1)
+        expect(audit[0]).toMatchObject({
+          auction_id: 'auction-buy-now-1',
+          actor_id: 'buyer-1',
+        })
+
+        const outbox = await db
+          .selectFrom('outbox_events')
+          .selectAll()
+          .where('event_type', '=', 'auction.closed_by_buy_now.v1')
+          .execute()
+
+        expect(outbox).toHaveLength(1)
+        expect(outbox[0]).toMatchObject({
+          aggregate_id: 'auction-buy-now-1',
+          published_at: null,
+        })
+        expect(outbox[0]?.payload).toMatchObject({
+          auctionId: 'auction-buy-now-1',
+          productId: 'product-auction-buy-now-1',
+        })
+      })
+
+      it('reintentar el mismo operationId devuelve la misma confirmacion sin duplicar efectos', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await repository.publish(publication('auction-buy-now-retry'))
+
+        const command = closeCommand('auction-buy-now-retry')
+
+        const first = await repository.closeByBuyNow(command)
+        const second = await repository.closeByBuyNow(command)
+
+        expect(second).toEqual({ ...first, replayed: true })
+
+        const { amount } = await db
+          .selectFrom('outbox_events')
+          .select(
+            sql<number>`
+              count(*)::integer
+            `.as('amount'),
+          )
+          .where('event_type', '=', 'auction.closed_by_buy_now.v1')
+          .executeTakeFirstOrThrow()
+
+        expect(amount).toBe(1)
+      })
+
+      it('rechaza reutilizar el operationId con datos distintos', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await repository.publish(publication('auction-buy-now-conflict'))
+
+        await repository.closeByBuyNow(closeCommand('auction-buy-now-conflict'))
+
+        await expect(
+          repository.closeByBuyNow({
+            ...closeCommand('auction-buy-now-conflict'),
+            priceCredits: 999,
+          }),
+        ).rejects.toBeInstanceOf(BuyNowIdempotencyConflictError)
+      })
+
+      it('rechaza cerrar una subasta inexistente', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await expect(
+          repository.closeByBuyNow(closeCommand('auction-does-not-exist')),
+        ).rejects.toBeInstanceOf(PersistedAuctionNotFoundError)
+      })
+
+      it('rechaza cerrar una subasta que ya fue vendida', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await repository.publish(publication('auction-buy-now-closed'))
+
+        await repository.closeByBuyNow(closeCommand('auction-buy-now-closed'))
+
+        await expect(
+          repository.closeByBuyNow(
+            closeCommand('auction-buy-now-closed', {
+              operationId: 'operation-buy-now-closed-otra',
+              transactionId: 'txn-otra',
+              transferId: 'transfer-otra',
+            }),
+          ),
+        ).rejects.toBeInstanceOf(AuctionAlreadyClosedError)
+      })
+
+      it('serializa dos compras inmediatas concurrentes: solo una cierra la subasta', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await repository.publish(publication('auction-buy-now-concurrent'))
+
+        const outcomes = await Promise.allSettled([
+          repository.closeByBuyNow(
+            closeCommand('auction-buy-now-concurrent', {
+              operationId: 'operation-race-1',
+              transactionId: 'txn-race-1',
+              transferId: 'transfer-race-1',
+              buyerId: 'buyer-1',
+            }),
+          ),
+          repository.closeByBuyNow(
+            closeCommand('auction-buy-now-concurrent', {
+              operationId: 'operation-race-2',
+              transactionId: 'txn-race-2',
+              transferId: 'transfer-race-2',
+              buyerId: 'buyer-2',
+            }),
+          ),
+        ])
+
+        expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+
+        const rejected = outcomes.find(({ status }) => status === 'rejected')
+
+        expect(rejected).toMatchObject({ reason: expect.any(AuctionAlreadyClosedError) })
+
+        await expect(repository.findById('auction-buy-now-concurrent')).resolves.toMatchObject({
+          status: AuctionStatus.SoldByBuyNow,
+        })
+
+        const operations = await db.selectFrom('auction_buy_now_operations').selectAll().execute()
+
+        expect(operations).toHaveLength(1)
+      })
+
+      it('findBuyNowOperation reconstruye la confirmacion sin volver a evaluar la subasta', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await repository.publish(publication('auction-buy-now-lookup'))
+
+        await expect(repository.findBuyNowOperation('operation-inexistente')).resolves.toBeNull()
+
+        await repository.closeByBuyNow(closeCommand('auction-buy-now-lookup'))
+
+        const found = await repository.findBuyNowOperation(
+          'operation-buy-now-auction-buy-now-lookup',
+        )
+
+        expect(found).toMatchObject({
+          transactionId: 'txn-auction-buy-now-lookup',
+          buyerId: 'buyer-1',
+          transferId: 'transfer-auction-buy-now-lookup',
+          priceCredits: 20,
+          remainingCredits: 80,
+          auction: expect.objectContaining({
+            id: 'auction-buy-now-lookup',
+            status: AuctionStatus.SoldByBuyNow,
+          }),
+        })
+      })
+
+      it('findBuyNowOperationByAuctionId busca por subasta, no por operationId', async () => {
+        const repository = new PostgresAuctionRepository(db)
+        await repository.publish(publication('auction-buy-now-by-auction-a'))
+        await repository.publish(publication('auction-buy-now-by-auction-b'))
+        await repository.closeByBuyNow(closeCommand('auction-buy-now-by-auction-a'))
+        await repository.closeByBuyNow(
+          closeCommand('auction-buy-now-by-auction-b', {
+            buyerId: 'buyer-2',
+            transactionId: 'txn-b',
+          }),
+        )
+
+        await expect(
+          repository.findBuyNowOperationByAuctionId('auction-no-existe'),
+        ).resolves.toBeNull()
+        await expect(
+          repository.findBuyNowOperationByAuctionId('auction-buy-now-by-auction-a'),
+        ).resolves.toMatchObject({
+          transactionId: 'txn-auction-buy-now-by-auction-a',
+          buyerId: 'buyer-1',
+          priceCredits: 20,
+          remainingCredits: 80,
+          completedAt: new Date('2026-09-21T15:00:00.000Z'),
+          auction: expect.objectContaining({ id: 'auction-buy-now-by-auction-a' }),
+        })
+      })
+
+      it('registra y actualiza de forma idempotente un fallo de compra inmediata', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        const failure = {
+          operationId: 'operation-buy-now-failed',
+          auctionId: 'auction-buy-now-failed',
+          buyerId: 'buyer-1',
+          stage: 'CLOSING_AUCTION',
+          reason: 'timeout',
+          transferId: 'transfer-failed',
+          creditsReversed: false,
+          occurredAt: new Date('2026-09-21T15:00:00.000Z'),
+        }
+
+        await repository.recordBuyNowFailure(failure)
+        await repository.recordBuyNowFailure({ ...failure, creditsReversed: true })
+
+        const rows = await db.selectFrom('auction_buy_now_failures').selectAll().execute()
+
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toMatchObject({ credits_reversed: true })
+      })
+
+      it('findBidCreditOperationByBid encuentra la operacion por bidId, no por operationId', async () => {
+        const repository = new PostgresAuctionRepository(db)
+
+        await expect(repository.findBidCreditOperationByBid('bid-lookup')).resolves.toBeNull()
+
+        const createdAt = new Date('2026-09-21T12:00:10.000Z')
+
+        await repository.createBidCreditOperation({
+          operationId: 'operation-lookup',
+          bidId: 'bid-lookup',
+          auctionId: 'auction-lookup',
+          bidderId: 'bidder-lookup',
+          amountCredits: 25,
+          createdAt,
+        })
+
+        await repository.updateBidCreditOperation({
+          operationId: 'operation-lookup',
+          status: 'RESERVED',
+          reservationId: 'reservation-lookup',
+          previousReservationId: null,
+          updatedAt: createdAt,
+        })
+
+        await expect(repository.findBidCreditOperationByBid('bid-lookup')).resolves.toMatchObject({
+          operationId: 'operation-lookup',
+          bidId: 'bid-lookup',
+          reservationId: 'reservation-lookup',
+        })
+      })
+    })
+
+    describe('notificaciones de cierre anticipado HU-64.5', () => {
+      const pendingInput = (
+        auctionId: string,
+        overrides: Partial<
+          Parameters<PostgresEarlyClosureNotificationRepository['ensurePending']>[0]
+        > = {},
+      ) => ({
+        auctionId,
+        bidderId: 'bidder-1',
+        transactionId: 'txn-1',
+        bidId: 'bid-1',
+        amountCredits: 20,
+        closedAt: new Date('2026-09-21T15:00:00.000Z'),
+        creditOperationId: 'operation-1',
+        creditReservationId: 'reservation-1',
+        ...overrides,
+      })
+
+      it('crea el registro PENDING con creditsReleased derivado de la reserva', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-1'))
+
+        const withReservation = await repository.ensurePending(pendingInput('auction-notif-1'))
+
+        expect(withReservation).toMatchObject({
+          status: 'PENDING',
+          attempts: 0,
+          creditsReleased: false,
+          lastError: null,
+        })
+
+        const withoutReservation = await repository.ensurePending(
+          pendingInput('auction-notif-1', {
+            bidderId: 'bidder-2',
+            creditOperationId: null,
+            creditReservationId: null,
+          }),
+        )
+
+        // Nada que liberar para este postor: nace ya liberado.
+        expect(withoutReservation.creditsReleased).toBe(true)
+
+        const rows = await db
+          .selectFrom('auction_early_closure_notifications')
+          .selectAll()
+          .execute()
+
+        expect(rows).toHaveLength(2)
+      })
+
+      it('reutiliza el registro existente en llamadas posteriores del mismo evento', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-2'))
+
+        const first = await repository.ensurePending(pendingInput('auction-notif-2'))
+        const second = await repository.ensurePending(
+          pendingInput('auction-notif-2', { amountCredits: 999 }),
+        )
+
+        expect(second).toEqual(first)
+
+        const rows = await db
+          .selectFrom('auction_early_closure_notifications')
+          .selectAll()
+          .execute()
+
+        expect(rows).toHaveLength(1)
+      })
+
+      it('recordAttempt actualiza el estado y findByAuction/findFailed lo reflejan', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-3'))
+
+        await repository.ensurePending(pendingInput('auction-notif-3'))
+
+        await repository.recordAttempt({
+          auctionId: 'auction-notif-3',
+          bidderId: 'bidder-1',
+          transactionId: 'txn-1',
+          status: 'FAILED',
+          attempts: 1,
+          creditsReleased: false,
+          lastError: 'wallet caido',
+          occurredAt: new Date('2026-09-21T15:05:00.000Z'),
+        })
+
+        await expect(repository.findByAuction('auction-notif-3')).resolves.toEqual([
+          expect.objectContaining({
+            status: 'FAILED',
+            attempts: 1,
+            creditsReleased: false,
+            lastError: 'wallet caido',
+          }),
+        ])
+
+        await expect(repository.findFailed()).resolves.toEqual([
+          expect.objectContaining({ auctionId: 'auction-notif-3', status: 'FAILED' }),
+        ])
+
+        await repository.recordAttempt({
+          auctionId: 'auction-notif-3',
+          bidderId: 'bidder-1',
+          transactionId: 'txn-1',
+          status: 'SENT',
+          attempts: 2,
+          creditsReleased: true,
+          lastError: null,
+          occurredAt: new Date('2026-09-21T15:06:00.000Z'),
+        })
+
+        await expect(repository.findFailed()).resolves.toEqual([])
+      })
+
+      it('distingue notificaciones de distintos postores para la misma subasta', async () => {
+        const repository = new PostgresEarlyClosureNotificationRepository(db)
+
+        await new PostgresAuctionRepository(db).publish(publication('auction-notif-4'))
+
+        await repository.ensurePending(pendingInput('auction-notif-4', { bidderId: 'bidder-1' }))
+        await repository.ensurePending(
+          pendingInput('auction-notif-4', { bidderId: 'bidder-2', bidId: 'bid-2' }),
+        )
+
+        await expect(repository.findByAuction('auction-notif-4')).resolves.toHaveLength(2)
+      })
+    })
   })
 
   describe('pending claims HU-65.3', () => {
@@ -1743,6 +2162,8 @@ describe('Persistencia PostgreSQL', () => {
           seller_id: 'seller',
           product_id: `product-${auctionId}`,
           duration_hours: 24,
+          publisher_type: 'PLAYER',
+          price_kind: 'CREDITS',
           publication_fee_credits: 1,
           minimum_bid_credits: 1,
           buy_now_credits: null,
@@ -1940,6 +2361,8 @@ describe('Persistencia PostgreSQL', () => {
           seller_id: 'seller',
           product_id: `product-${auctionId}`,
           duration_hours: 24,
+          publisher_type: 'PLAYER',
+          price_kind: 'CREDITS',
           publication_fee_credits: 1,
           minimum_bid_credits: 1,
           buy_now_credits: null,
@@ -2132,6 +2555,8 @@ describe('Persistencia PostgreSQL', () => {
           seller_id: 'seller',
           product_id: 'product-empty',
           duration_hours: 24,
+          publisher_type: 'PLAYER',
+          price_kind: 'CREDITS',
           publication_fee_credits: 1,
           minimum_bid_credits: 1,
           buy_now_credits: null,
@@ -2240,6 +2665,297 @@ describe('Persistencia PostgreSQL', () => {
           .where('id', '=', older.eventId)
           .executeTakeFirstOrThrow(),
       ).resolves.toMatchObject({ published_at: new Date('2026-01-03') })
+    })
+  })
+
+  describe('repositorio de publicaciones oficiales (HU-66)', () => {
+    const officialPublication = (
+      id: string,
+      options: { readonly productId?: string; readonly mark?: OfficialAuctionMark } = {},
+    ) => ({
+      operationId: `operation-${id}`,
+      auction: OfficialAuction.publish({
+        auctionId: id,
+        publisherId: 'upb-company-subject',
+        publisherType: AuctionPublisherType.GameMaster,
+        productId: options.productId ?? `exclusive-${id}`,
+        durationHours: 48,
+        pricing: {
+          kind: AuctionPriceKind.RealMoney,
+          minimumBid: { amountMinor: 150_000, currency: 'COP' },
+          buyNow: { amountMinor: 300_000, currency: 'COP' },
+        },
+        mark: options.mark ?? OfficialAuctionMark.Official,
+        publishedAt: new Date('2026-09-21T12:00:00.000Z'),
+      }),
+    })
+
+    beforeEach(async () => {
+      await sql`
+        truncate auction_publication_operations, auction_audit_log,
+        auction_publication_failures, outbox_events, auctions restart identity cascade
+      `.execute(db)
+    })
+
+    it.each([OfficialAuctionMark.Official, OfficialAuctionMark.Premium])(
+      'persiste una subasta %s en dinero real, auditoria y outbox en una unidad atomica',
+      async (mark) => {
+        const repository = new PostgresAuctionRepository(db)
+        const result = await repository.publishOfficial(officialPublication('official-1', { mark }))
+
+        expect(result.replayed).toBe(false)
+        expect(result.auction).toMatchObject({
+          publisherId: 'upb-company-subject',
+          publisherType: AuctionPublisherType.GameMaster,
+          publicationFeeCredits: 0,
+          currency: 'COP',
+          minimumBidAmountMinor: 150_000,
+          buyNowAmountMinor: 300_000,
+          mark,
+        })
+        await expect(repository.findOfficialById('official-1')).resolves.toEqual(result.auction)
+
+        const audit = await db
+          .selectFrom('auction_audit_log')
+          .selectAll()
+          .where('auction_id', '=', 'official-1')
+          .execute()
+        const outbox = await db
+          .selectFrom('outbox_events')
+          .selectAll()
+          .where('aggregate_id', '=', 'official-1')
+          .execute()
+        expect(audit).toHaveLength(1)
+        expect(audit[0]).toMatchObject({
+          auction_id: 'official-1',
+          operation_id: 'operation-official-1',
+          action: 'OFFICIAL_AUCTION_PUBLISHED',
+          actor_id: 'upb-company-subject',
+        })
+        expect(outbox).toHaveLength(1)
+        expect(outbox[0]).toMatchObject({
+          aggregate_id: 'official-1',
+          event_type: 'auction.official-published.v1',
+          published_at: null,
+        })
+      },
+    )
+
+    it('un reintento devuelve la publicacion sin duplicar efectos locales', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const command = officialPublication('official-idempotent')
+      const retry = {
+        ...officialPublication('official-generated-again', {
+          productId: 'exclusive-official-idempotent',
+        }),
+        operationId: command.operationId,
+      }
+
+      await expect(repository.publishOfficial(command)).resolves.toMatchObject({
+        replayed: false,
+      })
+      await expect(repository.publishOfficial(retry)).resolves.toMatchObject({
+        replayed: true,
+        auction: { id: 'official-idempotent' },
+      })
+
+      const { amount } = await db
+        .selectFrom('outbox_events')
+        .select(sql<number>`count(*)::integer`.as('amount'))
+        .executeTakeFirstOrThrow()
+      expect(amount).toBe(1)
+    })
+
+    /**
+     * HU-66.7: el reintento de arriba prueba la idempotencia en SERIE; esta
+     * prueba la prueba bajo la misma carrera real que sufriria un doble clic
+     * o un reintento automatico solapado -dos conexiones que llegan a la vez
+     * con identica operationId-. El `pg_advisory_xact_lock` de
+     * `publishOfficial` (mismo mecanismo que HU-62) debe serializarlas: una
+     * sola crea la fila, la otra se reproduce sobre ella, y ninguna deja
+     * auditoria ni outbox duplicados.
+     */
+    it('serializa dos publicaciones oficiales concurrentes con la misma operationId', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const command = officialPublication('official-concurrent')
+      const sameOperation = {
+        ...officialPublication('official-concurrent-generated-again', {
+          productId: 'exclusive-official-concurrent',
+        }),
+        operationId: command.operationId,
+      }
+
+      const [first, second] = await Promise.all([
+        repository.publishOfficial(command),
+        repository.publishOfficial(sameOperation),
+      ])
+
+      // El `pg_advisory_xact_lock` serializa las dos transacciones, pero cual
+      // de las dos adquiere el lock primero es una carrera real: no se puede
+      // asumir que gane la que se emitio primero en JS. Lo que si es
+      // invariante es que ambas coincidan en el MISMO id -sea cual sea- y que
+      // una sola quede "replayed: false".
+      expect([first.replayed, second.replayed].sort()).toEqual([false, true])
+      expect(first.auction.id).toBe(second.auction.id)
+      const persistedId = first.auction.id
+      expect(['official-concurrent', 'official-concurrent-generated-again']).toContain(persistedId)
+
+      const operations = await db
+        .selectFrom('auction_publication_operations')
+        .selectAll()
+        .where('operation_id', '=', command.operationId)
+        .execute()
+      expect(operations).toHaveLength(1)
+
+      const audit = await db
+        .selectFrom('auction_audit_log')
+        .selectAll()
+        .where('auction_id', '=', persistedId)
+        .execute()
+      expect(audit).toHaveLength(1)
+
+      const outbox = await db
+        .selectFrom('outbox_events')
+        .selectAll()
+        .where('aggregate_id', '=', persistedId)
+        .execute()
+      expect(outbox).toHaveLength(1)
+
+      const discardedId =
+        persistedId === 'official-concurrent'
+          ? 'official-concurrent-generated-again'
+          : 'official-concurrent'
+      await expect(repository.findOfficialById(discardedId)).resolves.toBeNull()
+    })
+
+    it('rechaza reutilizar la operacion con otra intencion funcional', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(officialPublication('official-1'))
+
+      await expect(
+        repository.publishOfficial({
+          ...officialPublication('official-2', { mark: OfficialAuctionMark.Premium }),
+          operationId: 'operation-official-1',
+        }),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError)
+    })
+
+    it('revierte todos los registros si la publicacion oficial viola una restriccion', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(
+        officialPublication('official-first', { productId: 'same-exclusive-product' }),
+      )
+
+      await expect(
+        repository.publishOfficial(
+          officialPublication('official-failed', { productId: 'same-exclusive-product' }),
+        ),
+      ).rejects.toBeDefined()
+
+      await expect(repository.findOfficialById('official-failed')).resolves.toBeNull()
+      const operation = await db
+        .selectFrom('auction_publication_operations')
+        .selectAll()
+        .where('operation_id', '=', 'operation-official-failed')
+        .executeTakeFirst()
+      expect(operation).toBeUndefined()
+      const audit = await db
+        .selectFrom('auction_audit_log')
+        .selectAll()
+        .where('auction_id', '=', 'official-failed')
+        .execute()
+      expect(audit).toHaveLength(0)
+    })
+
+    it('mantiene disponible la lectura de subastas HU-62 junto a publicaciones oficiales', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      const playerCommand = {
+        operationId: 'operation-player-1',
+        auction: Auction.publish({
+          auctionId: 'player-1',
+          sellerId: 'seller-1',
+          productId: 'player-product-1',
+          durationHours: 24,
+          minimumBidCredits: 10,
+          buyNowCredits: 20,
+          publishedAt: new Date('2026-09-21T12:00:00.000Z'),
+          eligibility: {
+            productOwnedBySeller: true,
+            productInUse: false,
+            productTradable: true,
+            sellerHasActiveSanctions: false,
+            activeAuctionCount: 0,
+          },
+        }),
+        inventoryCommitmentId: 'commitment-1',
+        feeChargeId: 'charge-1',
+      }
+
+      await repository.publish(playerCommand)
+      await repository.publishOfficial(officialPublication('official-1'))
+
+      await expect(repository.findById('player-1')).resolves.toMatchObject({
+        id: 'player-1',
+        minimumBidCredits: 10,
+      })
+      await expect(repository.findById('official-1')).resolves.toBeNull()
+      await expect(repository.findOfficialById('official-1')).resolves.toMatchObject({
+        id: 'official-1',
+        publisherType: AuctionPublisherType.GameMaster,
+      })
+      await expect(repository.findOfficialById('player-1')).resolves.toBeNull()
+    })
+
+    it('permanece disponible desde una conexion nueva', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(officialPublication('official-durable'))
+
+      const restarted = createDatabase({ connectionString: container.getConnectionUri() })
+      try {
+        await expect(
+          new PostgresAuctionRepository(restarted).findOfficialById('official-durable'),
+        ).resolves.toMatchObject({ id: 'official-durable', status: 'ACTIVE' })
+      } finally {
+        await restarted.destroy()
+      }
+    })
+
+    it('la restriccion discriminada rechaza combinaciones invalidas de columnas', async () => {
+      const base = {
+        id: 'invalid-row',
+        seller_id: 'upb-company-subject',
+        product_id: 'exclusive-invalid',
+        duration_hours: 48,
+        publisher_type: 'GAME_MASTER',
+        price_kind: 'REAL_MONEY',
+        publication_fee_credits: 0,
+        currency: 'COP',
+        minimum_bid_amount_minor: 150_000,
+        buy_now_amount_minor: null,
+        official_mark: 'OFFICIAL',
+        status: 'ACTIVE',
+        published_at: new Date('2026-09-21T12:00:00.000Z'),
+        closes_at: new Date('2026-09-23T12:00:00.000Z'),
+        inventory_commitment_id: null,
+        fee_charge_id: null,
+      }
+
+      // Una fila REAL_MONEY con un precio en creditos tambien puesto es la
+      // mezcla que la restriccion existe para impedir.
+      await expect(
+        db
+          .insertInto('auctions')
+          .values({ ...base, minimum_bid_credits: 10 })
+          .execute(),
+      ).rejects.toBeDefined()
+
+      // Un GAME_MASTER sin marca oficial tampoco es una fila valida.
+      await expect(
+        db
+          .insertInto('auctions')
+          .values({ ...base, minimum_bid_credits: null, official_mark: null })
+          .execute(),
+      ).rejects.toBeDefined()
     })
   })
 })

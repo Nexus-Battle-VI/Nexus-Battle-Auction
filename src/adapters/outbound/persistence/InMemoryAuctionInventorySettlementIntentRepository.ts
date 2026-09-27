@@ -21,6 +21,22 @@ export class InMemoryAuctionInventorySettlementIntentRepository implements Aucti
     return Promise.resolve(intent === undefined ? null : clone(intent))
   }
 
+  findRetryablePendingClaims(
+    limit: number,
+  ): Promise<readonly AuctionInventorySettlementIntentSnapshot[]> {
+    return Promise.resolve(
+      [...this.intents.values()]
+        .filter((intent) => intent.action === 'PENDING_CLAIM' && intent.status === 'RETRYABLE')
+        .sort(
+          (left, right) =>
+            left.updatedAt.getTime() - right.updatedAt.getTime() ||
+            left.auctionId.localeCompare(right.auctionId),
+        )
+        .slice(0, limit)
+        .map(clone),
+    )
+  }
+
   getOrCreate(
     input: CreateAuctionInventorySettlementIntentInput,
   ): Promise<AuctionInventorySettlementIntentSnapshot> {
@@ -75,6 +91,7 @@ export class InMemoryAuctionInventorySettlementIntentRepository implements Aucti
     updatedAt: Date,
   ): Promise<AuctionInventorySettlementIntentSnapshot> {
     const current = this.require(auctionId)
+    if (current.status === 'CONFIRMED') return Promise.resolve(clone(current))
     if (!['PENDING', 'RETRYABLE'].includes(current.status)) {
       return Promise.reject(new Error('El intent Inventory no admite reintento.'))
     }

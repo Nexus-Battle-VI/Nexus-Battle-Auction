@@ -10,6 +10,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Query,
 } from '@nestjs/common'
 import {
   ApiBearerAuth,
@@ -21,6 +22,7 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiQuery,
   ApiParam,
   ApiServiceUnavailableResponse,
   ApiTags,
@@ -30,17 +32,20 @@ import {
 
 import type { AuctionPendingClaimSnapshot } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
 import { CLOCK, type ClockPort } from '../../../application/ports/ClockPort'
+import { ExecuteBuyNowUseCase } from '../../../application/use-cases/ExecuteBuyNowUseCase'
 import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVerifierPort'
 import { ClaimPendingProduct } from '../../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../../application/use-cases/ClaimPendingProductsBatch'
 import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
+import { ListActiveAuctions } from '../../../application/use-cases/ListActiveAuctions'
 import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
 import { PublishAuction } from '../../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../../application/use-cases/RegisterBid'
 import { CurrentIdentity, Roles } from './auth/decorators'
 import {
   AuctionDetailResponseDto,
+  ActiveAuctionPageResponseDto,
   AuctionResponseDto,
   AutoBidConfigResponseDto,
   BidResponseDto,
@@ -49,11 +54,14 @@ import {
   ClaimPendingProductsBatchResponseDto,
   ConfigureAutoBidRequestDto,
   PendingClaimResponseDto,
+  ListActiveAuctionsQueryDto,
   PublishAuctionRequestDto,
   RegisterBidRequestDto,
   assertIdempotencyKey,
 } from './auction.dto'
 import { toAuctionHttpException } from './auction-error.mapper'
+import { BuyNowRequestDto, BuyNowResponseDto } from './buy-now.dto'
+import { toBuyNowHttpException } from './buy-now-error.mapper'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -65,12 +73,14 @@ export class AuctionController {
     private readonly publishAuction: PublishAuction,
     private readonly registerBid: RegisterBid,
     private readonly getAuctionDetail: GetAuctionDetail,
+    private readonly listActiveAuctions: ListActiveAuctions,
     private readonly configureAutoBid: ConfigureAutoBid,
     private readonly getPendingClaims: GetPendingClaims,
     private readonly claimPendingProduct: ClaimPendingProduct,
     private readonly claimPendingProductsBatch: ClaimPendingProductsBatch,
     @Inject(CLOCK)
     private readonly clock: ClockPort,
+    private readonly executeBuyNow: ExecuteBuyNowUseCase,
   ) {}
 
   /**
@@ -105,6 +115,32 @@ export class AuctionController {
     const now = this.clock.now()
 
     return claims.map((claim) => this.toPendingClaimResponse(claim, now))
+  }
+
+  /** Marketplace de subastas activas y no vencidas. */
+  @Get()
+  @Roles(Role.Player, Role.GameMaster)
+  @ApiOperation({ summary: 'Listar subastas activas disponibles' })
+  @ApiQuery({ name: 'page', required: false, type: Number, minimum: 1, example: 1 })
+  @ApiQuery({
+    name: 'pageSize',
+    required: false,
+    type: Number,
+    minimum: 1,
+    maximum: 100,
+    example: 16,
+  })
+  @ApiOkResponse({ type: ActiveAuctionPageResponseDto })
+  @ApiBadRequestResponse({ description: 'Parametros de paginacion invalidos.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
+  async listActive(
+    @Query() query: ListActiveAuctionsQueryDto,
+  ): Promise<ActiveAuctionPageResponseDto> {
+    const page = query.page ?? 1
+    const pageSize = query.pageSize ?? 16
+    const result = await this.listActiveAuctions.execute({ page, pageSize })
+    return { ...result, page, pageSize, items: [...result.items] }
   }
 
   /**
@@ -507,6 +543,56 @@ export class AuctionController {
       }
 
       throw toAuctionHttpException(error)
+    }
+  }
+
+  @Post(':auctionId/buy-now')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Role.Player)
+  @ApiOperation({ summary: 'Ejecutar la compra inmediata de una subasta activa' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Identificador unico de hasta 128 caracteres para reintentos seguros.',
+  })
+  @ApiOkResponse({ type: BuyNowResponseDto })
+  @ApiBadRequestResponse({ description: 'Solicitud o Idempotency-Key invalida.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({
+    description: 'Rol insuficiente o el vendedor intento comprar su propia subasta.',
+  })
+  @ApiNotFoundResponse({ description: 'La subasta no existe.' })
+  @ApiConflictResponse({
+    description: 'La subasta ya no esta activa o la operacion ya se uso con otros datos.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description:
+      'Sin precio de compra inmediata (CA-03), sin confirmar (CA-04) o creditos insuficientes (CA-02).',
+  })
+  @ApiServiceUnavailableResponse({ description: 'Dependencia requerida no disponible.' })
+  async buyNow(
+    @CurrentIdentity() identity: VerifiedIdentity,
+    @Param('auctionId') auctionId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Body() request: BuyNowRequestDto,
+  ): Promise<BuyNowResponseDto> {
+    try {
+      const operationId = assertIdempotencyKey(idempotencyKey)
+      return await this.executeBuyNow.execute({
+        operationId,
+        buyerId: identity.subject,
+        auctionId,
+        confirmed: request.confirmed,
+      })
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === 'INVALID_IDEMPOTENCY_KEY') {
+        throw new BadRequestException({
+          statusCode: 400,
+          code: 'INVALID_IDEMPOTENCY_KEY',
+          message: 'Idempotency-Key es obligatorio y debe ser valido.',
+        })
+      }
+      throw toBuyNowHttpException(error)
     }
   }
 }

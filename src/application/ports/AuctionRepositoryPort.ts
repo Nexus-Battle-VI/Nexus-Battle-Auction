@@ -2,6 +2,10 @@ import type { Auction, AuctionSnapshot } from '../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../domain/entities/AutoBidConfig'
 import type { AuctionClosingResult } from '../../domain/entities/AuctionClosingResult'
 import type { Bid, BidSnapshot } from '../../domain/entities/Bid'
+import type {
+  OfficialAuction,
+  OfficialAuctionSnapshot,
+} from '../../domain/entities/OfficialAuction'
 
 export interface PersistAuctionPublicationCommand {
   readonly operationId: string
@@ -12,6 +16,16 @@ export interface PersistAuctionPublicationCommand {
 
 export interface PersistAuctionPublicationResult {
   readonly auction: AuctionSnapshot
+  readonly replayed: boolean
+}
+
+export interface PersistOfficialAuctionPublicationCommand {
+  readonly operationId: string
+  readonly auction: OfficialAuction
+}
+
+export interface PersistOfficialAuctionPublicationResult {
+  readonly auction: OfficialAuctionSnapshot
   readonly replayed: boolean
 }
 
@@ -37,6 +51,51 @@ export interface FinishAuctionCommand {
   readonly auctionId: string
   readonly finishedAt: Date
   readonly closingResult: AuctionClosingResult
+}
+
+interface ActiveAuctionListItemBase {
+  readonly id: string
+  readonly sellerId: string
+  readonly productId: string
+  readonly status: 'ACTIVE'
+  readonly publishedAt: Date
+  readonly closesAt: Date
+  readonly currentBidAmount: number | null
+}
+
+export interface PlayerActiveAuctionListItem extends ActiveAuctionListItemBase {
+  readonly publisherType: 'PLAYER'
+  readonly priceKind: 'CREDITS'
+  readonly minimumBidCredits: number
+  readonly buyNowCredits: number | null
+  readonly currency: null
+  readonly minimumBidAmountMinor: null
+  readonly buyNowAmountMinor: null
+  readonly officialMark: null
+}
+
+export interface OfficialActiveAuctionListItem extends ActiveAuctionListItemBase {
+  readonly publisherType: 'GAME_MASTER'
+  readonly priceKind: 'REAL_MONEY'
+  readonly minimumBidCredits: null
+  readonly buyNowCredits: null
+  readonly currency: string
+  readonly minimumBidAmountMinor: number
+  readonly buyNowAmountMinor: number | null
+  readonly officialMark: 'OFFICIAL' | 'PREMIUM'
+}
+
+export type ActiveAuctionListItem = PlayerActiveAuctionListItem | OfficialActiveAuctionListItem
+
+export interface ListActiveAuctionsInput {
+  readonly now: Date
+  readonly page: number
+  readonly pageSize: number
+}
+
+export interface ActiveAuctionList {
+  readonly items: readonly ActiveAuctionListItem[]
+  readonly total: number
 }
 
 export type BidCreditOperationStatus =
@@ -98,18 +157,76 @@ export interface RecordBidCreditFailureCommand {
   readonly occurredAt: Date
 }
 
+/**
+ * Cierre atomico de una subasta por compra inmediata (HU-64.3).
+ *
+ * `transactionId` viaja YA generado por el llamador (no aqui) para que un
+ * reintento con el mismo `operationId` devuelva la misma confirmacion que vio
+ * el comprador la primera vez, en lugar de una nueva.
+ */
+export interface CloseAuctionByBuyNowCommand {
+  readonly operationId: string
+  readonly transactionId: string
+  readonly auctionId: string
+  readonly buyerId: string
+  readonly transferId: string
+  readonly priceCredits: number
+  readonly remainingCredits: number
+  readonly closedAt: Date
+}
+
+export interface CloseAuctionByBuyNowResult {
+  readonly auction: AuctionSnapshot
+  readonly transactionId: string
+  readonly replayed: boolean
+}
+
+/**
+ * Confirmacion ya persistida de una compra inmediata, reconstruible SOLO con lo
+ * guardado -sin volver a evaluar el dominio contra el estado actual de la
+ * subasta-. Es lo que permite responder a un reintento con el mismo
+ * `operationId` incluso despues de que la subasta ya cerro, cuando
+ * `BuyNowDomainService` ya no aprobaria una compra nueva (HU-64.4).
+ */
+export interface BuyNowOperationRecord {
+  readonly auction: AuctionSnapshot
+  readonly transactionId: string
+  readonly buyerId: string
+  readonly transferId: string
+  readonly priceCredits: number
+  readonly remainingCredits: number
+  readonly completedAt: Date
+}
+
+export interface RecordBuyNowFailureCommand {
+  readonly operationId: string
+  readonly auctionId: string
+  readonly buyerId: string
+  readonly stage: string
+  readonly reason: string
+  readonly transferId: string | null
+  readonly creditsReversed: boolean
+  readonly occurredAt: Date
+}
+
 export interface AuctionRepositoryPort {
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult>
-
+  publishOfficial(
+    command: PersistOfficialAuctionPublicationCommand,
+  ): Promise<PersistOfficialAuctionPublicationResult>
   recordFailure(command: RecordPublicationFailureCommand): Promise<void>
 
   findById(auctionId: string): Promise<AuctionSnapshot | null>
+  findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null>
   findAuctionAggregate(auctionId: string): Promise<Auction | null>
   findInventoryCommitmentId(auctionId: string): Promise<string | null>
   finishAuction(command: FinishAuctionCommand): Promise<void>
 
   /** Subastas activas cuyo cierre cae en `(from, until]`. */
   findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]>
+
+  /** Marketplace: activas no vencidas, ordenadas y paginadas. */
+  listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList>
 
   countActiveBySeller(sellerId: string): Promise<number>
 
@@ -129,6 +246,16 @@ export interface AuctionRepositoryPort {
 
   findBidCreditOperation(operationId: string): Promise<BidCreditOperationSnapshot | null>
 
+  /**
+   * La operacion de creditos asociada a una puja concreta (HU-64.5).
+   *
+   * `bid_id` es unico en `auction_bid_credit_operations` (HU-63.2): a lo sumo
+   * un resultado. Permite encontrar `reservationId` a partir de la puja lider
+   * -que es lo unico que `findLeadingBid` expone-, sin que quien lo consulta
+   * necesite conocer de antemano el `operationId` original de esa puja.
+   */
+  findBidCreditOperationByBid(bidId: string): Promise<BidCreditOperationSnapshot | null>
+
   recordBidCreditFailure(command: RecordBidCreditFailureCommand): Promise<void>
 
   /**
@@ -147,6 +274,14 @@ export interface AuctionRepositoryPort {
     auctionId: string,
     excludeBidderId: string,
   ): Promise<readonly AutoBidConfigSnapshot[]>
+
+  closeByBuyNow(command: CloseAuctionByBuyNowCommand): Promise<CloseAuctionByBuyNowResult>
+
+  recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void>
+
+  findBuyNowOperation(operationId: string): Promise<BuyNowOperationRecord | null>
+  /** Operacion durable que identifica una compra inmediata para una subasta. */
+  findBuyNowOperationByAuctionId(auctionId: string): Promise<BuyNowOperationRecord | null>
 }
 
 export const AUCTION_REPOSITORY = Symbol('AuctionRepositoryPort')

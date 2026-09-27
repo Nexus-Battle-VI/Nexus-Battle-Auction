@@ -7,6 +7,12 @@ import {
 import { Auction } from '../../src/domain/entities/Auction'
 import { AutoBidConfig } from '../../src/domain/entities/AutoBidConfig'
 import { Bid } from '../../src/domain/entities/Bid'
+import {
+  AuctionPublisherType,
+  OfficialAuction,
+  OfficialAuctionMark,
+} from '../../src/domain/entities/OfficialAuction'
+import { AuctionPriceKind } from '../../src/domain/value-objects/AuctionPublicationPricing'
 
 const command = (auctionId: string, operationId = 'operation-1', minimumBidCredits = 10) => ({
   operationId,
@@ -306,5 +312,59 @@ describe('InMemoryAuctionRepository', () => {
       const second = await repository.findAutoBidConfig('auction-auto-bid-immutable', 'bidder-1')
       expect(second?.configuredAt).toEqual(new Date('2026-09-21T12:00:00Z'))
     })
+  })
+})
+
+const officialCommand = (
+  auctionId: string,
+  operationId = 'operation-1',
+  minimumBidAmountMinor = 150_000,
+) => ({
+  operationId,
+  auction: OfficialAuction.publish({
+    auctionId,
+    publisherId: 'upb-company-subject',
+    publisherType: AuctionPublisherType.GameMaster,
+    productId: 'exclusive-product-1',
+    durationHours: 48,
+    pricing: {
+      kind: AuctionPriceKind.RealMoney,
+      minimumBid: { amountMinor: minimumBidAmountMinor, currency: 'COP' },
+    },
+    mark: OfficialAuctionMark.Official,
+    publishedAt: new Date('2026-09-23T12:00:00.000Z'),
+  }),
+})
+
+describe('InMemoryAuctionRepository, publicacion oficial (HU-66)', () => {
+  it('reproduce la misma publicacion oficial ante un reintento', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await expect(repository.publishOfficial(officialCommand('official-1'))).resolves.toMatchObject({
+      replayed: false,
+    })
+    await expect(
+      repository.publishOfficial(officialCommand('official-regenerated')),
+    ).resolves.toMatchObject({ replayed: true, auction: { id: 'official-1' } })
+    await expect(repository.findOfficialById('official-1')).resolves.toMatchObject({
+      id: 'official-1',
+      publisherType: AuctionPublisherType.GameMaster,
+    })
+  })
+
+  it('rechaza reutilizar la operacion con otra intencion funcional', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publishOfficial(officialCommand('official-1'))
+    await expect(
+      repository.publishOfficial(officialCommand('official-2', 'operation-1', 200_000)),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError)
+  })
+
+  it('no mezcla el espacio de subastas oficiales con el de creditos', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publish(command('auction-player', 'operation-player'))
+    await repository.publishOfficial(officialCommand('official-1', 'operation-official'))
+
+    await expect(repository.findById('official-1')).resolves.toBeNull()
+    await expect(repository.findOfficialById('auction-player')).resolves.toBeNull()
   })
 })

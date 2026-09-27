@@ -37,6 +37,21 @@ export class PostgresAuctionInventorySettlementIntentRepository implements Aucti
     return row === undefined ? null : toSnapshot(row)
   }
 
+  async findRetryablePendingClaims(
+    limit: number,
+  ): Promise<readonly AuctionInventorySettlementIntentSnapshot[]> {
+    const rows = await this.db
+      .selectFrom('auction_inventory_settlement_intents')
+      .selectAll()
+      .where('action', '=', 'PENDING_CLAIM')
+      .where('status', '=', 'RETRYABLE')
+      .orderBy('updated_at', 'asc')
+      .orderBy('auction_id', 'asc')
+      .limit(limit)
+      .execute()
+    return rows.map(toSnapshot)
+  }
+
   async getOrCreate(
     input: CreateAuctionInventorySettlementIntentInput,
   ): Promise<AuctionInventorySettlementIntentSnapshot> {
@@ -70,12 +85,18 @@ export class PostgresAuctionInventorySettlementIntentRepository implements Aucti
   ): Promise<AuctionInventorySettlementIntentSnapshot> {
     const current = await this.require(auctionId)
     if (current.status === 'CONFIRMED') return current
-    await this.transition(auctionId, ['PENDING', 'RETRYABLE'], {
-      status: 'CONFIRMED',
-      last_error: null,
-      updated_at: confirmedAt,
-      confirmed_at: confirmedAt,
-    })
+    try {
+      await this.transition(auctionId, ['PENDING', 'RETRYABLE'], {
+        status: 'CONFIRMED',
+        last_error: null,
+        updated_at: confirmedAt,
+        confirmed_at: confirmedAt,
+      })
+    } catch {
+      const raced = await this.require(auctionId)
+      if (raced.status === 'CONFIRMED') return raced
+      throw new Error('El intent Inventory no admite esa transicion.')
+    }
     return this.require(auctionId)
   }
 
@@ -84,6 +105,8 @@ export class PostgresAuctionInventorySettlementIntentRepository implements Aucti
     error: string,
     updatedAt: Date,
   ): Promise<AuctionInventorySettlementIntentSnapshot> {
+    const current = await this.require(auctionId)
+    if (current.status === 'CONFIRMED') return current
     await this.transition(auctionId, ['PENDING', 'RETRYABLE'], {
       status: 'RETRYABLE',
       last_error: error,

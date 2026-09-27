@@ -19,8 +19,11 @@ import {
   IdempotencyConflictError,
   InsufficientPublicationFundsError,
   PersistedAuctionNotFoundError,
+  ProductNotEligibleForOfficialAuctionError,
 } from '../../src/application/errors/AuctionPersistenceError'
 import { InsufficientBidCreditsError } from '../../src/application/errors/BidCreditError'
+import { AuctionNotFoundError } from '../../src/application/errors/BuyNowRequestError'
+import { AuctionAlreadyClosedError } from '../../src/application/errors/BuyNowTransactionError'
 import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
 import {
   Role,
@@ -30,12 +33,19 @@ import {
   type VerifiedIdentity,
 } from '../../src/application/ports/TokenVerifierPort'
 import { ConfigureAutoBid } from '../../src/application/use-cases/ConfigureAutoBid'
+import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
+import { ExecuteBuyNowUseCase } from '../../src/application/use-cases/ExecuteBuyNowUseCase'
 import { PublishAuction } from '../../src/application/use-cases/PublishAuction'
+import { PublishOfficialAuction } from '../../src/application/use-cases/PublishOfficialAuction'
 import { RegisterBid } from '../../src/application/use-cases/RegisterBid'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../src/domain/errors/AuctionRuleViolation'
 import { AutoBidRuleCode, AutoBidRuleViolation } from '../../src/domain/errors/AutoBidRuleViolation'
 import { BidRuleCode, BidRuleViolation } from '../../src/domain/errors/BidRuleViolation'
-import { AppModule, INTERNAL_CALLERS } from '../../src/infrastructure/bootstrap/app.module'
+import {
+  BuyNowRuleCode,
+  BuyNowRuleViolation,
+  InsufficientCreditsViolation,
+} from '../../src/domain/errors/BuyNowRuleViolation'
 
 /**
  * Controlador SOLO de prueba. Lo que se demuestra aqui es que la proteccion
@@ -73,6 +83,12 @@ class ProbeController {
     }
   }
 
+  @Roles(Role.GameMaster)
+  @Get('maestro-juego')
+  maestroJuego(@CurrentIdentity() identity: VerifiedIdentity): { subject: string } {
+    return { subject: identity.subject }
+  }
+
   @InternalOnly()
   @Post('interna')
   interna(@Body() body: unknown): {
@@ -101,6 +117,16 @@ const IDENTITIES: Readonly<Record<string, VerifiedIdentity>> = {
     subject: 'sujeto-admin',
     email: null,
     roles: new Set([Role.Administrator]),
+  },
+  'token-maestro': {
+    subject: 'subject-upb-company',
+    email: null,
+    roles: new Set([Role.GameMaster]),
+  },
+  'token-maestro-ajeno': {
+    subject: 'subject-no-autorizado',
+    email: null,
+    roles: new Set([Role.GameMaster]),
   },
 }
 
@@ -148,6 +174,39 @@ const publishAuctionStub = {
 
     return Promise.resolve({
       ...publishedAuction,
+      productId: command.productId,
+    })
+  }),
+}
+
+const publishedOfficialAuction = {
+  id: 'official-auction-created',
+  publisherId: 'subject-upb-company',
+  publisherType: 'GAME_MASTER' as const,
+  productId: 'exclusive-ok',
+  durationHours: 48 as const,
+  publicationFeeCredits: 0,
+  currency: 'COP',
+  minimumBidAmountMinor: 150_000,
+  buyNowAmountMinor: 300_000,
+  mark: 'OFFICIAL' as const,
+  status: 'ACTIVE' as const,
+  publishedAt: new Date('2026-09-23T12:00:00.000Z'),
+  closesAt: new Date('2026-09-25T12:00:00.000Z'),
+}
+
+const publishOfficialAuctionStub = {
+  execute: jest.fn((command: { productId: string }) => {
+    if (command.productId === 'exclusive-not-eligible') {
+      return Promise.reject(new ProductNotEligibleForOfficialAuctionError(command.productId))
+    }
+
+    if (command.productId === 'exclusive-unavailable') {
+      return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
+    }
+
+    return Promise.resolve({
+      ...publishedOfficialAuction,
       productId: command.productId,
     })
   }),
@@ -277,6 +336,63 @@ const configureAutoBidStub = {
   }),
 }
 
+const buyNowConfirmation = {
+  transactionId: 'txn-created',
+  auctionId: 'auction-buy-now',
+  buyerId: 'sujeto-jugador',
+  sellerId: 'seller-1',
+  productId: 'product-1',
+  debitedCredits: 2500,
+  remainingCredits: 2500,
+  closedAt: new Date('2026-09-21T15:00:00.000Z'),
+  replayed: false,
+}
+
+const executeBuyNowStub = {
+  execute: jest.fn((command: { auctionId: string }) => {
+    if (command.auctionId === 'auction-not-found') {
+      return Promise.reject(new AuctionNotFoundError(command.auctionId))
+    }
+    if (command.auctionId === 'auction-not-active') {
+      return Promise.reject(
+        new BuyNowRuleViolation(BuyNowRuleCode.AuctionNotActive, 'La subasta no esta activa.'),
+      )
+    }
+    if (command.auctionId === 'auction-no-price') {
+      return Promise.reject(
+        new BuyNowRuleViolation(
+          BuyNowRuleCode.BuyNowPriceUnavailable,
+          'Sin precio de compra inmediata.',
+        ),
+      )
+    }
+    if (command.auctionId === 'auction-insufficient-credits') {
+      return Promise.reject(
+        new InsufficientCreditsViolation({
+          requiredCredits: 3000,
+          availableCredits: 2500,
+          missingCredits: 500,
+        }),
+      )
+    }
+    if (command.auctionId === 'auction-own') {
+      return Promise.reject(
+        new BuyNowRuleViolation(
+          BuyNowRuleCode.SellerCannotBuyOwnAuction,
+          'El vendedor no puede comprar su propia subasta.',
+        ),
+      )
+    }
+    if (command.auctionId === 'auction-already-closed') {
+      return Promise.reject(new AuctionAlreadyClosedError(command.auctionId))
+    }
+    if (command.auctionId === 'auction-unavailable') {
+      return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+    }
+    return Promise.resolve({ ...buyNowConfirmation, auctionId: command.auctionId })
+  }),
+}
+
 const stubVerifier: TokenVerifierPort = {
   verify: (token: string): Promise<VerifiedIdentity> => {
     const identity = IDENTITIES[token]
@@ -314,10 +430,14 @@ const buildApp = async (): Promise<INestApplication> => {
     .useValue(stubVerifier)
     .overrideProvider(PublishAuction)
     .useValue(publishAuctionStub)
+    .overrideProvider(PublishOfficialAuction)
+    .useValue(publishOfficialAuctionStub)
     .overrideProvider(RegisterBid)
     .useValue(registerBidStub)
     .overrideProvider(ConfigureAutoBid)
     .useValue(configureAutoBidStub)
+    .overrideProvider(ExecuteBuyNowUseCase)
+    .useValue(executeBuyNowStub)
     .compile()
 
   const app = moduleRef.createNestApplication()
@@ -343,6 +463,7 @@ describe('Servicio con autenticacion activa', () => {
       COGNITO_CLIENT_ID: 'cliente-de-pruebas',
       INTERNAL_SERVICE_AUTH_SECRET: SECRET,
       PERSISTENCE_DRIVER: 'memory',
+      GAME_MASTER_SUBJECT: 'subject-upb-company',
     })
 
     app = await buildApp()
@@ -416,6 +537,25 @@ describe('Servicio con autenticacion activa', () => {
         .set('Authorization', 'Bearer token-super')
 
       expect(response.status).toBe(200)
+    })
+
+    it('autoriza GAME_MASTER solo cuando tambien coincide el subject configurado', async () => {
+      const server = app.getHttpServer()
+      const allowed = await request(server)
+        .get('/api/probe/maestro-juego')
+        .set('Authorization', 'Bearer token-maestro')
+
+      expect(allowed.status).toBe(200)
+      expect(allowed.body).toEqual({ subject: 'subject-upb-company' })
+      for (const token of ['token-maestro-ajeno', 'token-jugador', 'token-admin', 'token-super']) {
+        expect(
+          (
+            await request(server)
+              .get('/api/probe/maestro-juego')
+              .set('Authorization', `Bearer ${token}`)
+          ).status,
+        ).toBe(403)
+      }
     })
   })
 
@@ -554,6 +694,136 @@ describe('Servicio con autenticacion activa', () => {
       expect(Object.keys(operation?.responses ?? {})).toEqual(
         expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
       )
+    })
+  })
+
+  describe('Publicacion de subastas oficiales HU-66.5', () => {
+    const validBody = {
+      productId: 'exclusive-ok',
+      durationHours: 48,
+      currency: 'COP',
+      minimumBidAmountMinor: 150_000,
+      buyNowAmountMinor: 300_000,
+    }
+
+    const publish = (
+      token = 'token-maestro',
+      body: Record<string, unknown> = validBody,
+      operationId = 'operation-official-1',
+    ) =>
+      request(app.getHttpServer())
+        .post('/api/v1/official-auctions')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', operationId)
+        .send(body)
+
+    beforeEach(() => {
+      publishOfficialAuctionStub.execute.mockClear()
+    })
+
+    it('responde 201 y deriva el publicador de la identidad autorizada', async () => {
+      const response = await publish()
+
+      expect(response.status).toBe(201)
+      expect(response.body).toMatchObject({
+        id: 'official-auction-created',
+        publisherId: 'subject-upb-company',
+        publisherType: 'GAME_MASTER',
+        publicationFeeCredits: 0,
+        mark: 'OFFICIAL',
+      })
+      expect(publishOfficialAuctionStub.execute).toHaveBeenCalledWith({
+        operationId: 'operation-official-1',
+        publisherId: 'subject-upb-company',
+        productId: 'exclusive-ok',
+        durationHours: 48,
+        currency: 'COP',
+        minimumBidAmountMinor: 150_000,
+        buyNowAmountMinor: 300_000,
+      })
+    })
+
+    it('rechaza token ausente o invalido con 401', async () => {
+      const missing = await request(app.getHttpServer())
+        .post('/api/v1/official-auctions')
+        .set('Idempotency-Key', 'operation-official-1')
+        .send(validBody)
+
+      expect(missing.status).toBe(401)
+      expect((await publish('token-falso')).status).toBe(401)
+      expect(publishOfficialAuctionStub.execute).not.toHaveBeenCalled()
+    })
+
+    it.each(['token-jugador', 'token-admin', 'token-super', 'token-maestro-ajeno'])(
+      'rechaza con 403 la identidad no autorizada %s',
+      async (token) => {
+        expect((await publish(token)).status).toBe(403)
+      },
+    )
+
+    it.each([
+      ['marca inyectada', { ...validBody, mark: 'PREMIUM' }],
+      ['publicador inyectado', { ...validBody, publisherId: 'attacker' }],
+      ['comision inyectada', { ...validBody, publicationFeeCredits: 99 }],
+      ['duracion invalida', { ...validBody, durationHours: 72 }],
+      ['moneda invalida', { ...validBody, currency: 'cop' }],
+      ['precio decimal', { ...validBody, minimumBidAmountMinor: 1.5 }],
+    ])('rechaza %s con contrato estricto', async (_case, body) => {
+      const response = await publish('token-maestro', body)
+
+      expect(response.status).toBe(400)
+      expect(response.body).toMatchObject({ code: 'INVALID_REQUEST' })
+      expect(publishOfficialAuctionStub.execute).not.toHaveBeenCalled()
+    })
+
+    it('exige Idempotency-Key y propaga la misma clave en los reintentos', async () => {
+      const missing = await request(app.getHttpServer())
+        .post('/api/v1/official-auctions')
+        .set('Authorization', 'Bearer token-maestro')
+        .send(validBody)
+
+      expect(missing.status).toBe(400)
+      expect(missing.body).toMatchObject({ code: 'INVALID_IDEMPOTENCY_KEY' })
+
+      const first = await publish('token-maestro', validBody, 'official-retry-1')
+      const retry = await publish('token-maestro', validBody, 'official-retry-1')
+      expect(first.status).toBe(201)
+      expect(retry.status).toBe(201)
+      expect(retry.body).toEqual(first.body)
+      expect(publishOfficialAuctionStub.execute).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ operationId: 'official-retry-1' }),
+      )
+    })
+
+    it.each([
+      ['exclusive-not-eligible', 422, 'PRODUCT_NOT_ELIGIBLE'],
+      ['exclusive-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
+    ])('mapea %s a HTTP %i con codigo estable', async (productId, status, code) => {
+      const response = await publish('token-maestro', { ...validBody, productId })
+
+      expect(response.status).toBe(status)
+      expect(response.body).toMatchObject({ statusCode: status, code })
+    })
+
+    it('publica en OpenAPI seguridad, idempotencia, DTO y respuestas estables', () => {
+      const document = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().addBearerAuth().build(),
+      )
+      const operation = document.paths['/api/v1/official-auctions']?.post
+
+      expect(operation).toBeDefined()
+      expect(operation?.security).toEqual([{ bearer: [] }])
+      expect(operation?.parameters).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: 'Idempotency-Key', in: 'header', required: true }),
+        ]),
+      )
+      expect(Object.keys(operation?.responses ?? {})).toEqual(
+        expect.arrayContaining(['201', '400', '401', '403', '409', '422', '503']),
+      )
+      expect(operation?.requestBody).toBeDefined()
     })
   })
 
@@ -949,6 +1219,115 @@ describe('Servicio con autenticacion activa', () => {
 
       expect(Object.keys(operation?.responses ?? {})).toEqual(
         expect.arrayContaining(['201', '400', '401', '403', '422', '503']),
+      )
+    })
+  })
+
+  describe('Compra inmediata HU-64', () => {
+    const buyNow = (
+      auctionId = 'auction-buy-now',
+      token = 'token-jugador',
+      body: Record<string, unknown> = { confirmed: true },
+      idempotencyKey: string | null = 'operation-buy-now-1',
+    ) => {
+      const req = request(app.getHttpServer())
+        .post(`/api/v1/auctions/${auctionId}/buy-now`)
+        .set('Authorization', `Bearer ${token}`)
+
+      if (idempotencyKey !== null) {
+        req.set('Idempotency-Key', idempotencyKey)
+      }
+
+      return req.send(body)
+    }
+
+    beforeEach(() => executeBuyNowStub.execute.mockClear())
+
+    it('responde 200 y usa el sujeto verificado como comprador', async () => {
+      const response = await buyNow()
+
+      expect(response.status).toBe(200)
+      expect(response.body).toMatchObject({
+        auctionId: 'auction-buy-now',
+        buyerId: 'sujeto-jugador',
+        debitedCredits: 2500,
+      })
+      expect(executeBuyNowStub.execute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buyerId: 'sujeto-jugador',
+          auctionId: 'auction-buy-now',
+          operationId: 'operation-buy-now-1',
+          confirmed: true,
+        }),
+      )
+    })
+
+    it('responde 401 sin access token', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/api/v1/auctions/auction-buy-now/buy-now')
+        .set('Idempotency-Key', 'operation-buy-now-1')
+        .send({ confirmed: true })
+      expect(response.status).toBe(401)
+    })
+
+    it('responde 403 si la identidad no tiene rol PLAYER', async () => {
+      expect((await buyNow('auction-buy-now', 'token-admin')).status).toBe(403)
+    })
+
+    it('responde 400 ante un cuerpo con campos desconocidos o sin clave idempotente', async () => {
+      const unknownField = await buyNow('auction-buy-now', 'token-jugador', {
+        confirmed: true,
+        auctionId: 'otra',
+      })
+      expect(unknownField.status).toBe(400)
+      expect(unknownField.body).toMatchObject({ code: 'INVALID_REQUEST' })
+
+      const missingKey = await buyNow('auction-buy-now', 'token-jugador', { confirmed: true }, null)
+      expect(missingKey.status).toBe(400)
+      expect(missingKey.body).toMatchObject({ code: 'INVALID_IDEMPOTENCY_KEY' })
+    })
+
+    it.each([
+      ['auction-not-found', 404, 'AUCTION_NOT_FOUND'],
+      ['auction-not-active', 409, BuyNowRuleCode.AuctionNotActive],
+      ['auction-already-closed', 409, 'BUY_NOW_CONFLICT'],
+      ['auction-no-price', 422, BuyNowRuleCode.BuyNowPriceUnavailable],
+      ['auction-insufficient-credits', 422, BuyNowRuleCode.InsufficientCredits],
+      ['auction-own', 403, BuyNowRuleCode.SellerCannotBuyOwnAuction],
+      ['auction-unavailable', 503, 'DEPENDENCY_UNAVAILABLE'],
+    ])('mapea %s a HTTP %i con codigo estable', async (auctionId, status, code) => {
+      const response = await buyNow(auctionId)
+      expect(response.status).toBe(status)
+      expect(response.body).toMatchObject({ statusCode: status, code })
+    })
+
+    it('CA-04: reenvia la casilla de confirmacion sin marcar tal como llego', async () => {
+      await buyNow('auction-buy-now', 'token-jugador', { confirmed: false })
+
+      expect(executeBuyNowStub.execute).toHaveBeenCalledWith(
+        expect.objectContaining({ confirmed: false }),
+      )
+    })
+
+    it('incluye el detalle de creditos faltantes en la respuesta de CA-02', async () => {
+      const response = await buyNow('auction-insufficient-credits')
+
+      expect(response.body).toMatchObject({
+        details: { requiredCredits: 3000, availableCredits: 2500, missingCredits: 500 },
+      })
+    })
+
+    it('publica en OpenAPI la operacion, seguridad y respuestas estables', () => {
+      const document = SwaggerModule.createDocument(
+        app,
+        new DocumentBuilder().addBearerAuth().build(),
+      )
+      const operation = document.paths['/api/v1/auctions/{auctionId}/buy-now']?.post
+
+      expect(operation).toBeDefined()
+      expect(operation?.security).toEqual([{ bearer: [] }])
+      expect(Object.keys(operation?.responses ?? {})).toEqual(
+        expect.arrayContaining(['200', '400', '401', '403', '404', '409', '422', '503']),
       )
     })
   })

@@ -1,7 +1,7 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 
-import { Role } from '../../../../application/ports/TokenVerifierPort'
+import { Role, type VerifiedIdentity } from '../../../../application/ports/TokenVerifierPort'
 import { REQUIRED_ROLES, type RequestWithIdentity } from './decorators'
 
 /**
@@ -13,7 +13,10 @@ import { REQUIRED_ROLES, type RequestWithIdentity } from './decorators'
  */
 @Injectable()
 export class RolesGuard implements CanActivate {
-  constructor(private readonly reflector: Reflector) {}
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly gameMasterSubject: string | null = null,
+  ) {}
 
   canActivate(context: ExecutionContext): boolean {
     const required = this.reflector.getAllAndOverride<readonly Role[] | undefined>(REQUIRED_ROLES, [
@@ -31,7 +34,7 @@ export class RolesGuard implements CanActivate {
       throw new ForbiddenException('La peticion no lleva una identidad verificada.')
     }
 
-    if (!required.some((exigido) => satisface(identity.roles, exigido))) {
+    if (!required.some((exigido) => satisface(identity, exigido, this.gameMasterSubject))) {
       throw new ForbiddenException('La identidad no posee el rol necesario para esta operacion.')
     }
 
@@ -52,10 +55,22 @@ export class RolesGuard implements CanActivate {
  * exige a un super administrador. Invertirla convertiria el rol raiz en un
  * sinonimo del otro y HU-39 dejaria de poder distinguirlos.
  */
-const satisface = (poseidos: ReadonlySet<Role>, exigido: Role): boolean => {
-  if (poseidos.has(exigido)) {
+const satisface = (
+  identity: VerifiedIdentity,
+  exigido: Role,
+  gameMasterSubject: string | null,
+): boolean => {
+  if (exigido === Role.GameMaster) {
+    return (
+      gameMasterSubject !== null &&
+      identity.subject === gameMasterSubject &&
+      identity.roles.has(Role.GameMaster)
+    )
+  }
+
+  if (identity.roles.has(exigido)) {
     return true
   }
 
-  return exigido === Role.Administrator && poseidos.has(Role.SuperAdministrator)
+  return exigido === Role.Administrator && identity.roles.has(Role.SuperAdministrator)
 }

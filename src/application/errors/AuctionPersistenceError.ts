@@ -39,3 +39,11 @@ export class ConcurrentBidConflictError extends Error {
     this.name = 'ConcurrentBidConflictError'
   }
 }
+
+/** Catalog no clasifica el producto como exclusivo, publicable o con marca oficial (HU-66). */
+export class ProductNotEligibleForOfficialAuctionError extends Error {
+  constructor(readonly productId: string) {
+    super(`El producto ${productId} no es elegible para una subasta oficial.`)
+    this.name = 'ProductNotEligibleForOfficialAuctionError'
+  }
+}

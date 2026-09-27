@@ -29,6 +29,8 @@ describe('Configuracion del servicio', () => {
 
       notificationsTimeoutMs: 3_000,
 
+      notificationsWatchlistBaseUrl: null,
+
       auctionSettlementBatchSize: 25,
 
       auctionSettlementConcurrency: 4,
@@ -52,6 +54,16 @@ describe('Configuracion del servicio', () => {
       auctionPendingClaimExpirationPollIntervalMs: 60_000,
 
       auctionPendingClaimExpirationBatchSize: 100,
+
+      auctionEarlyClosureRetrySchedulerEnabled: false,
+
+      auctionEarlyClosureRetryPollIntervalMs: 30_000,
+
+      auctionBuyNowPendingClaimRetrySchedulerEnabled: false,
+
+      auctionBuyNowPendingClaimRetryPollIntervalMs: 30_000,
+
+      auctionBuyNowPendingClaimRetryBatchSize: 50,
     })
   })
 
@@ -153,11 +165,14 @@ describe('Configuracion del servicio', () => {
     const config = loadConfig({
       INTERNAL_SERVICE_AUTH_SECRET: '',
       NOTIFICATIONS_BASE_URL: '',
+      NOTIFICATIONS_WATCHLIST_BASE_URL: '',
     })
 
     expect(config.notificationsBaseUrl).toBeNull()
 
     expect(config.notificationsTimeoutMs).toBe(3_000)
+
+    expect(config.notificationsWatchlistBaseUrl).toBeNull()
   })
 
   it('exige secreto interno cuando se configura Notifications', () => {
@@ -180,6 +195,47 @@ describe('Configuracion del servicio', () => {
     expect(config.notificationsBaseUrl).toBe('http://notifications:3005')
 
     expect(config.notificationsTimeoutMs).toBe(2_500)
+  })
+
+  /**
+   * HU-68: watchlist-events vive en un puerto DISTINTO de outbid/
+   * closed-by-buy-now/auto-bid-limit-reached del lado de Notifications, asi
+   * que tiene su propia variable -no cae de vuelta a NOTIFICATIONS_BASE_URL
+   * si falta, para no reintroducir en silencio el puerto equivocado-.
+   */
+  it('exige secreto interno cuando se configura la URL de watchlist de Notifications', () => {
+    expect(() =>
+      loadConfig({
+        NOTIFICATIONS_WATCHLIST_BASE_URL: 'http://notifications:3004',
+      }),
+    ).toThrow(/INTERNAL_SERVICE_AUTH_SECRET/)
+  })
+
+  it('acepta la URL de watchlist de Notifications de forma independiente de NOTIFICATIONS_BASE_URL', () => {
+    const config = loadConfig({
+      INTERNAL_SERVICE_AUTH_SECRET: 'shared-secret',
+
+      NOTIFICATIONS_WATCHLIST_BASE_URL: 'http://notifications:3004',
+    })
+
+    expect(config.notificationsWatchlistBaseUrl).toBe('http://notifications:3004')
+
+    // Sin NOTIFICATIONS_BASE_URL propia: no hereda ni comparte el valor de watchlist.
+    expect(config.notificationsBaseUrl).toBeNull()
+  })
+
+  it('permite configurar las dos URLs de Notifications a la vez, cada una a su puerto', () => {
+    const config = loadConfig({
+      INTERNAL_SERVICE_AUTH_SECRET: 'shared-secret',
+
+      NOTIFICATIONS_BASE_URL: 'http://notifications:3005',
+
+      NOTIFICATIONS_WATCHLIST_BASE_URL: 'http://notifications:3004',
+    })
+
+    expect(config.notificationsBaseUrl).toBe('http://notifications:3005')
+
+    expect(config.notificationsWatchlistBaseUrl).toBe('http://notifications:3004')
   })
 
   it.each([
@@ -406,6 +462,77 @@ describe('Configuracion del servicio', () => {
       }),
     ).toThrow(/WALLET_BASE_URL/)
   })
+
+  it('configura el scheduler de reintentos de cierre temprano y falla cerrado', () => {
+    expect(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        WALLET_BASE_URL: 'http://wallet:3007',
+        NOTIFICATIONS_BASE_URL: 'http://notifications:3005',
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED: 'true',
+        AUCTION_EARLY_CLOSURE_RETRY_POLL_INTERVAL_MS: '90000',
+      }),
+    ).toMatchObject({
+      auctionEarlyClosureRetrySchedulerEnabled: true,
+      auctionEarlyClosureRetryPollIntervalMs: 90_000,
+    })
+
+    expect(() => loadConfig({ AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED: 'true' })).toThrow(
+      /PERSISTENCE_DRIVER/,
+    )
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED: 'true',
+      }),
+    ).toThrow(/WALLET_BASE_URL/)
+  })
+
+  it('configura fail-closed el retry de pending claim de compra inmediata', () => {
+    expect(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        INVENTORY_BASE_URL: 'http://inventory:3006',
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED: 'true',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_POLL_INTERVAL_MS: '90000',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_BATCH_SIZE: '25',
+      }),
+    ).toMatchObject({
+      auctionBuyNowPendingClaimRetrySchedulerEnabled: true,
+      auctionBuyNowPendingClaimRetryPollIntervalMs: 90_000,
+      auctionBuyNowPendingClaimRetryBatchSize: 25,
+    })
+    expect(() =>
+      loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED: 'true' }),
+    ).toThrow(/PERSISTENCE_DRIVER/)
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED: 'true',
+      }),
+    ).toThrow(/INVENTORY_BASE_URL/)
+    expect(() =>
+      loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_POLL_INTERVAL_MS: '999' }),
+    ).toThrow(ConfigurationError)
+    expect(() => loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_BATCH_SIZE: '501' })).toThrow(
+      ConfigurationError,
+    )
+  })
+
+  it.each(['999', '3600001', 'invalid'])(
+    'rechaza poll interval de retry invalido: %s',
+    (interval) => {
+      expect(() => loadConfig({ AUCTION_EARLY_CLOSURE_RETRY_POLL_INTERVAL_MS: interval })).toThrow(
+        ConfigurationError,
+      )
+    },
+  )
 
   it('lee el despacho de eventos de settlement y exige su cola al habilitarlo', () => {
     expect(

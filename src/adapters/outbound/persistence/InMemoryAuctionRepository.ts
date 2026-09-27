@@ -6,15 +6,27 @@ import {
   IdempotencyConflictError,
   PersistedAuctionNotFoundError,
 } from '../../../application/errors/AuctionPersistenceError'
+import {
+  AuctionAlreadyClosedError,
+  BuyNowIdempotencyConflictError,
+} from '../../../application/errors/BuyNowTransactionError'
 import type {
   AuctionRepositoryPort,
+  ActiveAuctionList,
   BidCreditOperationSnapshot,
+  BuyNowOperationRecord,
+  CloseAuctionByBuyNowCommand,
+  CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
+  ListActiveAuctionsInput,
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
+  RecordBuyNowFailureCommand,
+  PersistOfficialAuctionPublicationCommand,
+  PersistOfficialAuctionPublicationResult,
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
@@ -30,6 +42,7 @@ import {
 } from '../../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
+import type { OfficialAuctionSnapshot } from '../../../domain/entities/OfficialAuction'
 
 interface OperationRecord {
   readonly hash: string
@@ -39,6 +52,24 @@ interface OperationRecord {
 interface StoredBid {
   readonly snapshot: BidSnapshot
   readonly creditReservationId: string | null
+}
+
+const officialHashOf = (command: PersistOfficialAuctionPublicationCommand): string => {
+  const auction = command.auction.snapshot()
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        auction.publisherId,
+        auction.productId,
+        auction.durationHours,
+        auction.currency,
+        auction.minimumBidAmountMinor,
+        auction.buyNowAmountMinor,
+        auction.mark,
+        auction.status,
+      ]),
+    )
+    .digest('hex')
 }
 
 const hashOf = (command: PersistAuctionPublicationCommand): string => {
@@ -98,12 +129,30 @@ const cloneAuction = (auction: AuctionSnapshot): AuctionSnapshot => ({
       }),
 })
 
+interface BuyNowOperationEntry {
+  readonly hash: string
+  readonly auctionId: string
+  readonly transactionId: string
+  readonly buyerId: string
+  readonly transferId: string
+  readonly priceCredits: number
+  readonly remainingCredits: number
+  readonly completedAt: Date
+}
+
+const buyNowHashOf = (command: CloseAuctionByBuyNowCommand): string =>
+  createHash('sha256')
+    .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]))
+    .digest('hex')
+
 export class InMemoryAuctionRepository
   implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
 {
   private readonly auctions = new Map<string, AuctionSnapshot>()
 
   private readonly inventoryCommitmentIds = new Map<string, string>()
+
+  private readonly officialAuctions = new Map<string, OfficialAuctionSnapshot>()
 
   private readonly operations = new Map<string, OperationRecord>()
 
@@ -118,6 +167,10 @@ export class InMemoryAuctionRepository
   private readonly leadingBidByAuction = new Map<string, string>()
 
   private readonly autoBidConfigs = new Map<string, AutoBidConfigSnapshot>()
+
+  private readonly buyNowOperations = new Map<string, BuyNowOperationEntry>()
+
+  private readonly buyNowFailures = new Map<string, RecordBuyNowFailureCommand>()
 
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     const hash = hashOf(command)
@@ -159,6 +212,26 @@ export class InMemoryAuctionRepository
       auction: snapshot,
       replayed: false,
     })
+  }
+
+  publishOfficial(
+    command: PersistOfficialAuctionPublicationCommand,
+  ): Promise<PersistOfficialAuctionPublicationResult> {
+    const hash = officialHashOf(command)
+    const previous = this.operations.get(command.operationId)
+    if (previous !== undefined) {
+      if (previous.hash !== hash) return Promise.reject(new IdempotencyConflictError())
+      const auction = this.officialAuctions.get(previous.auctionId)
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+      return Promise.resolve({ auction, replayed: true })
+    }
+
+    const snapshot = command.auction.snapshot()
+    this.officialAuctions.set(snapshot.id, snapshot)
+    this.operations.set(command.operationId, { hash, auctionId: snapshot.id })
+    return Promise.resolve({ auction: snapshot, replayed: false })
   }
 
   recordFailure(command: RecordPublicationFailureCommand): Promise<void> {
@@ -244,6 +317,14 @@ export class InMemoryAuctionRepository
     return Promise.resolve(cloneBidCreditOperation(operation))
   }
 
+  findBidCreditOperationByBid(bidId: string): Promise<BidCreditOperationSnapshot | null> {
+    const operation = [...this.bidCreditOperations.values()].find(
+      (candidate) => candidate.bidId === bidId,
+    )
+
+    return Promise.resolve(operation === undefined ? null : cloneBidCreditOperation(operation))
+  }
+
   findById(auctionId: string): Promise<AuctionSnapshot | null> {
     const auction = this.auctions.get(auctionId)
 
@@ -304,6 +385,78 @@ export class InMemoryAuctionRepository
         )
         .sort((a, b) => a.closesAt.getTime() - b.closesAt.getTime()),
     )
+  }
+
+  listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
+    const playerItems: ActiveAuctionList['items'][number][] = [...this.auctions.values()]
+      .filter(
+        (auction) =>
+          auction.status === AuctionStatus.Active &&
+          auction.closesAt.getTime() > input.now.getTime(),
+      )
+      .map((auction) => {
+        const leaderId = this.leadingBidByAuction.get(auction.id)
+        const leader = leaderId === undefined ? undefined : this.bids.get(leaderId)
+        return {
+          id: auction.id,
+          sellerId: auction.sellerId,
+          publisherType: 'PLAYER' as const,
+          productId: auction.productId,
+          priceKind: 'CREDITS' as const,
+          minimumBidCredits: auction.minimumBidCredits,
+          buyNowCredits: auction.buyNowCredits,
+          currency: null,
+          minimumBidAmountMinor: null,
+          buyNowAmountMinor: null,
+          officialMark: null,
+          status: AuctionStatus.Active,
+          publishedAt: new Date(auction.publishedAt),
+          closesAt: new Date(auction.closesAt),
+          currentBidAmount: leader?.snapshot.amountCredits ?? null,
+        }
+      })
+    const officialItems: ActiveAuctionList['items'][number][] = [...this.officialAuctions.values()]
+      .filter(
+        (auction) =>
+          auction.status === AuctionStatus.Active &&
+          auction.closesAt.getTime() > input.now.getTime(),
+      )
+      .map((auction) => ({
+        id: auction.id,
+        sellerId: auction.publisherId,
+        publisherType: 'GAME_MASTER' as const,
+        productId: auction.productId,
+        priceKind: 'REAL_MONEY' as const,
+        minimumBidCredits: null,
+        buyNowCredits: null,
+        currency: auction.currency,
+        minimumBidAmountMinor: auction.minimumBidAmountMinor,
+        buyNowAmountMinor: auction.buyNowAmountMinor,
+        officialMark: auction.mark,
+        status: AuctionStatus.Active,
+        publishedAt: new Date(auction.publishedAt),
+        closesAt: new Date(auction.closesAt),
+        currentBidAmount: null,
+      }))
+    const active = [...officialItems, ...playerItems].sort(
+      (left, right) =>
+        (left.publisherType === right.publisherType
+          ? 0
+          : left.publisherType === 'GAME_MASTER'
+            ? -1
+            : 1) ||
+        left.closesAt.getTime() - right.closesAt.getTime() ||
+        left.id.localeCompare(right.id),
+    )
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({
+      total: active.length,
+      items: active.slice(offset, offset + input.pageSize),
+    })
+  }
+
+  findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null> {
+    return Promise.resolve(this.officialAuctions.get(auctionId) ?? null)
   }
 
   countActiveBySeller(sellerId: string): Promise<number> {
@@ -480,6 +633,101 @@ export class InMemoryAuctionRepository
       },
     })
     return Promise.resolve()
+  }
+
+  closeByBuyNow(command: CloseAuctionByBuyNowCommand): Promise<CloseAuctionByBuyNowResult> {
+    const hash = buyNowHashOf(command)
+    const previous = this.buyNowOperations.get(command.operationId)
+
+    if (previous !== undefined) {
+      if (previous.hash !== hash) {
+        return Promise.reject(new BuyNowIdempotencyConflictError())
+      }
+
+      const auction = this.auctions.get(previous.auctionId)
+
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+
+      return Promise.resolve({
+        auction,
+        transactionId: previous.transactionId,
+        replayed: true,
+      })
+    }
+
+    const auction = this.auctions.get(command.auctionId)
+
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+
+    if (auction.status !== AuctionStatus.Active) {
+      return Promise.reject(new AuctionAlreadyClosedError(command.auctionId))
+    }
+
+    const closed: AuctionSnapshot = {
+      ...auction,
+      status: AuctionStatus.SoldByBuyNow,
+      closesAt: new Date(command.closedAt),
+    }
+
+    this.auctions.set(closed.id, closed)
+
+    this.buyNowOperations.set(command.operationId, {
+      hash,
+      auctionId: closed.id,
+      transactionId: command.transactionId,
+      buyerId: command.buyerId,
+      transferId: command.transferId,
+      priceCredits: command.priceCredits,
+      remainingCredits: command.remainingCredits,
+      completedAt: new Date(command.closedAt),
+    })
+
+    return Promise.resolve({
+      auction: closed,
+      transactionId: command.transactionId,
+      replayed: false,
+    })
+  }
+
+  recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {
+    this.buyNowFailures.set(command.operationId, command)
+
+    return Promise.resolve()
+  }
+
+  findBuyNowOperation(operationId: string): Promise<BuyNowOperationRecord | null> {
+    const entry = this.buyNowOperations.get(operationId)
+
+    if (entry === undefined) {
+      return Promise.resolve(null)
+    }
+
+    const auction = this.auctions.get(entry.auctionId)
+
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(entry.auctionId))
+    }
+
+    return Promise.resolve({
+      auction,
+      transactionId: entry.transactionId,
+      buyerId: entry.buyerId,
+      transferId: entry.transferId,
+      priceCredits: entry.priceCredits,
+      remainingCredits: entry.remainingCredits,
+      completedAt: new Date(entry.completedAt),
+    })
+  }
+
+  findBuyNowOperationByAuctionId(auctionId: string): Promise<BuyNowOperationRecord | null> {
+    const entry = [...this.buyNowOperations.entries()].find(
+      ([, value]) => value.auctionId === auctionId,
+    )
+    return entry === undefined ? Promise.resolve(null) : this.findBuyNowOperation(entry[0])
   }
 
   private count(sellerId: string): number {

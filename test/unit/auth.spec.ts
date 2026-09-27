@@ -250,6 +250,35 @@ describe('RolesGuard', () => {
     expect(() => new RolesGuard(reflector).canActivate(context)).toThrow(ForbiddenException)
   })
 
+  it('GAME_MASTER exige simultaneamente rol y subject configurado', () => {
+    const required = { [REQUIRED_ROLES]: [Role.GameMaster] }
+    const allowed = contextFor(
+      { headers: {}, identity: { ...identityWith(Role.GameMaster), subject: 'upb-company' } },
+      required,
+    )
+    expect(new RolesGuard(allowed.reflector, 'upb-company').canActivate(allowed.context)).toBe(true)
+
+    for (const identity of [
+      { ...identityWith(Role.GameMaster), subject: 'otro' },
+      { ...identityWith(Role.SuperAdministrator), subject: 'upb-company' },
+      { ...identityWith(Role.Administrator), subject: 'upb-company' },
+    ]) {
+      const denied = contextFor({ headers: {}, identity }, required)
+      expect(() =>
+        new RolesGuard(denied.reflector, 'upb-company').canActivate(denied.context),
+      ).toThrow(ForbiddenException)
+    }
+  })
+
+  it('GAME_MASTER falla cerrado cuando falta el subject configurado', () => {
+    const { context, reflector } = contextFor(
+      { headers: {}, identity: identityWith(Role.GameMaster) },
+      { [REQUIRED_ROLES]: [Role.GameMaster] },
+    )
+
+    expect(() => new RolesGuard(reflector).canActivate(context)).toThrow(ForbiddenException)
+  })
+
   /**
    * Sin identidad no se puede autorizar. Devolver `true` aqui convertiria un
    * fallo en el orden de los guards en una ruta abierta.
@@ -279,6 +308,7 @@ describe('AnonymousIdentityGuard', () => {
     expect(ANONYMOUS_IDENTITY.roles.has(Role.Moderator)).toBe(true)
     expect(ANONYMOUS_IDENTITY.roles.has(Role.Player)).toBe(true)
     expect(ANONYMOUS_IDENTITY.roles.has(Role.SuperAdministrator)).toBe(true)
+    expect(ANONYMOUS_IDENTITY.roles.has(Role.GameMaster)).toBe(true)
   })
 })
 
@@ -288,6 +318,7 @@ describe('Configuracion de autenticacion', () => {
 
     expect(config.authMode).toBe(AuthMode.Disabled)
     expect(config.cognito).toBeNull()
+    expect(config.gameMasterSubject).toBeNull()
   })
 
   /**
@@ -325,5 +356,12 @@ describe('Configuracion de autenticacion', () => {
     })
 
     expect(config.cognito).toEqual({ userPoolId: 'us-east-1_abc', clientId: 'cliente' })
+  })
+
+  it('normaliza el subject del Maestro de Juego sin inventar un valor por defecto', () => {
+    expect(loadConfig({ GAME_MASTER_SUBJECT: '  subject-upb-company  ' }).gameMasterSubject).toBe(
+      'subject-upb-company',
+    )
+    expect(loadConfig({ GAME_MASTER_SUBJECT: '   ' }).gameMasterSubject).toBeNull()
   })
 })

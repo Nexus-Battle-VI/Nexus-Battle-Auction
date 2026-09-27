@@ -114,4 +114,39 @@ describe('PostgresAuctionInventorySettlementIntentRepository', () => {
       database().selectFrom('auction_inventory_settlement_intents').selectAll().execute(),
     ).resolves.toHaveLength(1)
   })
+
+  it('lista solo PENDING_CLAIM retryable en orden y respeta limit', async () => {
+    const repository = new PostgresAuctionInventorySettlementIntentRepository(database())
+    await repository.getOrCreate({
+      ...pending,
+      auctionId: 'candidate-b',
+      operationId: 'op-b',
+      createdAt: new Date('2026-01-01'),
+    })
+    await repository.getOrCreate({
+      ...pending,
+      auctionId: 'candidate-a',
+      operationId: 'op-a',
+      createdAt: new Date('2026-01-01'),
+    })
+    await repository.getOrCreate(release({ auctionId: 'release', operationId: 'release-op' }))
+    await repository.markRetryable('candidate-a', 'timeout', new Date('2026-01-02'))
+    await repository.markRetryable('candidate-b', 'timeout', new Date('2026-01-01'))
+    await expect(repository.findRetryablePendingClaims(1)).resolves.toMatchObject([
+      { auctionId: 'candidate-b', action: 'PENDING_CLAIM', status: 'RETRYABLE' },
+    ])
+  })
+
+  it('no degrada CONFIRMED a retryable despues de una carrera equivalente', async () => {
+    const repository = new PostgresAuctionInventorySettlementIntentRepository(database())
+    await repository.getOrCreate(pending)
+    await repository.markRetryable('auction-2', 'timeout', now)
+    await repository.markConfirmed('auction-2', now)
+    await expect(repository.markConfirmed('auction-2', new Date())).resolves.toMatchObject({
+      status: 'CONFIRMED',
+    })
+    await expect(
+      repository.markRetryable('auction-2', 'late timeout', new Date()),
+    ).resolves.toMatchObject({ status: 'CONFIRMED' })
+  })
 })

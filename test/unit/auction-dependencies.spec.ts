@@ -68,7 +68,8 @@ describe('CatalogProductPolicyClient', () => {
       'x-internal-timestamp': String(fixedNow.getTime()),
     })
 
-    const bodyHash = createHash('sha256').update('null', 'utf8').digest('hex')
+    // El guard receptor verifica `request.body ?? {}`: un GET sin cuerpo se firma sobre `{}`.
+    const bodyHash = createHash('sha256').update('{}', 'utf8').digest('hex')
     const canonical = [
       'auction',
       'GET',

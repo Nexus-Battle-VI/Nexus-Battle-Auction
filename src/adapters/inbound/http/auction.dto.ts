@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
+import { Type } from 'class-transformer'
 import {
   ArrayMaxSize,
   IsArray,
@@ -7,6 +8,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -92,6 +94,67 @@ export class AuctionResponseDto {
     format: 'date-time',
   })
   closesAt!: Date
+}
+
+export class ListActiveAuctionsQueryDto {
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number
+
+  @ApiPropertyOptional({ default: 16, minimum: 1, maximum: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  pageSize?: number
+}
+
+export class ActiveAuctionSummaryResponseDto {
+  @ApiProperty()
+  id!: string
+  @ApiProperty()
+  sellerId!: string
+  @ApiProperty({ enum: ['PLAYER', 'GAME_MASTER'] })
+  publisherType!: 'PLAYER' | 'GAME_MASTER'
+  @ApiProperty()
+  productId!: string
+  @ApiProperty({ enum: ['CREDITS', 'REAL_MONEY'] })
+  priceKind!: 'CREDITS' | 'REAL_MONEY'
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  minimumBidCredits!: number | null
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  buyNowCredits!: number | null
+  @ApiPropertyOptional({ nullable: true, example: 'COP' })
+  currency!: string | null
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  minimumBidAmountMinor!: number | null
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  buyNowAmountMinor!: number | null
+  @ApiPropertyOptional({ nullable: true, enum: ['OFFICIAL', 'PREMIUM'] })
+  officialMark!: 'OFFICIAL' | 'PREMIUM' | null
+  @ApiProperty({ enum: ['ACTIVE'] })
+  status!: 'ACTIVE'
+  @ApiProperty({ type: String, format: 'date-time' })
+  publishedAt!: Date
+  @ApiProperty({ type: String, format: 'date-time' })
+  closesAt!: Date
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  currentBidAmount!: number | null
+}
+
+export class ActiveAuctionPageResponseDto {
+  @ApiProperty({ type: [ActiveAuctionSummaryResponseDto] })
+  items!: ActiveAuctionSummaryResponseDto[]
+  @ApiProperty({ minimum: 1 })
+  page!: number
+  @ApiProperty({ minimum: 1, maximum: 100 })
+  pageSize!: number
+  @ApiProperty({ minimum: 0 })
+  total!: number
 }
 
 export class RegisterBidRequestDto {

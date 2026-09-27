@@ -51,14 +51,28 @@ export interface AppConfig {
   readonly cognito: CognitoConfig | null
 
   readonly internalServiceAuthSecret: string | null
-
+  readonly gameMasterSubject: string | null
   readonly catalogBaseUrl: string
+
+  /**
+   * HU-62.
+   *
+   * URL interna de Account, para consultar si un vendedor tiene una sancion
+   * activa antes de publicar. null deja el chequeo fail-closed (mismo
+   * criterio que `walletBaseUrl`/`inventoryBaseUrl`).
+   */
+  readonly accountBaseUrl: string | null
+
+  readonly accountRequestTimeoutMs: number
 
   /**
    * HU-63.5.
    *
-   * URL interna del servidor de Notifications que recibe
-   * las notificaciones de puja superada.
+   * URL interna del servidor de Notifications que recibe las notificaciones
+   * de puja superada (HU-63.5), cierre por compra inmediata (HU-64.5) y
+   * limite de puja automatica alcanzado (HU-67). Las tres viven en el mismo
+   * servidor/puerto del lado de Notifications (`AUCTION_OUTBID_HTTP_PORT`,
+   * 3005 por convencion).
    *
    * null permite ejecutar Auction localmente sin levantar
    * Notifications.
@@ -66,6 +80,21 @@ export interface AppConfig {
   readonly notificationsBaseUrl: string | null
 
   readonly notificationsTimeoutMs: number
+
+  /**
+   * URL interna del servidor de Notifications que recibe los eventos de
+   * lista de seguimiento (HU-68: nueva puja, cierre proximo, liquidacion).
+   *
+   * Variable DELIBERADAMENTE separada de `notificationsBaseUrl`: del lado de
+   * Notifications, watchlist-events vive en un servidor/puerto distinto
+   * (`CATALOG_NOTIFICATIONS_HTTP_PORT`, 3004 por convencion) al de
+   * outbid/closed-by-buy-now/auto-bid-limit-reached (3005). Compartir una
+   * sola variable entre ambos hace que uno de los dos apunte siempre al
+   * puerto equivocado.
+   *
+   * null permite ejecutar Auction localmente sin levantar Notifications.
+   */
+  readonly notificationsWatchlistBaseUrl: string | null
 
   readonly walletBaseUrl: string | null
 
@@ -98,6 +127,14 @@ export interface AppConfig {
   readonly auctionPendingClaimExpirationPollIntervalMs: number
 
   readonly auctionPendingClaimExpirationBatchSize: number
+
+  readonly auctionEarlyClosureRetrySchedulerEnabled: boolean
+
+  readonly auctionEarlyClosureRetryPollIntervalMs: number
+
+  readonly auctionBuyNowPendingClaimRetrySchedulerEnabled: boolean
+  readonly auctionBuyNowPendingClaimRetryPollIntervalMs: number
+  readonly auctionBuyNowPendingClaimRetryBatchSize: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -230,10 +267,13 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   }
 
   const internalServiceAuthSecret = readString(env, 'INTERNAL_SERVICE_AUTH_SECRET', '')
+  const gameMasterSubject = readString(env, 'GAME_MASTER_SUBJECT', '').trim()
 
   const notificationsBaseUrl = readString(env, 'NOTIFICATIONS_BASE_URL', '')
 
   const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  const notificationsWatchlistBaseUrl = readString(env, 'NOTIFICATIONS_WATCHLIST_BASE_URL', '')
 
   const walletBaseUrl = readString(env, 'WALLET_BASE_URL', '')
 
@@ -242,6 +282,14 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   }
 
   const walletRequestTimeoutMs = readInteger(env, 'WALLET_REQUEST_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  const accountBaseUrl = readString(env, 'ACCOUNT_BASE_URL', '')
+
+  if (env.ACCOUNT_REQUEST_TIMEOUT_MS === '') {
+    throw new ConfigurationError('ACCOUNT_REQUEST_TIMEOUT_MS no puede estar vacio.')
+  }
+
+  const accountRequestTimeoutMs = readInteger(env, 'ACCOUNT_REQUEST_TIMEOUT_MS', 3_000, 1, 60_000)
 
   const inventoryBaseUrl = readString(env, 'INVENTORY_BASE_URL', '')
 
@@ -332,6 +380,14 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  if (accountBaseUrl !== '') {
+    try {
+      new URL(accountBaseUrl)
+    } catch {
+      throw new ConfigurationError('ACCOUNT_BASE_URL debe ser una URL valida.')
+    }
+  }
+
   if (walletBaseUrl !== '' && internalServiceAuthSecret === '') {
     throw new ConfigurationError(
       'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando WALLET_BASE_URL esta configurado.',
@@ -341,6 +397,12 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   if (inventoryBaseUrl !== '' && internalServiceAuthSecret === '') {
     throw new ConfigurationError(
       'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando INVENTORY_BASE_URL esta configurado.',
+    )
+  }
+
+  if (accountBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando ACCOUNT_BASE_URL esta configurado.',
     )
   }
 
@@ -393,6 +455,69 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     )
   }
 
+  if (notificationsWatchlistBaseUrl !== '' && internalServiceAuthSecret === '') {
+    throw new ConfigurationError(
+      'INTERNAL_SERVICE_AUTH_SECRET es obligatorio cuando NOTIFICATIONS_WATCHLIST_BASE_URL esta configurado.',
+    )
+  }
+
+  const auctionEarlyClosureRetrySchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionEarlyClosureRetryPollIntervalMs = readInteger(
+    env,
+    'AUCTION_EARLY_CLOSURE_RETRY_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  if (auctionEarlyClosureRetrySchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (walletBaseUrl === '' || notificationsBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'WALLET_BASE_URL, NOTIFICATIONS_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_EARLY_CLOSURE_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
+  const auctionBuyNowPendingClaimRetrySchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionBuyNowPendingClaimRetryPollIntervalMs = readInteger(
+    env,
+    'AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionBuyNowPendingClaimRetryBatchSize = readInteger(
+    env,
+    'AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_BATCH_SIZE',
+    50,
+    1,
+    500,
+  )
+  if (auctionBuyNowPendingClaimRetrySchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (inventoryBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
   return {
     nodeEnv,
 
@@ -424,12 +549,15 @@ export const loadConfig = (env: RawEnv): AppConfig => {
         : null,
 
     internalServiceAuthSecret: internalServiceAuthSecret === '' ? null : internalServiceAuthSecret,
-
+    gameMasterSubject: gameMasterSubject === '' ? null : gameMasterSubject,
     catalogBaseUrl: readString(env, 'CATALOG_BASE_URL', 'http://catalog:3003'),
 
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
 
     notificationsTimeoutMs,
+
+    notificationsWatchlistBaseUrl:
+      notificationsWatchlistBaseUrl === '' ? null : notificationsWatchlistBaseUrl,
 
     walletBaseUrl: walletBaseUrl === '' ? null : walletBaseUrl,
 
@@ -438,6 +566,10 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     inventoryBaseUrl: inventoryBaseUrl === '' ? null : inventoryBaseUrl,
 
     inventoryRequestTimeoutMs,
+
+    accountBaseUrl: accountBaseUrl === '' ? null : accountBaseUrl,
+
+    accountRequestTimeoutMs,
 
     auctionSettlementBatchSize,
 
@@ -462,5 +594,13 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionPendingClaimExpirationPollIntervalMs,
 
     auctionPendingClaimExpirationBatchSize,
+
+    auctionEarlyClosureRetrySchedulerEnabled,
+
+    auctionEarlyClosureRetryPollIntervalMs,
+
+    auctionBuyNowPendingClaimRetrySchedulerEnabled,
+    auctionBuyNowPendingClaimRetryPollIntervalMs,
+    auctionBuyNowPendingClaimRetryBatchSize,
   }
 }

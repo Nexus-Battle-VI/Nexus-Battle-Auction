@@ -229,6 +229,8 @@ describe('PostgresAuctionSettlementWorkRepository', () => {
         seller_id: `seller-${auctionId}`,
         product_id: `product-${auctionId}`,
         duration_hours: 24,
+        publisher_type: 'PLAYER',
+        price_kind: 'CREDITS',
         publication_fee_credits: 2,
         minimum_bid_credits: 10,
         buy_now_credits: null,

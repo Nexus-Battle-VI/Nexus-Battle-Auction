@@ -5,6 +5,10 @@ import type {
   CatalogProductPolicyPort,
 } from '../../../application/ports/CatalogProductPolicyPort'
 import type {
+  OfficialAuctionEligibility,
+  OfficialAuctionEligibilityPort,
+} from '../../../application/ports/OfficialAuctionEligibilityPort'
+import type {
   ClaimedInventoryProductCommitment,
   CommitInventoryProductCommand,
   ConfirmInventoryProductClaimCommand,
@@ -21,7 +25,17 @@ import type {
   PublicationFeeCharge,
   PublicationFeePort,
 } from '../../../application/ports/PublicationFeePort'
+import type {
+  NotificationDispatch,
+  NotificationPort,
+  NotifyAuctionClosedEarlyCommand,
+} from '../../../application/ports/NotificationPort'
 import type { SellerSanctionPort } from '../../../application/ports/SellerSanctionPort'
+import type {
+  BuyNowCreditTransfer,
+  BuyNowCreditTransferCommand,
+  WalletPort,
+} from '../../../application/ports/WalletPort'
 
 /**
  * Adaptadores deliberadamente cerrados mientras los servicios propietarios no
@@ -30,6 +44,13 @@ import type { SellerSanctionPort } from '../../../application/ports/SellerSancti
  */
 export class UnavailableCatalogProductPolicy implements CatalogProductPolicyPort {
   getPolicy(productId: string): Promise<CatalogProductPolicy> {
+    void productId
+    return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
+  }
+}
+
+export class UnavailableOfficialAuctionEligibility implements OfficialAuctionEligibilityPort {
+  getEligibility(productId: string): Promise<OfficialAuctionEligibility> {
     void productId
     return Promise.reject(new ExternalDependencyUnavailableError('catalog'))
   }
@@ -109,5 +130,43 @@ export class UnavailableBidCredits implements BidCreditsPort {
     void operationId
     void reservationId
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+}
+
+/**
+ * Wallet (HU-64) todavia no publica ningun contrato HTTP de negocio: solo
+ * andamiaje. Fallar cerrado evita simular un saldo o una transferencia que
+ * nadie respalda.
+ */
+export class UnavailableWallet implements WalletPort {
+  getAvailableCredits(buyerId: string): Promise<number> {
+    void buyerId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  transferBuyNowCredits(command: BuyNowCreditTransferCommand): Promise<BuyNowCreditTransfer> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+
+  reverseBuyNowCredits(operationId: string, transferId: string): Promise<void> {
+    void operationId
+    void transferId
+    return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
+  }
+}
+
+/**
+ * Fallback de HU-64.5 cuando no hay URL de Notifications o secreto interno
+ * configurados (desarrollo local). Con ambos se usa
+ * `HttpEarlyClosureNotificationClient`. Fallar cerrado evita simular una
+ * entrega que nadie realizo.
+ */
+export class UnavailableEarlyClosureNotification implements NotificationPort {
+  notifyAuctionClosedEarly(
+    command: NotifyAuctionClosedEarlyCommand,
+  ): Promise<NotificationDispatch> {
+    void command
+    return Promise.reject(new ExternalDependencyUnavailableError('notifications'))
   }
 }
