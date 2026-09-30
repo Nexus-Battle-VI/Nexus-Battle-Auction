@@ -92,6 +92,8 @@ const getAuctionDetailStub = {
         },
 
         currentBid: null,
+
+        bidCount: 0,
       })
     }
 
@@ -107,6 +109,8 @@ const getAuctionDetailStub = {
 
         auctionId,
       },
+
+      bidCount: 4,
     })
   }),
 }
@@ -192,6 +196,8 @@ describe('GET detalle de subasta HU-63.6', () => {
 
         amountCredits: 50,
       },
+
+      bidCount: 4,
     })
 
     expect(getAuctionDetailStub.execute).toHaveBeenCalledWith('auction-web')
@@ -205,6 +211,8 @@ describe('GET detalle de subasta HU-63.6', () => {
     expect(response.status).toBe(200)
 
     expect(response.body.currentBid).toBeNull()
+
+    expect(response.body.bidCount).toBe(0)
   })
 
   it('responde 404 cuando la subasta no existe', async () => {

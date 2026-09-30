@@ -89,6 +89,26 @@ describe('PostgreSQL active auction marketplace', () => {
     })
   }
 
+  const placeBid = async (auctionId: string, bidId: string, amountCredits: number) => {
+    await repository.persistBid(
+      Bid.register({
+        bidId,
+        auctionId,
+        bidderId: `bidder-${bidId}`,
+        amountCredits,
+        placedAt: now,
+        eligibility: {
+          auctionStatus: 'ACTIVE',
+          sellerId: `seller-${auctionId}`,
+          currentBidCredits: null,
+          minimumIncrementCredits: 1,
+          lastBidAtByBidder: null,
+          activeBidCount: 0,
+        },
+      }),
+    )
+  }
+
   it('filtra, ordena, pagina y resuelve el lider con una sola consulta de listado', async () => {
     await publish('expired', now)
     await publish('same-b', new Date(now.getTime() + 2_000))
@@ -119,11 +139,11 @@ describe('PostgreSQL active auction marketplace', () => {
 
     await expect(repository.listActive({ now, page: 1, pageSize: 1 })).resolves.toMatchObject({
       total: 2,
-      items: [{ id: 'first', currentBidAmount: null }],
+      items: [{ id: 'first', currentBidAmount: null, bidCount: 0 }],
     })
     await expect(repository.listActive({ now, page: 2, pageSize: 1 })).resolves.toMatchObject({
       total: 2,
-      items: [{ id: 'same-a', currentBidAmount: 30, status: 'ACTIVE' }],
+      items: [{ id: 'same-a', currentBidAmount: 30, status: 'ACTIVE', bidCount: 1 }],
     })
   })
 
@@ -153,5 +173,49 @@ describe('PostgreSQL active auction marketplace', () => {
       total: 3,
       items: [{ id: 'player-earlier', publisherType: 'PLAYER', priceKind: 'CREDITS' }],
     })
+  })
+
+  it('agrega el total real de pujas por subasta sin duplicar filas ni alterar total o paginacion', async () => {
+    await publish('no-bids', new Date(now.getTime() + 1_000))
+    await publish('one-bid', new Date(now.getTime() + 2_000))
+    await publish('many-bids', new Date(now.getTime() + 3_000))
+    await publishOfficial('official', new Date(now.getTime() + 4_000))
+    await placeBid('one-bid', 'one-bid-1', 15)
+    await placeBid('many-bids', 'many-bids-1', 20)
+    await placeBid('many-bids', 'many-bids-2', 30)
+    await placeBid('many-bids', 'many-bids-3', 40)
+    const countBids = jest.spyOn(repository, 'countBids')
+
+    const full = await repository.listActive({ now, page: 1, pageSize: 16 })
+
+    expect(full.total).toBe(4)
+    expect(full.items.map((item) => [item.id, item.bidCount, item.currentBidAmount])).toEqual([
+      ['official', 0, null],
+      ['no-bids', 0, null],
+      ['one-bid', 1, 15],
+      ['many-bids', 3, 40],
+    ])
+    await expect(repository.listActive({ now, page: 1, pageSize: 2 })).resolves.toMatchObject({
+      total: 4,
+      items: [
+        { id: 'official', bidCount: 0 },
+        { id: 'no-bids', bidCount: 0 },
+      ],
+    })
+    await expect(repository.listActive({ now, page: 2, pageSize: 2 })).resolves.toMatchObject({
+      total: 4,
+      items: [
+        { id: 'one-bid', bidCount: 1 },
+        { id: 'many-bids', bidCount: 3 },
+      ],
+    })
+    // El listado agrega en la misma consulta: nunca un conteo por subasta (N+1).
+    expect(countBids).not.toHaveBeenCalled()
+    countBids.mockRestore()
+
+    await expect(repository.countBids('no-bids')).resolves.toBe(0)
+    await expect(repository.countBids('one-bid')).resolves.toBe(1)
+    await expect(repository.countBids('many-bids')).resolves.toBe(3)
+    await expect(repository.countBids('missing')).resolves.toBe(0)
   })
 })

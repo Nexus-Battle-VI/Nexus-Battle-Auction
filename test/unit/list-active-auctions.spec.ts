@@ -42,10 +42,11 @@ const bid = async (
   repository: InMemoryAuctionRepository,
   auctionId: string,
   amountCredits: number,
+  bidId = `bid-${auctionId}`,
 ) =>
   repository.persistBid(
     Bid.register({
-      bidId: `bid-${auctionId}`,
+      bidId,
       auctionId,
       bidderId: 'bidder-1',
       amountCredits,
@@ -113,11 +114,11 @@ describe('ListActiveAuctions', () => {
 
     await expect(useCase.execute({ page: 1, pageSize: 1 })).resolves.toMatchObject({
       total: 2,
-      items: [{ id: 'first', currentBidAmount: null }],
+      items: [{ id: 'first', currentBidAmount: null, bidCount: 0 }],
     })
     await expect(useCase.execute({ page: 2, pageSize: 1 })).resolves.toMatchObject({
       total: 2,
-      items: [{ id: 'same-a', currentBidAmount: 30, status: 'ACTIVE' }],
+      items: [{ id: 'same-a', currentBidAmount: 30, status: 'ACTIVE', bidCount: 1 }],
     })
   })
 
@@ -143,8 +144,14 @@ describe('ListActiveAuctions', () => {
           currency: 'COP',
           officialMark: 'PREMIUM',
           minimumBidAmountMinor: 90_000,
+          bidCount: 0,
         },
-        { id: 'official-b', publisherType: 'GAME_MASTER', officialMark: 'OFFICIAL' },
+        {
+          id: 'official-b',
+          publisherType: 'GAME_MASTER',
+          officialMark: 'OFFICIAL',
+          bidCount: 0,
+        },
       ],
     })
     await expect(useCase.execute({ page: 2, pageSize: 2 })).resolves.toMatchObject({
@@ -159,5 +166,29 @@ describe('ListActiveAuctions', () => {
         },
       ],
     })
+  })
+
+  it('devuelve el total real de pujas persistidas de cada subasta del listado', async () => {
+    const repository = new InMemoryAuctionRepository()
+    const useCase = new ListActiveAuctions(repository, clock)
+    await publish(repository, 'no-bids', new Date(now.getTime() + 1_000))
+    await publish(repository, 'one-bid', new Date(now.getTime() + 2_000))
+    await publish(repository, 'many-bids', new Date(now.getTime() + 3_000))
+    await bid(repository, 'one-bid', 15)
+    await bid(repository, 'many-bids', 20, 'many-bids-1')
+    await bid(repository, 'many-bids', 30, 'many-bids-2')
+    await bid(repository, 'many-bids', 40, 'many-bids-3')
+
+    await expect(useCase.execute({ page: 1, pageSize: 16 })).resolves.toMatchObject({
+      total: 3,
+      items: [
+        { id: 'no-bids', bidCount: 0, currentBidAmount: null },
+        { id: 'one-bid', bidCount: 1, currentBidAmount: 15 },
+        { id: 'many-bids', bidCount: 3, currentBidAmount: 40 },
+      ],
+    })
+    await expect(repository.countBids('no-bids')).resolves.toBe(0)
+    await expect(repository.countBids('one-bid')).resolves.toBe(1)
+    await expect(repository.countBids('many-bids')).resolves.toBe(3)
   })
 })

@@ -296,6 +296,16 @@ export class PostgresAuctionRepository
         .leftJoin('auction_bids as leader', (join) =>
           join.onRef('leader.auction_id', '=', 'auctions.id').on('leader.is_leader', '=', true),
         )
+        // Conteo agregado en la misma consulta (sin N+1): una fila por subasta.
+        .leftJoin(
+          (eb) =>
+            eb
+              .selectFrom('auction_bids')
+              .select(['auction_id', sql<number>`count(*)::integer`.as('bid_count')])
+              .groupBy('auction_id')
+              .as('bid_counts'),
+          (join) => join.onRef('bid_counts.auction_id', '=', 'auctions.id'),
+        )
         .select([
           'auctions.id',
           'auctions.seller_id',
@@ -312,6 +322,7 @@ export class PostgresAuctionRepository
           'auctions.published_at',
           'auctions.closes_at',
           'leader.amount_credits as current_bid_amount',
+          sql<number>`coalesce(bid_counts.bid_count, 0)::integer`.as('bid_count'),
         ])
         .where('auctions.status', '=', AuctionStatus.Active)
         .where('auctions.closes_at', '>', input.now)
@@ -339,6 +350,7 @@ export class PostgresAuctionRepository
           publishedAt: new Date(row.published_at),
           closesAt: new Date(row.closes_at),
           currentBidAmount: row.current_bid_amount,
+          bidCount: row.bid_count,
         }
 
         if (row.price_kind === 'CREDITS' && row.minimum_bid_credits !== null) {
@@ -876,6 +888,16 @@ export class PostgresAuctionRepository
       .execute()
 
     return rows.map(toBidSnapshot)
+  }
+
+  async countBids(auctionId: string): Promise<number> {
+    const row = await this.db
+      .selectFrom('auction_bids')
+      .select(sql<number>`count(*)::integer`.as('total'))
+      .where('auction_id', '=', auctionId)
+      .executeTakeFirstOrThrow()
+
+    return row.total
   }
 
   async findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {

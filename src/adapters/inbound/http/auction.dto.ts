@@ -144,6 +144,8 @@ export class ActiveAuctionSummaryResponseDto {
   closesAt!: Date
   @ApiPropertyOptional({ nullable: true, minimum: 1 })
   currentBidAmount!: number | null
+  @ApiProperty({ minimum: 0, description: 'Total de pujas persistidas de la subasta.' })
+  bidCount!: number
 }
 
 export class ActiveAuctionPageResponseDto {
@@ -209,6 +211,8 @@ export class AuctionDetailResponseDto extends AuctionResponseDto {
     nullable: true,
   })
   currentBid!: BidResponseDto | null
+  @ApiProperty({ minimum: 0, description: 'Total de pujas persistidas de la subasta.' })
+  bidCount!: number
 }
 
 export class ConfigureAutoBidRequestDto {

@@ -46,9 +46,28 @@ const list = {
           publishedAt: new Date('2026-09-22T12:00:00.000Z'),
           closesAt: new Date('2026-09-24T12:00:00.000Z'),
           currentBidAmount: 20,
+          bidCount: 3,
+        },
+        {
+          id: 'auction-2',
+          sellerId: 'seller-2',
+          publisherType: 'PLAYER' as const,
+          productId: 'product-2',
+          priceKind: 'CREDITS' as const,
+          minimumBidCredits: 10,
+          buyNowCredits: null,
+          currency: null,
+          minimumBidAmountMinor: null,
+          buyNowAmountMinor: null,
+          officialMark: null,
+          status: 'ACTIVE' as const,
+          publishedAt: new Date('2026-09-22T12:00:00.000Z'),
+          closesAt: new Date('2026-09-25T12:00:00.000Z'),
+          currentBidAmount: null,
+          bidCount: 0,
         },
       ],
-      total: 1,
+      total: 2,
     }),
   ),
 }
@@ -95,8 +114,11 @@ describe('GET /v1/auctions marketplace', () => {
     expect(response.body).toMatchObject({
       page: 1,
       pageSize: 16,
-      total: 1,
-      items: [{ id: 'auction-1', currentBidAmount: 20 }],
+      total: 2,
+      items: [
+        { id: 'auction-1', currentBidAmount: 20, bidCount: 3 },
+        { id: 'auction-2', currentBidAmount: null, bidCount: 0 },
+      ],
     })
     expect(response.body.items[0]).not.toHaveProperty('bidderId')
     expect(list.execute).toHaveBeenCalledWith({ page: 1, pageSize: 16 })
