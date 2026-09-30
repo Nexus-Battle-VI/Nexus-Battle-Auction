@@ -41,6 +41,23 @@ describe('ClassifyAuctionLoserCredits', () => {
     ).resolves.toMatchObject([{ classification, releaseOperationId: null }])
   })
 
+  it('prioriza la operacion que libero el hold sobre la operacion de la puja original', async () => {
+    const ownBidOperation = {
+      ...operation('COMPLETED', null),
+      operationId: 'bid-loser-reserve',
+      bidId: 'loser',
+      reservationId: 'hold-1',
+    }
+    const overbidOperation = operation('COMPLETED', 'hold-1')
+    const useCase = new ClassifyAuctionLoserCredits(
+      new InMemoryBidCreditOperationReader([ownBidOperation, overbidOperation]),
+    )
+
+    await expect(
+      useCase.execute('auction-1', [bid('loser', 'hold-1')], null),
+    ).resolves.toMatchObject([{ classification: 'ALREADY_RELEASED', releaseOperationId: null }])
+  })
+
   it('reutiliza exactamente el operationId de compensacion pendiente', async () => {
     const useCase = new ClassifyAuctionLoserCredits(
       new InMemoryBidCreditOperationReader([operation('COMPENSATION_PENDING', 'hold-1')]),

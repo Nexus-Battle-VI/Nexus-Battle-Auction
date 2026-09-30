@@ -223,6 +223,35 @@ export class PostgresAuctionSettlementRepository implements AuctionSettlementRep
     )
   }
 
+  async markReleaseAlreadyReleased(
+    auctionId: string,
+    bidId: string,
+    updatedAt: Date,
+  ): Promise<void> {
+    const result = await this.db
+      .updateTable('auction_settlement_releases')
+      .set({ status: ReleaseStatus.Released, last_error: null, updated_at: updatedAt })
+      .where('auction_id', '=', auctionId)
+      .where('bid_id', '=', bidId)
+      .where('status', 'in', [
+        ReleaseStatus.Pending,
+        ReleaseStatus.Retryable,
+        ReleaseStatus.TerminalError,
+      ])
+      .executeTakeFirst()
+    if (result.numUpdatedRows !== 0n) return
+
+    const release = await this.db
+      .selectFrom('auction_settlement_releases')
+      .select('status')
+      .where('auction_id', '=', auctionId)
+      .where('bid_id', '=', bidId)
+      .executeTakeFirst()
+    if (release === undefined || (release.status as ReleaseStatus) === ReleaseStatus.Released)
+      return
+    throw new Error('El release no admite esa reconciliacion.')
+  }
+
   markReleaseRetryable(
     auctionId: string,
     bidId: string,

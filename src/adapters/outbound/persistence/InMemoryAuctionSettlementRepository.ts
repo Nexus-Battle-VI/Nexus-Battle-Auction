@@ -183,6 +183,19 @@ export class InMemoryAuctionSettlementRepository implements AuctionSettlementRep
     })
   }
 
+  markReleaseAlreadyReleased(auctionId: string, bidId: string, updatedAt: Date): Promise<void> {
+    const key = `${auctionId}:${bidId}`
+    const release = this.releases.get(key)
+    if (release === undefined || release.status === ReleaseStatus.Released) return Promise.resolve()
+    this.releases.set(key, {
+      ...release,
+      status: ReleaseStatus.Released,
+      lastError: null,
+      updatedAt: new Date(updatedAt),
+    })
+    return Promise.resolve()
+  }
+
   markReleaseRetryable(
     auctionId: string,
     bidId: string,

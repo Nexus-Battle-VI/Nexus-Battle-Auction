@@ -682,6 +682,114 @@ describe('SettleAuction', () => {
     expect(wallet.releaseHold).not.toHaveBeenCalled()
   })
 
+  it('completa el settlement de una puja sobrepujada sin reliberar su hold', async () => {
+    const auctionId = 'auction-overbid-already-released'
+    const loserBidId = `bid-loser-${auctionId}`
+    const loserHoldId = 'hold-overbid-loser'
+    const ownBidOperation: BidCreditOperationSnapshot = {
+      operationId: 'bid-loser-reserve',
+      bidId: loserBidId,
+      auctionId,
+      bidderId: 'loser-1',
+      amountCredits: 20,
+      status: 'COMPLETED',
+      reservationId: loserHoldId,
+      previousReservationId: null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    const wallet = new FakeAuctionWallet(['SUCCESS'])
+    const { auctions, inventory, pendingClaims, useCase } = setup(wallet, [
+      ownBidOperation,
+      creditOperation(auctionId, 'COMPLETED', loserHoldId),
+    ])
+    await publish(auctions, auctionId)
+    await persistBid(auctions, {
+      auctionId,
+      bidId: loserBidId,
+      bidderId: 'loser-1',
+      amountCredits: 20,
+      creditReservationId: loserHoldId,
+    })
+    await persistLeadingBid(auctions, auctionId, 'hold-overbid-winner')
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    expect(wallet.captureHold).toHaveBeenCalledTimes(1)
+    expect(wallet.captureHold).toHaveBeenCalledWith(
+      expect.objectContaining({ holdId: 'hold-overbid-winner', beneficiaryPlayerId: 'seller-1' }),
+    )
+    expect(wallet.releaseHold).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).toHaveBeenCalledTimes(1)
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toMatchObject({
+      claimStatus: 'PENDING',
+    })
+  })
+
+  it('reconcilia una release terminal historica si el hold ya habia sido liberado', async () => {
+    const auctionId = 'auction-overbid-terminal-reconciliation'
+    const loserBidId = `bid-loser-${auctionId}`
+    const loserHoldId = 'hold-overbid-terminal'
+    const ownBidOperation: BidCreditOperationSnapshot = {
+      operationId: 'bid-loser-terminal-reserve',
+      bidId: loserBidId,
+      auctionId,
+      bidderId: 'loser-1',
+      amountCredits: 20,
+      status: 'COMPLETED',
+      reservationId: loserHoldId,
+      previousReservationId: null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    const wallet = new FakeAuctionWallet(['SUCCESS'])
+    const { auctions, settlements, inventory, pendingClaims, useCase } = setup(wallet, [
+      ownBidOperation,
+      creditOperation(auctionId, 'COMPLETED', loserHoldId),
+    ])
+    await publish(auctions, auctionId)
+    await persistBid(auctions, {
+      auctionId,
+      bidId: loserBidId,
+      bidderId: 'loser-1',
+      amountCredits: 20,
+      creditReservationId: loserHoldId,
+    })
+    await persistLeadingBid(auctions, auctionId, 'hold-overbid-terminal-winner')
+    await settlements.createIfAbsent({
+      auctionId,
+      resultType: 'WITH_WINNER',
+      sellerId: 'seller-1',
+      winningBidId: `bid-${auctionId}`,
+      winnerId: 'winner-1',
+      winningHoldId: 'hold-overbid-terminal-winner',
+      finalAmountCredits: 30,
+      captureOperationId: `auction:${auctionId}:settlement:capture`,
+      createdAt: now,
+    })
+    await settlements.markCaptureConfirmed(auctionId, now)
+    await settlements.createReleaseIfAbsent({
+      auctionId,
+      bidId: loserBidId,
+      holdId: loserHoldId,
+      operationId: `auction:${auctionId}:bid:${loserBidId}:release`,
+      createdAt: now,
+    })
+    await settlements.markReleaseTerminal(auctionId, loserBidId, 'stale classification', now)
+
+    await expect(useCase.execute({ auctionId })).resolves.toMatchObject({ status: 'COMPLETED' })
+
+    await expect(settlements.listReleaseTasks(auctionId)).resolves.toEqual([
+      expect.objectContaining({ status: 'RELEASED', lastError: null }),
+    ])
+    expect(wallet.captureHold).not.toHaveBeenCalled()
+    expect(wallet.releaseHold).not.toHaveBeenCalled()
+    expect(inventory.markPendingClaim).toHaveBeenCalledTimes(1)
+    await expect(pendingClaims.findByAuctionId(auctionId)).resolves.toMatchObject({
+      claimStatus: 'PENDING',
+    })
+  })
+
   it('no prepara release para loser COMPENSATED', async () => {
     const wallet = new FakeAuctionWallet(['SUCCESS'])
     const auctionId = 'auction-loser-compensated'

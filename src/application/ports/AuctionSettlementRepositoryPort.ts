@@ -120,6 +120,7 @@ export interface AuctionSettlementRepositoryPort {
   listReleaseTasks(auctionId: string): Promise<readonly AuctionSettlementReleaseSnapshot[]>
   listPendingReleaseTasks(auctionId: string): Promise<readonly AuctionSettlementReleaseSnapshot[]>
   markReleaseConfirmed(auctionId: string, bidId: string, updatedAt: Date): Promise<void>
+  markReleaseAlreadyReleased(auctionId: string, bidId: string, updatedAt: Date): Promise<void>
   markReleaseRetryable(
     auctionId: string,
     bidId: string,

@@ -19,9 +19,9 @@ const classify = (
   operations: readonly BidCreditOperationSnapshot[],
 ): LoserCreditReleaseAction => {
   const holdId = bid.creditReservationId ?? null
-  const operation = operations.find(
-    (candidate) => candidate.previousReservationId === holdId || candidate.reservationId === holdId,
-  )
+  const operation =
+    operations.find((candidate) => candidate.previousReservationId === holdId) ??
+    operations.find((candidate) => candidate.reservationId === holdId)
   if (operation?.status === 'COMPLETED' && operation.previousReservationId === holdId) {
     return {
       auctionId: bid.auctionId,
