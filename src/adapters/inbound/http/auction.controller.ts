@@ -316,6 +316,7 @@ export class AuctionController {
     return {
       ...detail.auction,
       currentBid: detail.currentBid,
+      bidCount: detail.bidCount,
     }
   }
 

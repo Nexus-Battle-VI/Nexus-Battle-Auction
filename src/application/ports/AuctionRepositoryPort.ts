@@ -61,6 +61,8 @@ interface ActiveAuctionListItemBase {
   readonly publishedAt: Date
   readonly closesAt: Date
   readonly currentBidAmount: number | null
+  /** Total de pujas persistidas en `auction_bids`; 0 si nunca hubo pujas. */
+  readonly bidCount: number
 }
 
 export interface PlayerActiveAuctionListItem extends ActiveAuctionListItemBase {
@@ -235,6 +237,9 @@ export interface AuctionRepositoryPort {
   findLeadingBid(auctionId: string): Promise<BidSnapshot | null>
 
   findBidHistory(auctionId: string): Promise<readonly BidSnapshot[]>
+
+  /** Total de pujas persistidas de la subasta (buy-now no cuenta). */
+  countBids(auctionId: string): Promise<number>
 
   findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null>
 

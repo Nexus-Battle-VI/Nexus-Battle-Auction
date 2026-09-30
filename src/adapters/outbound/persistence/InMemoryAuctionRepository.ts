@@ -413,6 +413,7 @@ export class InMemoryAuctionRepository
           publishedAt: new Date(auction.publishedAt),
           closesAt: new Date(auction.closesAt),
           currentBidAmount: leader?.snapshot.amountCredits ?? null,
+          bidCount: this.countStoredBids(auction.id),
         }
       })
     const officialItems: ActiveAuctionList['items'][number][] = [...this.officialAuctions.values()]
@@ -437,6 +438,7 @@ export class InMemoryAuctionRepository
         publishedAt: new Date(auction.publishedAt),
         closesAt: new Date(auction.closesAt),
         currentBidAmount: null,
+        bidCount: this.countStoredBids(auction.id),
       }))
     const active = [...officialItems, ...playerItems].sort(
       (left, right) =>
@@ -567,6 +569,15 @@ export class InMemoryAuctionRepository
       .map(toBidSnapshot)
 
     return Promise.resolve(history)
+  }
+
+  countBids(auctionId: string): Promise<number> {
+    return Promise.resolve(this.countStoredBids(auctionId))
+  }
+
+  private countStoredBids(auctionId: string): number {
+    return [...this.bids.values()].filter((stored) => stored.snapshot.auctionId === auctionId)
+      .length
   }
 
   findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {
