@@ -243,6 +243,13 @@ export class SettleAuction {
         this.clock.now(),
       )
     } else {
+      await Promise.all(
+        actions
+          .filter((action) => action.classification === 'ALREADY_RELEASED')
+          .map((action) =>
+            this.settlements.markReleaseAlreadyReleased(auctionId, action.bidId, this.clock.now()),
+          ),
+      )
       await this.prepareLoserReleaseTasks.execute(actions, this.clock.now())
       if (actions.some((action) => action.releaseOperationId !== null)) {
         await this.settlements.markLoserReleasesPending(auctionId, this.clock.now())

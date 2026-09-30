@@ -905,6 +905,101 @@ describe('Persistencia PostgreSQL', () => {
       expect(amount).toBe(1)
     })
 
+    it('reconcilia como RELEASED una release terminal historica sin tocar otras releases', async () => {
+      const repository = new PostgresAuctionSettlementRepository(db)
+      const auctionId = 'settlement-release-already-released'
+      const otherAuctionId = 'settlement-release-already-released-other'
+      await repository.createIfAbsent(winnerSettlement(auctionId))
+      await repository.createIfAbsent(winnerSettlement(otherAuctionId))
+      const release = (target: string, bidId: string) => ({
+        auctionId: target,
+        bidId,
+        holdId: `${target}:${bidId}:hold`,
+        operationId: `auction:${target}:bid:${bidId}:release`,
+        createdAt: new Date('2026-09-23T12:00:00.000Z'),
+      })
+      const failedAt = new Date('2026-09-23T12:01:00.000Z')
+      await repository.createReleaseIfAbsent(release(auctionId, 'overbid-loser'))
+      await repository.createReleaseIfAbsent(release(auctionId, 'other-loser'))
+      await repository.createReleaseIfAbsent(release(otherAuctionId, 'overbid-loser'))
+      await repository.markReleaseTerminal(
+        auctionId,
+        'overbid-loser',
+        'hold already released',
+        failedAt,
+      )
+      await repository.markReleaseTerminal(otherAuctionId, 'overbid-loser', 'unrelated', failedAt)
+      await expect(repository.listReleaseTasks(auctionId)).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            bidId: 'overbid-loser',
+            status: ReleaseStatus.TerminalError,
+            lastError: 'hold already released',
+          }),
+        ]),
+      )
+
+      const reconciledAt = new Date('2026-09-23T12:02:00.000Z')
+      await repository.markReleaseAlreadyReleased(auctionId, 'overbid-loser', reconciledAt)
+      await repository.markReleaseAlreadyReleased(
+        auctionId,
+        'overbid-loser',
+        new Date('2026-09-23T12:03:00.000Z'),
+      )
+
+      const rows = await db
+        .selectFrom('auction_settlement_releases')
+        .select([
+          'auction_id',
+          'bid_id',
+          'hold_id',
+          'operation_id',
+          'status',
+          'last_error',
+          'updated_at',
+        ])
+        .where('auction_id', 'in', [auctionId, otherAuctionId])
+        .orderBy('auction_id')
+        .orderBy('bid_id')
+        .execute()
+      expect(rows).toEqual([
+        expect.objectContaining({
+          auction_id: auctionId,
+          bid_id: 'other-loser',
+          status: ReleaseStatus.Pending,
+          last_error: null,
+        }),
+        expect.objectContaining({
+          auction_id: auctionId,
+          bid_id: 'overbid-loser',
+          hold_id: `${auctionId}:overbid-loser:hold`,
+          operation_id: `auction:${auctionId}:bid:overbid-loser:release`,
+          status: ReleaseStatus.Released,
+          last_error: null,
+        }),
+        expect.objectContaining({
+          auction_id: otherAuctionId,
+          bid_id: 'overbid-loser',
+          status: ReleaseStatus.TerminalError,
+          last_error: 'unrelated',
+        }),
+      ])
+      expect(new Date(rows[1]?.updated_at ?? 0)).toEqual(reconciledAt)
+      await expect(repository.listPendingReleaseTasks(auctionId)).resolves.toEqual([
+        expect.objectContaining({ bidId: 'other-loser', status: ReleaseStatus.Pending }),
+      ])
+      await expect(
+        repository.markReleaseAlreadyReleased(auctionId, 'missing-loser', reconciledAt),
+      ).resolves.toBeUndefined()
+      await expect(
+        db
+          .selectFrom('auction_settlement_releases')
+          .select(sql<number>`count(*)::integer`.as('amount'))
+          .where('auction_id', 'in', [auctionId, otherAuctionId])
+          .executeTakeFirstOrThrow(),
+      ).resolves.toEqual({ amount: 3 })
+    })
+
     it('rechaza un intent de release incompatible y acepta replay identico', async () => {
       const repository = new PostgresAuctionSettlementRepository(db)
       const auctionId = 'settlement-release-conflict'
