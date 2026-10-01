@@ -2,7 +2,10 @@ import {
   ExternalContractError,
   ExternalDependencyUnavailableError,
 } from '../../../application/errors/ExternalDependencyError'
-import type { CatalogProductLookupPort } from '../../../application/ports/CatalogProductLookupPort'
+import type {
+  CatalogProductLookupPort,
+  CatalogProductSuggestion,
+} from '../../../application/ports/CatalogProductLookupPort'
 
 /** Limite de `references` por llamada de `POST /api/v1/catalog/products/lookup`. */
 export const CATALOG_LOOKUP_MAX_REFERENCES = 500
@@ -33,6 +36,42 @@ const lookupItems = (value: unknown): readonly LookupItemPayload[] | null => {
     const fields = item as Readonly<Record<string, unknown>>
     if (typeof fields.productId !== 'string' || typeof fields.sku !== 'string') return null
     parsed.push({ productId: fields.productId, sku: fields.sku })
+  }
+  return parsed
+}
+
+interface SuggestionItemPayload extends LookupItemPayload {
+  readonly name: string
+  readonly type: string
+}
+
+/**
+ * Mismo payload que `lookupItems`, pero exige tambien `name` y `type` (lo que
+ * necesita una sugerencia). Un parser separado: `findReferencesMatchingName`
+ * no debe empezar a exigir estos campos, que Catalog ya devuelve pero esa
+ * ruta nunca uso.
+ */
+const suggestionItems = (value: unknown): readonly SuggestionItemPayload[] | null => {
+  if (typeof value !== 'object' || value === null) return null
+  const items = (value as Readonly<Record<string, unknown>>).items
+  if (!Array.isArray(items)) return null
+  const parsed: SuggestionItemPayload[] = []
+  for (const item of items) {
+    if (typeof item !== 'object' || item === null) return null
+    const fields = item as Readonly<Record<string, unknown>>
+    if (
+      typeof fields.productId !== 'string' ||
+      typeof fields.sku !== 'string' ||
+      typeof fields.name !== 'string' ||
+      typeof fields.type !== 'string'
+    )
+      return null
+    parsed.push({
+      productId: fields.productId,
+      sku: fields.sku,
+      name: fields.name,
+      type: fields.type,
+    })
   }
   return parsed
 }
@@ -71,8 +110,54 @@ export class CatalogProductLookupClient implements CatalogProductLookupPort {
     return new Set(matched.flat())
   }
 
+  async findSuggestions(
+    references: readonly string[],
+    nameQuery: string,
+  ): Promise<readonly CatalogProductSuggestion[]> {
+    const unique = [...new Set(references)]
+    const matched = await Promise.all(
+      chunksOf(unique, CATALOG_LOOKUP_MAX_REFERENCES).map((chunk) =>
+        this.lookupSuggestionsChunk(chunk, nameQuery),
+      ),
+    )
+    // Catalog ordena cada bloque por nombre ascendente (name asc en Mongo); con
+    // mas de un bloque (mas de 500 candidatos) se reordena aqui para que el
+    // resultado final sea determinista sin importar como se repartieron los
+    // bloques.
+    return matched.flat().sort((left, right) => left.name.localeCompare(right.name))
+  }
+
   /** Devuelve las referencias del bloque cuyo producto (por id o SKU) volvio de Catalog. */
   private async lookupChunk(chunk: readonly string[], nameQuery: string): Promise<string[]> {
+    const body = await this.fetchLookupBody(chunk, nameQuery)
+    const items = lookupItems(body)
+    if (items === null) {
+      throw new ExternalContractError('catalog', 'Catalog devolvio un lookup ininteligible.')
+    }
+
+    const returned = new Set(items.flatMap((item) => [item.productId, item.sku]))
+    return chunk.filter((reference) => returned.has(reference))
+  }
+
+  /** Igual que `lookupChunk`, pero conserva `name`/`type` para sugerencias. */
+  private async lookupSuggestionsChunk(
+    chunk: readonly string[],
+    nameQuery: string,
+  ): Promise<CatalogProductSuggestion[]> {
+    const body = await this.fetchLookupBody(chunk, nameQuery)
+    const items = suggestionItems(body)
+    if (items === null) {
+      throw new ExternalContractError('catalog', 'Catalog devolvio un lookup ininteligible.')
+    }
+
+    const requested = new Set(chunk)
+    return items
+      .filter((item) => requested.has(item.productId) || requested.has(item.sku))
+      .map((item) => ({ productId: item.productId, name: item.name, type: item.type }))
+  }
+
+  /** POST al lookup publico de Catalog; traduce fallos de red, HTTP y JSON a dependencia no disponible. */
+  private async fetchLookupBody(chunk: readonly string[], nameQuery: string): Promise<unknown> {
     const controller = new AbortController()
     const timer = setTimeout(() => {
       controller.abort()
@@ -96,18 +181,9 @@ export class CatalogProductLookupClient implements CatalogProductLookupPort {
         throw new ExternalDependencyUnavailableError('catalog')
       }
 
-      const items = lookupItems(await response.json())
-      if (items === null) {
-        throw new ExternalContractError('catalog', 'Catalog devolvio un lookup ininteligible.')
-      }
-
-      const returned = new Set(items.flatMap((item) => [item.productId, item.sku]))
-      return chunk.filter((reference) => returned.has(reference))
+      return await response.json()
     } catch (error: unknown) {
-      if (
-        error instanceof ExternalDependencyUnavailableError ||
-        error instanceof ExternalContractError
-      ) {
+      if (error instanceof ExternalDependencyUnavailableError) {
         throw error
       }
 

@@ -152,6 +152,7 @@ import { DispatchClosingSoonReminders } from '../../application/use-cases/Dispat
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { FollowAuction } from '../../application/use-cases/FollowAuction'
 import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
+import { GetAuctionSuggestions } from '../../application/use-cases/GetAuctionSuggestions'
 import { ListActiveAuctions } from '../../application/use-cases/ListActiveAuctions'
 import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchlistChange'
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
@@ -520,6 +521,16 @@ export const createWatchlistEventPublisher = (
         clock: ClockPort,
         catalog: CatalogProductLookupPort,
       ): ListActiveAuctions => new ListActiveAuctions(auctions, clock, catalog),
+      inject: [AUCTION_REPOSITORY, CLOCK, CATALOG_PRODUCT_LOOKUP],
+    },
+
+    {
+      provide: GetAuctionSuggestions,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        clock: ClockPort,
+        catalog: CatalogProductLookupPort,
+      ): GetAuctionSuggestions => new GetAuctionSuggestions(auctions, clock, catalog),
       inject: [AUCTION_REPOSITORY, CLOCK, CATALOG_PRODUCT_LOOKUP],
     },
 

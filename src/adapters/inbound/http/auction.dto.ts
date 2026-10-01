@@ -176,6 +176,66 @@ export class ListActiveAuctionsQueryDto {
   search?: string
 }
 
+/**
+ * HU-87.2: autocomplete del marketplace. Mismos filtros que el listado
+ * (publisherType/priceKind/hasBuyNow) para que las sugerencias respeten el
+ * mismo universo visible; deliberadamente SIN sort/page/pageSize, que no
+ * aplican a una lista de sugerencias.
+ */
+export class AuctionSuggestionsQueryDto {
+  @ApiProperty({
+    minLength: 3,
+    maxLength: 80,
+    description:
+      'Texto de busqueda del autocomplete. Se recorta; menos de 3 caracteres responde 400.',
+  })
+  @Transform(trimmedQuery)
+  @IsString()
+  @Length(3, 80)
+  q!: string
+
+  @ApiPropertyOptional({ default: 8, minimum: 1, maximum: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  limit?: number
+
+  @ApiPropertyOptional({ enum: MARKETPLACE_PUBLISHER_TYPES })
+  @IsOptional()
+  @IsIn(MARKETPLACE_PUBLISHER_TYPES)
+  publisherType?: (typeof MARKETPLACE_PUBLISHER_TYPES)[number]
+
+  @ApiPropertyOptional({ enum: MARKETPLACE_PRICE_KINDS })
+  @IsOptional()
+  @IsIn(MARKETPLACE_PRICE_KINDS)
+  priceKind?: (typeof MARKETPLACE_PRICE_KINDS)[number]
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description: 'true: con precio de compra inmediata configurado; false: sin el.',
+  })
+  @IsOptional()
+  @Transform(strictBooleanQuery)
+  @IsBoolean()
+  hasBuyNow?: boolean
+}
+
+export class AuctionSuggestionItemResponseDto {
+  @ApiProperty({ example: 'inventory-product-123' })
+  productId!: string
+  @ApiProperty({ example: 'Espada de dragon' })
+  name!: string
+  @ApiProperty({ example: 'ARMA' })
+  type!: string
+}
+
+export class AuctionSuggestionListResponseDto {
+  @ApiProperty({ type: [AuctionSuggestionItemResponseDto] })
+  items!: AuctionSuggestionItemResponseDto[]
+}
+
 export class ActiveAuctionSummaryResponseDto {
   @ApiProperty()
   id!: string
