@@ -1,5 +1,7 @@
 import { InMemoryAuctionRepository } from '../../src/adapters/outbound/persistence/InMemoryAuctionRepository'
 import type { ClockPort } from '../../src/application/ports/ClockPort'
+import { PriceSortRequiresCreditsError } from '../../src/application/errors/MarketplaceQueryError'
+import type { ActiveAuctionList } from '../../src/application/ports/AuctionRepositoryPort'
 import { ListActiveAuctions } from '../../src/application/use-cases/ListActiveAuctions'
 import { Auction } from '../../src/domain/entities/Auction'
 import { AuctionClosingResult } from '../../src/domain/entities/AuctionClosingResult'
@@ -14,16 +16,28 @@ import { AuctionPriceKind } from '../../src/domain/value-objects/AuctionPublicat
 const now = new Date('2026-09-23T12:00:00.000Z')
 const clock: ClockPort = { now: () => new Date(now) }
 
-const publish = async (repository: InMemoryAuctionRepository, id: string, closesAt: Date) => {
-  const publishedAt = new Date(closesAt.getTime() - 24 * 60 * 60 * 1000)
+interface PublishOptions {
+  readonly durationHours?: 24 | 48
+  readonly minimumBidCredits?: number
+  readonly buyNowCredits?: number | null
+}
+
+const publish = async (
+  repository: InMemoryAuctionRepository,
+  id: string,
+  closesAt: Date,
+  { durationHours = 24, minimumBidCredits = 10, buyNowCredits = null }: PublishOptions = {},
+) => {
+  const publishedAt = new Date(closesAt.getTime() - durationHours * 60 * 60 * 1000)
   await repository.publish({
     operationId: `publish-${id}`,
     auction: Auction.publish({
       auctionId: id,
       sellerId: `seller-${id}`,
       productId: `product-${id}`,
-      durationHours: 24,
-      minimumBidCredits: 10,
+      durationHours,
+      minimumBidCredits,
+      buyNowCredits,
       publishedAt,
       eligibility: {
         productOwnedBySeller: true,
@@ -67,6 +81,7 @@ const publishOfficial = async (
   id: string,
   closesAt: Date,
   mark = OfficialAuctionMark.Official,
+  buyNowAmountMinor: number | null = 120_000,
 ) => {
   const publishedAt = new Date(closesAt.getTime() - 24 * 60 * 60 * 1000)
   await repository.publishOfficial({
@@ -80,7 +95,8 @@ const publishOfficial = async (
       pricing: {
         kind: AuctionPriceKind.RealMoney,
         minimumBid: { amountMinor: 90_000, currency: 'COP' },
-        buyNow: { amountMinor: 120_000, currency: 'COP' },
+        buyNow:
+          buyNowAmountMinor === null ? null : { amountMinor: buyNowAmountMinor, currency: 'COP' },
       },
       mark,
       publishedAt,
@@ -190,5 +206,151 @@ describe('ListActiveAuctions', () => {
     await expect(repository.countBids('no-bids')).resolves.toBe(0)
     await expect(repository.countBids('one-bid')).resolves.toBe(1)
     await expect(repository.countBids('many-bids')).resolves.toBe(3)
+  })
+})
+
+const HOUR = 60 * 60 * 1000
+const at = (hours: number): Date => new Date(now.getTime() + hours * HOUR)
+const ids = (list: ActiveAuctionList): string[] => list.items.map((item) => item.id)
+
+/**
+ * Escenario mixto donde cierre, publicacion, pujas y precio dan ordenes
+ * distintos entre si (publicado = cierre - duracion):
+ *
+ * | id   | tipo   | cierre | publicado | buy-now | pujas | precio efectivo |
+ * | o-a  | GM     | +4h    | -20h      | si      | 0     | -               |
+ * | o-b  | GM     | +5h    | -19h      | no      | 0     | -               |
+ * | p-c  | PLAYER | +1h    | -47h      | si      | 0     | 5 (minimo)      |
+ * | p-a  | PLAYER | +2h    | -22h      | si      | 1     | 50 (lider)      |
+ * | p-b  | PLAYER | +3h    | -45h      | no      | 3     | 100 (lider)     |
+ */
+const seedMarketplace = async (): Promise<InMemoryAuctionRepository> => {
+  const repository = new InMemoryAuctionRepository()
+  await publishOfficial(repository, 'o-a', at(4))
+  await publishOfficial(repository, 'o-b', at(5), OfficialAuctionMark.Premium, null)
+  await publish(repository, 'p-c', at(1), {
+    durationHours: 48,
+    minimumBidCredits: 5,
+    buyNowCredits: 8,
+  })
+  await publish(repository, 'p-a', at(2), { minimumBidCredits: 10, buyNowCredits: 100 })
+  await publish(repository, 'p-b', at(3), { durationHours: 48, minimumBidCredits: 30 })
+  await bid(repository, 'p-a', 50, 'p-a-1')
+  await bid(repository, 'p-b', 40, 'p-b-1')
+  await bid(repository, 'p-b', 70, 'p-b-2')
+  await bid(repository, 'p-b', 100, 'p-b-3')
+  return repository
+}
+
+describe('ListActiveAuctions: filtros y orden', () => {
+  const list = async (input: Parameters<ListActiveAuctions['execute']>[0]) =>
+    new ListActiveAuctions(await seedMarketplace(), clock).execute(input)
+
+  it('sin filtros ni sort conserva GAME_MASTER primero, cierre e id', async () => {
+    const result = await list({ page: 1, pageSize: 16 })
+
+    expect(ids(result)).toEqual(['o-a', 'o-b', 'p-c', 'p-a', 'p-b'])
+    expect(result.total).toBe(5)
+  })
+
+  it.each([
+    [{ publisherType: 'PLAYER' as const }, ['p-c', 'p-a', 'p-b']],
+    [{ publisherType: 'GAME_MASTER' as const }, ['o-a', 'o-b']],
+    [{ priceKind: 'CREDITS' as const }, ['p-c', 'p-a', 'p-b']],
+    [{ priceKind: 'REAL_MONEY' as const }, ['o-a', 'o-b']],
+    [{ hasBuyNow: true }, ['o-a', 'p-c', 'p-a']],
+    [{ hasBuyNow: false }, ['o-b', 'p-b']],
+    [{ publisherType: 'PLAYER' as const, hasBuyNow: true }, ['p-c', 'p-a']],
+    [{ publisherType: 'PLAYER' as const, priceKind: 'REAL_MONEY' as const }, []],
+  ])('filtra %j y el total cuenta solo lo filtrado', async (filters, expected) => {
+    const result = await list({ page: 1, pageSize: 16, filters })
+
+    expect(ids(result)).toEqual(expected)
+    expect(result.total).toBe(expected.length)
+  })
+
+  it.each([
+    ['closingSoon' as const, {}, ['p-c', 'p-a', 'p-b', 'o-a', 'o-b']],
+    ['newest' as const, {}, ['o-b', 'o-a', 'p-a', 'p-b', 'p-c']],
+    ['mostBids' as const, {}, ['p-b', 'p-a', 'p-c', 'o-a', 'o-b']],
+    ['priceAsc' as const, { priceKind: 'CREDITS' as const }, ['p-c', 'p-a', 'p-b']],
+    ['priceDesc' as const, { priceKind: 'CREDITS' as const }, ['p-b', 'p-a', 'p-c']],
+  ])('sort=%s manda sobre la prioridad de GAME_MASTER', async (sort, filters, expected) => {
+    const result = await list({ page: 1, pageSize: 16, filters, sort })
+
+    expect(ids(result)).toEqual(expected)
+    expect(result.total).toBe(expected.length)
+  })
+
+  it('pagina despues de filtrar y ordenar', async () => {
+    const input = {
+      pageSize: 2,
+      filters: { priceKind: 'CREDITS' as const },
+      sort: 'priceDesc' as const,
+    }
+
+    await expect(list({ ...input, page: 1 }).then(ids)).resolves.toEqual(['p-b', 'p-a'])
+    await expect(list({ ...input, page: 2 })).resolves.toMatchObject({
+      total: 3,
+      items: [{ id: 'p-c' }],
+    })
+  })
+
+  it('una pagina posterior al ultimo resultado viene vacia con el total real', async () => {
+    await expect(
+      list({ page: 3, pageSize: 2, filters: { publisherType: 'PLAYER' } }),
+    ).resolves.toEqual({ items: [], total: 3 })
+  })
+
+  it('desempata por id cuando precio, pujas o cierre coinciden', async () => {
+    const repository = new InMemoryAuctionRepository()
+    const useCase = new ListActiveAuctions(repository, clock)
+    await publish(repository, 'tie-b', at(1))
+    await publish(repository, 'tie-a', at(1))
+    await publish(repository, 'tie-c', at(1))
+
+    for (const sort of ['closingSoon', 'newest', 'mostBids', 'priceAsc', 'priceDesc'] as const) {
+      const result = await useCase.execute({
+        page: 1,
+        pageSize: 16,
+        filters: { priceKind: 'CREDITS' },
+        sort,
+      })
+      expect(ids(result)).toEqual(['tie-a', 'tie-b', 'tie-c'])
+    }
+  })
+
+  it.each([
+    ['priceAsc' as const, {}],
+    ['priceDesc' as const, {}],
+    ['priceAsc' as const, { priceKind: 'REAL_MONEY' as const }],
+    ['priceDesc' as const, { publisherType: 'PLAYER' as const }],
+  ])('%s sin priceKind=CREDITS (%j) se rechaza sin consultar', async (sort, filters) => {
+    const repository = { listActive: jest.fn() }
+
+    await expect(
+      new ListActiveAuctions(repository, clock).execute({ page: 1, pageSize: 16, filters, sort }),
+    ).rejects.toBeInstanceOf(PriceSortRequiresCreditsError)
+    expect(repository.listActive).not.toHaveBeenCalled()
+  })
+
+  it('pasa filtros, orden y el instante del reloj al repositorio', async () => {
+    const repository = { listActive: jest.fn().mockResolvedValue({ items: [], total: 0 }) }
+    const filters = { priceKind: 'CREDITS' as const, hasBuyNow: false }
+
+    await new ListActiveAuctions(repository, clock).execute({
+      page: 2,
+      pageSize: 8,
+      filters,
+      sort: 'priceAsc',
+    })
+
+    expect(repository.listActive).toHaveBeenCalledWith({
+      page: 2,
+      pageSize: 8,
+      filters,
+      sort: 'priceAsc',
+      now,
+    })
   })
 })
