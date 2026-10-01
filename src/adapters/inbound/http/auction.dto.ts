@@ -8,6 +8,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Length,
   Max,
   MaxLength,
   Min,
@@ -114,6 +115,10 @@ export const MARKETPLACE_SORTS = [
 const strictBooleanQuery = ({ value }: { value: unknown }): unknown =>
   value === 'true' ? true : value === 'false' ? false : value
 
+/** Recorta solo textos; cualquier otro valor (p. ej. parametro repetido) llega tal cual a `@IsString`. */
+const trimmedQuery = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.trim() : value
+
 export class ListActiveAuctionsQueryDto {
   @ApiPropertyOptional({ default: 1, minimum: 1 })
   @IsOptional()
@@ -157,6 +162,18 @@ export class ListActiveAuctionsQueryDto {
   @IsOptional()
   @IsIn(MARKETPLACE_SORTS)
   sort?: (typeof MARKETPLACE_SORTS)[number]
+
+  @ApiPropertyOptional({
+    minLength: 1,
+    maxLength: 80,
+    description:
+      'Subcadena del nombre del producto (Catalog). Se recorta; vacio o solo espacios responde 400.',
+  })
+  @IsOptional()
+  @Transform(trimmedQuery)
+  @IsString()
+  @Length(1, 80)
+  search?: string
 }
 
 export class ActiveAuctionSummaryResponseDto {

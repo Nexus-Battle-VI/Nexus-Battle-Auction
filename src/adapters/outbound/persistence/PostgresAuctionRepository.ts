@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 
-import { sql, type Kysely, type Selectable, type Transaction } from 'kysely'
+import {
+  sql,
+  type Expression,
+  type Kysely,
+  type Selectable,
+  type SqlBool,
+  type Transaction,
+} from 'kysely'
 
 import {
   ActiveAuctionLimitExceededError,
@@ -24,6 +31,7 @@ import type {
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
+  ActiveAuctionUniverseInput,
   ListActiveAuctionsInput,
   PersistBidResult,
   FinishAuctionCommand,
@@ -288,16 +296,16 @@ export class PostgresAuctionRepository
   }
 
   /**
-   * Marketplace (HU-62 + HU-66): publicaciones de jugador y oficiales activas y
-   * no vencidas. Los filtros se aplican una sola vez sobre `base`, de la que
-   * derivan tanto la pagina como el `count(*)`: el total no puede divergir de
-   * los items. Sin `sort` se conserva el orden historico.
+   * Base unica del marketplace: activas no vencidas, filtros y, si hay busqueda,
+   * los productos ya resueltos contra Catalog. De ella derivan la pagina, el
+   * `count(*)` y el universo de productos: no pueden divergir.
    */
-  async listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
-    const offset = (input.page - 1) * input.pageSize
+  private activeAuctionsBase(
+    input: ActiveAuctionUniverseInput & Pick<ListActiveAuctionsInput, 'productIds'>,
+  ) {
     const filters = input.filters ?? {}
-    const base = this.db.selectFrom('auctions').where((eb) => {
-      const conditions = [
+    return this.db.selectFrom('auctions').where((eb) => {
+      const conditions: Expression<SqlBool>[] = [
         eb('auctions.status', '=', AuctionStatus.Active),
         eb('auctions.closes_at', '>', input.now),
       ]
@@ -323,8 +331,29 @@ export class PostgresAuctionRepository
           ]),
         )
       }
+      if (input.productIds !== undefined) {
+        // Un unico parametro array (`= any`), no un IN con un parametro por id:
+        // sin limite de parametros y valido tambien con la lista vacia.
+        conditions.push(sql<SqlBool>`auctions.product_id = any(${[...input.productIds]}::text[])`)
+      }
       return eb.and(conditions)
     })
+  }
+
+  async listActiveProductIds(input: ActiveAuctionUniverseInput): Promise<readonly string[]> {
+    const rows = await this.activeAuctionsBase(input).select('auctions.product_id').execute()
+    return rows.map((row) => row.product_id)
+  }
+
+  /**
+   * Marketplace (HU-62 + HU-66): publicaciones de jugador y oficiales activas y
+   * no vencidas. Los filtros se aplican una sola vez sobre `base`, de la que
+   * derivan tanto la pagina como el `count(*)`: el total no puede divergir de
+   * los items. Sin `sort` se conserva el orden historico.
+   */
+  async listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
+    const offset = (input.page - 1) * input.pageSize
+    const base = this.activeAuctionsBase(input)
 
     const joined = base
       .leftJoin('auction_bids as leader', (join) =>

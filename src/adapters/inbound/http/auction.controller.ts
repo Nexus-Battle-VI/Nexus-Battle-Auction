@@ -37,6 +37,10 @@ import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVer
 import { ClaimPendingProduct } from '../../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../../application/use-cases/ClaimPendingProductsBatch'
 import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
+import {
+  ExternalContractError,
+  ExternalDependencyUnavailableError,
+} from '../../../application/errors/ExternalDependencyError'
 import { PriceSortRequiresCreditsError } from '../../../application/errors/MarketplaceQueryError'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
 import { ListActiveAuctions } from '../../../application/use-cases/ListActiveAuctions'
@@ -138,6 +142,7 @@ export class AuctionController {
   @ApiQuery({ name: 'priceKind', required: false, enum: MARKETPLACE_PRICE_KINDS })
   @ApiQuery({ name: 'hasBuyNow', required: false, enum: ['true', 'false'] })
   @ApiQuery({ name: 'sort', required: false, enum: MARKETPLACE_SORTS })
+  @ApiQuery({ name: 'search', required: false, type: String, minLength: 1, maxLength: 80 })
   @ApiOkResponse({ type: ActiveAuctionPageResponseDto })
   @ApiBadRequestResponse({
     description:
@@ -160,12 +165,18 @@ export class AuctionController {
           hasBuyNow: query.hasBuyNow,
         },
         sort: query.sort,
+        search: query.search,
       })
       return { ...result, page, pageSize, items: [...result.items] }
     } catch (error: unknown) {
-      // Solo el rechazo de orden por precio es un 400; cualquier otro fallo se
-      // propaga igual que antes de existir los filtros.
-      throw error instanceof PriceSortRequiresCreditsError ? toAuctionHttpException(error) : error
+      // Solo el orden por precio invalido (400) y Catalog caido durante una
+      // busqueda (503) tienen traduccion; cualquier otro fallo se propaga igual
+      // que antes de existir los filtros.
+      throw error instanceof PriceSortRequiresCreditsError ||
+        error instanceof ExternalDependencyUnavailableError ||
+        error instanceof ExternalContractError
+        ? toAuctionHttpException(error)
+        : error
     }
   }
 

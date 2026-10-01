@@ -11,6 +11,7 @@ import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
 import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { WatchlistController } from '../../adapters/inbound/http/watchlist.controller'
+import { CatalogProductLookupClient } from '../../adapters/outbound/http/CatalogProductLookupClient'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpAuctionInventoryClient } from '../../adapters/outbound/http/HttpAuctionInventoryClient'
 import { HttpBidCreditsClient } from '../../adapters/outbound/http/HttpBidCreditsClient'
@@ -74,6 +75,10 @@ import {
   BID_CREDIT_OPERATION_READER,
   type BidCreditOperationReaderPort,
 } from '../../application/ports/BidCreditOperationReaderPort'
+import {
+  CATALOG_PRODUCT_LOOKUP,
+  type CatalogProductLookupPort,
+} from '../../application/ports/CatalogProductLookupPort'
 import {
   CATALOG_PRODUCT_POLICY,
   type CatalogProductPolicyPort,
@@ -510,9 +515,24 @@ export const createWatchlistEventPublisher = (
 
     {
       provide: ListActiveAuctions,
-      useFactory: (auctions: AuctionRepositoryPort, clock: ClockPort): ListActiveAuctions =>
-        new ListActiveAuctions(auctions, clock),
-      inject: [AUCTION_REPOSITORY, CLOCK],
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        clock: ClockPort,
+        catalog: CatalogProductLookupPort,
+      ): ListActiveAuctions => new ListActiveAuctions(auctions, clock, catalog),
+      inject: [AUCTION_REPOSITORY, CLOCK, CATALOG_PRODUCT_LOOKUP],
+    },
+
+    {
+      // Lookup publico de Catalog: no requiere secreto interno.
+      provide: CATALOG_PRODUCT_LOOKUP,
+      useFactory: (config: AppConfig, logger: Logger): CatalogProductLookupPort =>
+        new CatalogProductLookupClient({
+          baseUrl: config.catalogBaseUrl,
+          timeoutMs: 3_000,
+          logger,
+        }),
+      inject: [APP_CONFIG, LOGGER],
     },
 
     {

@@ -103,12 +103,21 @@ export interface ActiveAuctionFilters {
  */
 export type ActiveAuctionSort = 'closingSoon' | 'newest' | 'priceAsc' | 'priceDesc' | 'mostBids'
 
-export interface ListActiveAuctionsInput {
+/** Universo de subastas activas no vencidas que cumplen los filtros. */
+export interface ActiveAuctionUniverseInput {
   readonly now: Date
+  readonly filters?: ActiveAuctionFilters | undefined
+}
+
+export interface ListActiveAuctionsInput extends ActiveAuctionUniverseInput {
   readonly page: number
   readonly pageSize: number
-  readonly filters?: ActiveAuctionFilters | undefined
   readonly sort?: ActiveAuctionSort | undefined
+  /**
+   * Restringe el listado a estos productos (busqueda por nombre de HU-87, ya
+   * resuelta contra Catalog). Ausente = sin restriccion; vacio = ningun producto.
+   */
+  readonly productIds?: readonly string[] | undefined
 }
 
 export interface ActiveAuctionList {
@@ -245,6 +254,9 @@ export interface AuctionRepositoryPort {
 
   /** Marketplace: activas no vencidas, ordenadas y paginadas. */
   listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList>
+
+  /** `product_id` del universo del marketplace, para resolver una busqueda contra Catalog. */
+  listActiveProductIds(input: ActiveAuctionUniverseInput): Promise<readonly string[]>
 
   countActiveBySeller(sellerId: string): Promise<number>
 
