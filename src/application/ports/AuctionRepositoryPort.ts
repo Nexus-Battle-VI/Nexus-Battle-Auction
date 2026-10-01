@@ -89,10 +89,26 @@ export interface OfficialActiveAuctionListItem extends ActiveAuctionListItemBase
 
 export type ActiveAuctionListItem = PlayerActiveAuctionListItem | OfficialActiveAuctionListItem
 
+/** Filtros opcionales del marketplace; ausentes = sin restriccion. */
+export interface ActiveAuctionFilters {
+  readonly publisherType?: 'PLAYER' | 'GAME_MASTER' | undefined
+  readonly priceKind?: 'CREDITS' | 'REAL_MONEY' | undefined
+  /** Solo indica que hay un precio de compra inmediata configurado. */
+  readonly hasBuyNow?: boolean | undefined
+}
+
+/**
+ * Orden explicito del marketplace. Sin orden se conserva el historico:
+ * GAME_MASTER primero, luego cierre ascendente e id.
+ */
+export type ActiveAuctionSort = 'closingSoon' | 'newest' | 'priceAsc' | 'priceDesc' | 'mostBids'
+
 export interface ListActiveAuctionsInput {
   readonly now: Date
   readonly page: number
   readonly pageSize: number
+  readonly filters?: ActiveAuctionFilters | undefined
+  readonly sort?: ActiveAuctionSort | undefined
 }
 
 export interface ActiveAuctionList {

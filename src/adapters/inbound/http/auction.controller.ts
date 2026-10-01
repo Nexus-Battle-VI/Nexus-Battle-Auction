@@ -37,6 +37,7 @@ import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVer
 import { ClaimPendingProduct } from '../../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../../application/use-cases/ClaimPendingProductsBatch'
 import { ConfigureAutoBid } from '../../../application/use-cases/ConfigureAutoBid'
+import { PriceSortRequiresCreditsError } from '../../../application/errors/MarketplaceQueryError'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
 import { ListActiveAuctions } from '../../../application/use-cases/ListActiveAuctions'
 import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
@@ -55,6 +56,9 @@ import {
   ConfigureAutoBidRequestDto,
   PendingClaimResponseDto,
   ListActiveAuctionsQueryDto,
+  MARKETPLACE_PRICE_KINDS,
+  MARKETPLACE_PUBLISHER_TYPES,
+  MARKETPLACE_SORTS,
   PublishAuctionRequestDto,
   RegisterBidRequestDto,
   assertIdempotencyKey,
@@ -130,8 +134,15 @@ export class AuctionController {
     maximum: 100,
     example: 16,
   })
+  @ApiQuery({ name: 'publisherType', required: false, enum: MARKETPLACE_PUBLISHER_TYPES })
+  @ApiQuery({ name: 'priceKind', required: false, enum: MARKETPLACE_PRICE_KINDS })
+  @ApiQuery({ name: 'hasBuyNow', required: false, enum: ['true', 'false'] })
+  @ApiQuery({ name: 'sort', required: false, enum: MARKETPLACE_SORTS })
   @ApiOkResponse({ type: ActiveAuctionPageResponseDto })
-  @ApiBadRequestResponse({ description: 'Parametros de paginacion invalidos.' })
+  @ApiBadRequestResponse({
+    description:
+      'Parametros de paginacion, filtro u orden invalidos; PRICE_SORT_REQUIRES_CREDITS si se ordena por precio sin priceKind=CREDITS.',
+  })
   @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
   @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
   async listActive(
@@ -139,8 +150,23 @@ export class AuctionController {
   ): Promise<ActiveAuctionPageResponseDto> {
     const page = query.page ?? 1
     const pageSize = query.pageSize ?? 16
-    const result = await this.listActiveAuctions.execute({ page, pageSize })
-    return { ...result, page, pageSize, items: [...result.items] }
+    try {
+      const result = await this.listActiveAuctions.execute({
+        page,
+        pageSize,
+        filters: {
+          publisherType: query.publisherType,
+          priceKind: query.priceKind,
+          hasBuyNow: query.hasBuyNow,
+        },
+        sort: query.sort,
+      })
+      return { ...result, page, pageSize, items: [...result.items] }
+    } catch (error: unknown) {
+      // Solo el rechazo de orden por precio es un 400; cualquier otro fallo se
+      // propaga igual que antes de existir los filtros.
+      throw error instanceof PriceSortRequiresCreditsError ? toAuctionHttpException(error) : error
+    }
   }
 
   /**
