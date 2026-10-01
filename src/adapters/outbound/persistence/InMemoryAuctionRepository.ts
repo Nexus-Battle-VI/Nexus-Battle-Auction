@@ -14,6 +14,7 @@ import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
   ActiveAuctionSort,
+  ActiveAuctionUniverseInput,
   BidCreditOperationSnapshot,
   BuyNowOperationRecord,
   CloseAuctionByBuyNowCommand,
@@ -431,7 +432,24 @@ export class InMemoryAuctionRepository
     )
   }
 
+  listActiveProductIds(input: ActiveAuctionUniverseInput): Promise<readonly string[]> {
+    return Promise.resolve(this.activeUniverse(input).map((item) => item.productId))
+  }
+
   listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
+    const allowed = input.productIds === undefined ? null : new Set(input.productIds)
+    const active = this.activeUniverse(input)
+      .filter((item) => allowed === null || allowed.has(item.productId))
+      .sort(activeAuctionComparator(input.sort))
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({
+      total: active.length,
+      items: active.slice(offset, offset + input.pageSize),
+    })
+  }
+
+  /** Espejo de la base de Postgres: activas no vencidas que cumplen los filtros. */
+  private activeUniverse(input: ActiveAuctionUniverseInput): ActiveListItem[] {
     const playerItems: ActiveAuctionList['items'][number][] = [...this.auctions.values()]
       .filter(
         (auction) =>
@@ -485,20 +503,13 @@ export class InMemoryAuctionRepository
         bidCount: this.countStoredBids(auction.id),
       }))
     const filters = input.filters ?? {}
-    const active = [...officialItems, ...playerItems]
-      .filter(
-        (item) =>
-          (filters.publisherType === undefined || item.publisherType === filters.publisherType) &&
-          (filters.priceKind === undefined || item.priceKind === filters.priceKind) &&
-          (filters.hasBuyNow === undefined ||
-            (item.buyNowCredits !== null || item.buyNowAmountMinor !== null) === filters.hasBuyNow),
-      )
-      .sort(activeAuctionComparator(input.sort))
-    const offset = (input.page - 1) * input.pageSize
-    return Promise.resolve({
-      total: active.length,
-      items: active.slice(offset, offset + input.pageSize),
-    })
+    return [...officialItems, ...playerItems].filter(
+      (item) =>
+        (filters.publisherType === undefined || item.publisherType === filters.publisherType) &&
+        (filters.priceKind === undefined || item.priceKind === filters.priceKind) &&
+        (filters.hasBuyNow === undefined ||
+          (item.buyNowCredits !== null || item.buyNowAmountMinor !== null) === filters.hasBuyNow),
+    )
   }
 
   findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null> {

@@ -326,6 +326,52 @@ describe('PostgreSQL active auction marketplace', () => {
     })
   })
 
+  describe('productIds de la busqueda global', () => {
+    it('restringe antes de paginar y count, tambien con una lista vacia', async () => {
+      await publish('first', new Date(now.getTime() + 1_000))
+      await publish('second', new Date(now.getTime() + 2_000))
+      await publish('match', new Date(now.getTime() + 3_000))
+
+      await expect(
+        repository.listActive({ now, page: 1, pageSize: 1, productIds: ['product-match'] }),
+      ).resolves.toMatchObject({ total: 1, items: [{ id: 'match' }] })
+      await expect(
+        repository.listActive({ now, page: 1, pageSize: 16, productIds: [] }),
+      ).resolves.toEqual({ total: 0, items: [] })
+    })
+
+    it('combina productIds con publisherType, priceKind, hasBuyNow y cada sort', async () => {
+      const at = (hours: number): Date => new Date(now.getTime() + hours * 60 * 60 * 1000)
+      await publishOfficial('official-match', at(4))
+      await publishOfficial('official-excluded', at(5), OfficialAuctionMark.Premium, null)
+      await publish('player-match', at(1), { minimumBidCredits: 10, buyNowCredits: 20 })
+      await publish('player-excluded', at(2), { minimumBidCredits: 20 })
+      await placeBid('player-match', 'player-match-bid', 30)
+
+      const productIds = ['product-official-match', 'product-player-match']
+      await expect(
+        repository.listActive({
+          now,
+          page: 1,
+          pageSize: 16,
+          productIds,
+          filters: { publisherType: 'PLAYER', priceKind: 'CREDITS', hasBuyNow: true },
+          sort: 'closingSoon',
+        }),
+      ).resolves.toMatchObject({ total: 1, items: [{ id: 'player-match' }] })
+
+      for (const sort of ['closingSoon', 'mostBids'] as const) {
+        const result = await repository.listActive({ now, page: 1, pageSize: 16, productIds, sort })
+        expect(result.total).toBe(2)
+        expect(result.items.map((item) => item.id)).toEqual(
+          sort === 'closingSoon'
+            ? ['player-match', 'official-match']
+            : ['player-match', 'official-match'],
+        )
+      }
+    })
+  })
+
   it('desempata por id cuando precio, pujas o cierre coinciden', async () => {
     const closesAt = new Date(now.getTime() + 60 * 60 * 1000)
     await publish('tie-b', closesAt)

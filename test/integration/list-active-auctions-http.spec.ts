@@ -13,7 +13,9 @@ import {
   type VerifiedIdentity,
 } from '../../src/application/ports/TokenVerifierPort'
 import type { ActiveAuctionList } from '../../src/application/ports/AuctionRepositoryPort'
+import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
 import { ListActiveAuctions } from '../../src/application/use-cases/ListActiveAuctions'
+import { FakeCatalogProductLookup } from '../support/fake-catalog-product-lookup'
 import { AppModule } from '../../src/infrastructure/bootstrap/app.module'
 
 const identities: Readonly<Record<string, VerifiedIdentity>> = {
@@ -74,8 +76,9 @@ const page: ActiveAuctionList = {
  * regla en el stub; la semantica de filtros y orden se prueba en unit y DB.
  */
 const useCase = new ListActiveAuctions(
-  { listActive: () => Promise.resolve(page) },
+  { listActive: () => Promise.resolve(page), listActiveProductIds: () => Promise.resolve([]) },
   { now: () => new Date('2026-09-23T12:00:00.000Z') },
+  new FakeCatalogProductLookup(),
 )
 const list = {
   execute: jest.fn((input: Parameters<ListActiveAuctions['execute']>[0]) => useCase.execute(input)),
@@ -202,6 +205,32 @@ describe('GET /v1/auctions marketplace', () => {
       expect(input?.sort).toBe('mostBids')
     })
 
+    it('acepta search, lo recorta y conserva filtros y sort', async () => {
+      await expect(
+        get('?search=%20espada%20&publisherType=PLAYER&priceKind=CREDITS&sort=priceAsc'),
+      ).resolves.toMatchObject({ status: 200 })
+      expect(list.execute).toHaveBeenLastCalledWith({
+        page: 1,
+        pageSize: 16,
+        filters: { publisherType: 'PLAYER', priceKind: 'CREDITS', hasBuyNow: undefined },
+        sort: 'priceAsc',
+        search: 'espada',
+      })
+    })
+
+    it('acepta la longitud maxima de search', async () => {
+      await expect(get(`?search=${'a'.repeat(80)}`)).resolves.toMatchObject({ status: 200 })
+    })
+
+    it.each(['?search=', '?search=%20%20%20', `?search=${'a'.repeat(81)}`, '?search=x&search=y'])(
+      '%s responde 400 sin llegar al caso de uso',
+      async (query) => {
+        const response = await get(query)
+        expect(response.status).toBe(400)
+        expect(list.execute).not.toHaveBeenCalled()
+      },
+    )
+
     it.each([
       '?sort=closingSoon',
       '?sort=newest',
@@ -255,6 +284,14 @@ describe('GET /v1/auctions marketplace', () => {
       list.execute.mockRejectedValueOnce(new Error('base de datos caida'))
 
       await expect(get('')).resolves.toMatchObject({ status: 500 })
+    })
+
+    it('traduce la indisponibilidad de Catalog a 503', async () => {
+      list.execute.mockRejectedValueOnce(new ExternalDependencyUnavailableError('catalog'))
+
+      const response = await get('?search=espada')
+      expect(response.status).toBe(503)
+      expect(response.body).toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' })
     })
   })
 })
