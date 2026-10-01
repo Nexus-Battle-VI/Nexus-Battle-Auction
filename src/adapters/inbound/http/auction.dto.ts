@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
-import { Type } from 'class-transformer'
+import { Transform, Type } from 'class-transformer'
 import {
   ArrayMaxSize,
   IsArray,
@@ -96,6 +96,24 @@ export class AuctionResponseDto {
   closesAt!: Date
 }
 
+export const MARKETPLACE_PUBLISHER_TYPES = ['PLAYER', 'GAME_MASTER'] as const
+export const MARKETPLACE_PRICE_KINDS = ['CREDITS', 'REAL_MONEY'] as const
+export const MARKETPLACE_SORTS = [
+  'closingSoon',
+  'newest',
+  'priceAsc',
+  'priceDesc',
+  'mostBids',
+] as const
+
+/**
+ * Solo "true" y "false" literales. `@Type(() => Boolean)` convertiria
+ * "false" en `true` (cualquier texto no vacio es verdadero); cualquier otro
+ * valor se deja pasar tal cual para que `@IsBoolean` lo rechace con 400.
+ */
+const strictBooleanQuery = ({ value }: { value: unknown }): unknown =>
+  value === 'true' ? true : value === 'false' ? false : value
+
 export class ListActiveAuctionsQueryDto {
   @ApiPropertyOptional({ default: 1, minimum: 1 })
   @IsOptional()
@@ -111,6 +129,34 @@ export class ListActiveAuctionsQueryDto {
   @Min(1)
   @Max(100)
   pageSize?: number
+
+  @ApiPropertyOptional({ enum: MARKETPLACE_PUBLISHER_TYPES })
+  @IsOptional()
+  @IsIn(MARKETPLACE_PUBLISHER_TYPES)
+  publisherType?: (typeof MARKETPLACE_PUBLISHER_TYPES)[number]
+
+  @ApiPropertyOptional({ enum: MARKETPLACE_PRICE_KINDS })
+  @IsOptional()
+  @IsIn(MARKETPLACE_PRICE_KINDS)
+  priceKind?: (typeof MARKETPLACE_PRICE_KINDS)[number]
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description: 'true: con precio de compra inmediata configurado; false: sin el.',
+  })
+  @IsOptional()
+  @Transform(strictBooleanQuery)
+  @IsBoolean()
+  hasBuyNow?: boolean
+
+  @ApiPropertyOptional({
+    enum: MARKETPLACE_SORTS,
+    description:
+      'Sin valor: GAME_MASTER primero y cierre ascendente. priceAsc/priceDesc exigen priceKind=CREDITS.',
+  })
+  @IsOptional()
+  @IsIn(MARKETPLACE_SORTS)
+  sort?: (typeof MARKETPLACE_SORTS)[number]
 }
 
 export class ActiveAuctionSummaryResponseDto {
@@ -144,6 +190,8 @@ export class ActiveAuctionSummaryResponseDto {
   closesAt!: Date
   @ApiPropertyOptional({ nullable: true, minimum: 1 })
   currentBidAmount!: number | null
+  @ApiProperty({ minimum: 0, description: 'Total de pujas persistidas de la subasta.' })
+  bidCount!: number
 }
 
 export class ActiveAuctionPageResponseDto {
@@ -209,6 +257,8 @@ export class AuctionDetailResponseDto extends AuctionResponseDto {
     nullable: true,
   })
   currentBid!: BidResponseDto | null
+  @ApiProperty({ minimum: 0, description: 'Total de pujas persistidas de la subasta.' })
+  bidCount!: number
 }
 
 export class ConfigureAutoBidRequestDto {

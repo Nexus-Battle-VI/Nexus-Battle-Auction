@@ -12,6 +12,7 @@ import {
   type TokenVerifierPort,
   type VerifiedIdentity,
 } from '../../src/application/ports/TokenVerifierPort'
+import type { ActiveAuctionList } from '../../src/application/ports/AuctionRepositoryPort'
 import { ListActiveAuctions } from '../../src/application/use-cases/ListActiveAuctions'
 import { AppModule } from '../../src/infrastructure/bootstrap/app.module'
 
@@ -26,32 +27,60 @@ const verifier: TokenVerifierPort = {
       ? Promise.reject(new TokenVerificationError())
       : Promise.resolve(identities[token]),
 }
-const list = {
-  execute: jest.fn(() =>
-    Promise.resolve({
-      items: [
-        {
-          id: 'auction-1',
-          sellerId: 'seller-1',
-          publisherType: 'PLAYER' as const,
-          productId: 'product-1',
-          priceKind: 'CREDITS' as const,
-          minimumBidCredits: 10,
-          buyNowCredits: null,
-          currency: null,
-          minimumBidAmountMinor: null,
-          buyNowAmountMinor: null,
-          officialMark: null,
-          status: 'ACTIVE' as const,
-          publishedAt: new Date('2026-09-22T12:00:00.000Z'),
-          closesAt: new Date('2026-09-24T12:00:00.000Z'),
-          currentBidAmount: 20,
-        },
-      ],
-      total: 1,
-    }),
-  ),
+const page: ActiveAuctionList = {
+  items: [
+    {
+      id: 'auction-1',
+      sellerId: 'seller-1',
+      publisherType: 'PLAYER' as const,
+      productId: 'product-1',
+      priceKind: 'CREDITS' as const,
+      minimumBidCredits: 10,
+      buyNowCredits: null,
+      currency: null,
+      minimumBidAmountMinor: null,
+      buyNowAmountMinor: null,
+      officialMark: null,
+      status: 'ACTIVE' as const,
+      publishedAt: new Date('2026-09-22T12:00:00.000Z'),
+      closesAt: new Date('2026-09-24T12:00:00.000Z'),
+      currentBidAmount: 20,
+      bidCount: 3,
+    },
+    {
+      id: 'auction-2',
+      sellerId: 'seller-2',
+      publisherType: 'PLAYER' as const,
+      productId: 'product-2',
+      priceKind: 'CREDITS' as const,
+      minimumBidCredits: 10,
+      buyNowCredits: null,
+      currency: null,
+      minimumBidAmountMinor: null,
+      buyNowAmountMinor: null,
+      officialMark: null,
+      status: 'ACTIVE' as const,
+      publishedAt: new Date('2026-09-22T12:00:00.000Z'),
+      closesAt: new Date('2026-09-25T12:00:00.000Z'),
+      currentBidAmount: null,
+      bidCount: 0,
+    },
+  ],
+  total: 2,
 }
+/*
+ * Caso de uso real (sin IO: solo valida y delega) sobre un repositorio fijo.
+ * Asi el 400 PRICE_SORT_REQUIRES_CREDITS se prueba por HTTP sin duplicar la
+ * regla en el stub; la semantica de filtros y orden se prueba en unit y DB.
+ */
+const useCase = new ListActiveAuctions(
+  { listActive: () => Promise.resolve(page) },
+  { now: () => new Date('2026-09-23T12:00:00.000Z') },
+)
+const list = {
+  execute: jest.fn((input: Parameters<ListActiveAuctions['execute']>[0]) => useCase.execute(input)),
+}
+const NO_FILTERS = { publisherType: undefined, priceKind: undefined, hasBuyNow: undefined }
 
 describe('GET /v1/auctions marketplace', () => {
   let app: INestApplication
@@ -95,11 +124,19 @@ describe('GET /v1/auctions marketplace', () => {
     expect(response.body).toMatchObject({
       page: 1,
       pageSize: 16,
-      total: 1,
-      items: [{ id: 'auction-1', currentBidAmount: 20 }],
+      total: 2,
+      items: [
+        { id: 'auction-1', currentBidAmount: 20, bidCount: 3 },
+        { id: 'auction-2', currentBidAmount: null, bidCount: 0 },
+      ],
     })
     expect(response.body.items[0]).not.toHaveProperty('bidderId')
-    expect(list.execute).toHaveBeenCalledWith({ page: 1, pageSize: 16 })
+    expect(list.execute).toHaveBeenCalledWith({
+      page: 1,
+      pageSize: 16,
+      filters: NO_FILTERS,
+      sort: undefined,
+    })
   })
 
   it('acepta paginacion y rechaza autenticacion, rol y query invalidos', async () => {
@@ -108,7 +145,12 @@ describe('GET /v1/auctions marketplace', () => {
         .get('/api/v1/auctions?page=2&pageSize=100')
         .set('Authorization', 'Bearer player'),
     ).resolves.toMatchObject({ status: 200 })
-    expect(list.execute).toHaveBeenLastCalledWith({ page: 2, pageSize: 100 })
+    expect(list.execute).toHaveBeenLastCalledWith({
+      page: 2,
+      pageSize: 100,
+      filters: NO_FILTERS,
+      sort: undefined,
+    })
     await expect(
       request(app.getHttpServer())
         .get('/api/v1/auctions')
@@ -130,5 +172,89 @@ describe('GET /v1/auctions marketplace', () => {
         .get('/api/v1/auctions?pageSize=101')
         .set('Authorization', 'Bearer player'),
     ).resolves.toMatchObject({ status: 400 })
+  })
+
+  describe('filtros y orden', () => {
+    const get = (query: string) =>
+      request(app.getHttpServer())
+        .get(`/api/v1/auctions${query}`)
+        .set('Authorization', 'Bearer player')
+
+    it('entrega filtros y orden tipados al caso de uso', async () => {
+      const response = await get(
+        '?publisherType=PLAYER&priceKind=CREDITS&hasBuyNow=true&sort=priceAsc&page=2&pageSize=8',
+      )
+
+      expect(response.status).toBe(200)
+      expect(list.execute).toHaveBeenLastCalledWith({
+        page: 2,
+        pageSize: 8,
+        filters: { publisherType: 'PLAYER', priceKind: 'CREDITS', hasBuyNow: true },
+        sort: 'priceAsc',
+      })
+    })
+
+    it('hasBuyNow=false llega como false, no como texto verdadero', async () => {
+      await expect(get('?hasBuyNow=false&sort=mostBids')).resolves.toMatchObject({ status: 200 })
+
+      const [input] = list.execute.mock.lastCall ?? []
+      expect(input?.filters?.hasBuyNow).toBe(false)
+      expect(input?.sort).toBe('mostBids')
+    })
+
+    it.each([
+      '?sort=closingSoon',
+      '?sort=newest',
+      '?sort=mostBids',
+      '?sort=priceAsc&priceKind=CREDITS',
+      '?sort=priceDesc&priceKind=CREDITS',
+    ])('%s responde 200', async (query) => {
+      await expect(get(query)).resolves.toMatchObject({ status: 200 })
+    })
+
+    it.each([
+      ['?sort=priceAsc'],
+      ['?sort=priceDesc'],
+      ['?sort=priceAsc&priceKind=REAL_MONEY'],
+      ['?sort=priceDesc&priceKind=REAL_MONEY'],
+      // PLAYER implica creditos en el modelo, pero la regla exige priceKind explicito.
+      ['?sort=priceDesc&publisherType=PLAYER'],
+    ])('%s sin priceKind=CREDITS responde 400 PRICE_SORT_REQUIRES_CREDITS', async (query) => {
+      const response = await get(query)
+
+      expect(response.status).toBe(400)
+      expect(response.body).toMatchObject({ statusCode: 400, code: 'PRICE_SORT_REQUIRES_CREDITS' })
+    })
+
+    it.each([
+      ['?publisherType=ADMIN', 'publisherType'],
+      ['?publisherType=player', 'publisherType'],
+      ['?priceKind=GOLD', 'priceKind'],
+      ['?hasBuyNow=yes', 'hasBuyNow'],
+      ['?hasBuyNow=1', 'hasBuyNow'],
+      ['?hasBuyNow=FALSE', 'hasBuyNow'],
+      ['?hasBuyNow=', 'hasBuyNow'],
+      ['?hasBuyNow=random', 'hasBuyNow'],
+      ['?hasBuyNow=true&hasBuyNow=false', 'hasBuyNow'],
+      ['?sort=price', 'sort'],
+      ['?sort=priceasc', 'sort'],
+      ['?sort=closes_at%20desc', 'sort'],
+      ['?sort=newest&sort=mostBids', 'sort'],
+    ])('%s responde 400 sin llegar al caso de uso', async (query, field) => {
+      const response = await get(query)
+
+      expect(response.status).toBe(400)
+      expect(response.body).toMatchObject({
+        code: 'INVALID_REQUEST',
+        errors: [expect.objectContaining({ field })],
+      })
+      expect(list.execute).not.toHaveBeenCalled()
+    })
+
+    it('cualquier otro fallo del listado se propaga como antes (500), no como 503', async () => {
+      list.execute.mockRejectedValueOnce(new Error('base de datos caida'))
+
+      await expect(get('')).resolves.toMatchObject({ status: 500 })
+    })
   })
 })

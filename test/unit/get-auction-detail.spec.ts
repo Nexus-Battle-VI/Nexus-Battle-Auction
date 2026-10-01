@@ -41,6 +41,8 @@ describe('GetAuctionDetail HU-63.6', () => {
       findById: jest.fn().mockResolvedValue(auction),
 
       findLeadingBid: jest.fn().mockResolvedValue(currentBid),
+
+      countBids: jest.fn().mockResolvedValue(3),
     } as unknown as jest.Mocked<AuctionRepositoryPort>
 
     const useCase = new GetAuctionDetail(repository)
@@ -48,11 +50,14 @@ describe('GetAuctionDetail HU-63.6', () => {
     await expect(useCase.execute(auction.id)).resolves.toEqual({
       auction,
       currentBid,
+      bidCount: 3,
     })
 
     expect(repository.findById).toHaveBeenCalledWith(auction.id)
 
     expect(repository.findLeadingBid).toHaveBeenCalledWith(auction.id)
+
+    expect(repository.countBids).toHaveBeenCalledWith(auction.id)
   })
 
   it('devuelve currentBid null cuando aun no existen pujas', async () => {
@@ -60,6 +65,8 @@ describe('GetAuctionDetail HU-63.6', () => {
       findById: jest.fn().mockResolvedValue(auction),
 
       findLeadingBid: jest.fn().mockResolvedValue(null),
+
+      countBids: jest.fn().mockResolvedValue(0),
     } as unknown as jest.Mocked<AuctionRepositoryPort>
 
     const useCase = new GetAuctionDetail(repository)
@@ -67,6 +74,7 @@ describe('GetAuctionDetail HU-63.6', () => {
     await expect(useCase.execute(auction.id)).resolves.toEqual({
       auction,
       currentBid: null,
+      bidCount: 0,
     })
   })
 
@@ -75,6 +83,8 @@ describe('GetAuctionDetail HU-63.6', () => {
       findById: jest.fn().mockResolvedValue(null),
 
       findLeadingBid: jest.fn(),
+
+      countBids: jest.fn(),
     } as unknown as jest.Mocked<AuctionRepositoryPort>
 
     const useCase = new GetAuctionDetail(repository)
@@ -82,5 +92,21 @@ describe('GetAuctionDetail HU-63.6', () => {
     await expect(useCase.execute('auction-missing')).resolves.toBeNull()
 
     expect(repository.findLeadingBid).not.toHaveBeenCalled()
+
+    expect(repository.countBids).not.toHaveBeenCalled()
+  })
+
+  it('usa el total persistido aunque la puja lider sea una sola', async () => {
+    const repository = {
+      findById: jest.fn().mockResolvedValue(auction),
+
+      findLeadingBid: jest.fn().mockResolvedValue(currentBid),
+
+      countBids: jest.fn().mockResolvedValue(1),
+    } as unknown as jest.Mocked<AuctionRepositoryPort>
+
+    const useCase = new GetAuctionDetail(repository)
+
+    await expect(useCase.execute(auction.id)).resolves.toMatchObject({ bidCount: 1 })
   })
 })

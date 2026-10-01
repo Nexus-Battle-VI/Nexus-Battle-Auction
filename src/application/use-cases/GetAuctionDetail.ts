@@ -5,6 +5,8 @@ import type { BidSnapshot } from '../../domain/entities/Bid'
 export interface AuctionDetail {
   readonly auction: AuctionSnapshot
   readonly currentBid: BidSnapshot | null
+  /** Total real de pujas persistidas; no se deriva de `currentBid`. */
+  readonly bidCount: number
 }
 
 /**
@@ -24,11 +26,15 @@ export class GetAuctionDetail {
       return null
     }
 
-    const currentBid = await this.repository.findLeadingBid(auctionId)
+    const [currentBid, bidCount] = await Promise.all([
+      this.repository.findLeadingBid(auctionId),
+      this.repository.countBids(auctionId),
+    ])
 
     return {
       auction,
       currentBid,
+      bidCount,
     }
   }
 }

@@ -287,15 +287,92 @@ export class PostgresAuctionRepository
     })
   }
 
-  /** Marketplace de jugador (HU-62): una publicacion oficial no aparece aqui. */
+  /**
+   * Marketplace (HU-62 + HU-66): publicaciones de jugador y oficiales activas y
+   * no vencidas. Los filtros se aplican una sola vez sobre `base`, de la que
+   * derivan tanto la pagina como el `count(*)`: el total no puede divergir de
+   * los items. Sin `sort` se conserva el orden historico.
+   */
   async listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
     const offset = (input.page - 1) * input.pageSize
-    const [rows, count] = await Promise.all([
-      this.db
-        .selectFrom('auctions')
-        .leftJoin('auction_bids as leader', (join) =>
-          join.onRef('leader.auction_id', '=', 'auctions.id').on('leader.is_leader', '=', true),
+    const filters = input.filters ?? {}
+    const base = this.db.selectFrom('auctions').where((eb) => {
+      const conditions = [
+        eb('auctions.status', '=', AuctionStatus.Active),
+        eb('auctions.closes_at', '>', input.now),
+      ]
+      if (filters.publisherType !== undefined) {
+        conditions.push(eb('auctions.publisher_type', '=', filters.publisherType))
+      }
+      if (filters.priceKind !== undefined) {
+        conditions.push(eb('auctions.price_kind', '=', filters.priceKind))
+      }
+      if (filters.hasBuyNow === true) {
+        conditions.push(
+          eb.or([
+            eb('auctions.buy_now_credits', 'is not', null),
+            eb('auctions.buy_now_amount_minor', 'is not', null),
+          ]),
         )
+      }
+      if (filters.hasBuyNow === false) {
+        conditions.push(
+          eb.and([
+            eb('auctions.buy_now_credits', 'is', null),
+            eb('auctions.buy_now_amount_minor', 'is', null),
+          ]),
+        )
+      }
+      return eb.and(conditions)
+    })
+
+    const joined = base
+      .leftJoin('auction_bids as leader', (join) =>
+        join.onRef('leader.auction_id', '=', 'auctions.id').on('leader.is_leader', '=', true),
+      )
+      // Conteo agregado en la misma consulta (sin N+1): una fila por subasta,
+      // limitado a subastas activas no vencidas para no agregar el historico.
+      .leftJoin(
+        (eb) =>
+          eb
+            .selectFrom('auction_bids')
+            .innerJoin('auctions as counted', 'counted.id', 'auction_bids.auction_id')
+            .where('counted.status', '=', AuctionStatus.Active)
+            .where('counted.closes_at', '>', input.now)
+            .select(['auction_bids.auction_id', sql<number>`count(*)::integer`.as('bid_count')])
+            .groupBy('auction_bids.auction_id')
+            .as('bid_counts'),
+        (join) => join.onRef('bid_counts.auction_id', '=', 'auctions.id'),
+      )
+
+    // Expresiones fijas, nunca el texto de `sort`: el valor solo elige la rama.
+    const bidCount = sql<number>`coalesce(bid_counts.bid_count, 0)`
+    const effectivePrice = sql<number>`coalesce(leader.amount_credits, auctions.minimum_bid_credits)`
+    const ordered = (() => {
+      switch (input.sort) {
+        case undefined:
+          return joined
+            .orderBy(sql`case when auctions.publisher_type = 'GAME_MASTER' then 0 else 1 end`)
+            .orderBy('auctions.closes_at', 'asc')
+            .orderBy('auctions.id', 'asc')
+        case 'closingSoon':
+          return joined.orderBy('auctions.closes_at', 'asc').orderBy('auctions.id', 'asc')
+        case 'newest':
+          return joined.orderBy('auctions.published_at', 'desc').orderBy('auctions.id', 'asc')
+        case 'mostBids':
+          return joined
+            .orderBy(bidCount, 'desc')
+            .orderBy('auctions.closes_at', 'asc')
+            .orderBy('auctions.id', 'asc')
+        case 'priceAsc':
+          return joined.orderBy(effectivePrice, 'asc').orderBy('auctions.id', 'asc')
+        case 'priceDesc':
+          return joined.orderBy(effectivePrice, 'desc').orderBy('auctions.id', 'asc')
+      }
+    })()
+
+    const [rows, count] = await Promise.all([
+      ordered
         .select([
           'auctions.id',
           'auctions.seller_id',
@@ -312,21 +389,12 @@ export class PostgresAuctionRepository
           'auctions.published_at',
           'auctions.closes_at',
           'leader.amount_credits as current_bid_amount',
+          sql<number>`coalesce(bid_counts.bid_count, 0)::integer`.as('bid_count'),
         ])
-        .where('auctions.status', '=', AuctionStatus.Active)
-        .where('auctions.closes_at', '>', input.now)
-        .orderBy(sql`case when auctions.publisher_type = 'GAME_MASTER' then 0 else 1 end`)
-        .orderBy('auctions.closes_at', 'asc')
-        .orderBy('auctions.id', 'asc')
         .limit(input.pageSize)
         .offset(offset)
         .execute(),
-      this.db
-        .selectFrom('auctions')
-        .select(sql<number>`count(*)::integer`.as('total'))
-        .where('status', '=', AuctionStatus.Active)
-        .where('closes_at', '>', input.now)
-        .executeTakeFirstOrThrow(),
+      base.select(sql<number>`count(*)::integer`.as('total')).executeTakeFirstOrThrow(),
     ])
     return {
       total: count.total,
@@ -339,6 +407,7 @@ export class PostgresAuctionRepository
           publishedAt: new Date(row.published_at),
           closesAt: new Date(row.closes_at),
           currentBidAmount: row.current_bid_amount,
+          bidCount: row.bid_count,
         }
 
         if (row.price_kind === 'CREDITS' && row.minimum_bid_credits !== null) {
@@ -876,6 +945,16 @@ export class PostgresAuctionRepository
       .execute()
 
     return rows.map(toBidSnapshot)
+  }
+
+  async countBids(auctionId: string): Promise<number> {
+    const row = await this.db
+      .selectFrom('auction_bids')
+      .select(sql<number>`count(*)::integer`.as('total'))
+      .where('auction_id', '=', auctionId)
+      .executeTakeFirstOrThrow()
+
+    return row.total
   }
 
   async findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {

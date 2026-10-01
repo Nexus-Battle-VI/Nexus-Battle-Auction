@@ -13,6 +13,7 @@ import {
 import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
+  ActiveAuctionSort,
   BidCreditOperationSnapshot,
   BuyNowOperationRecord,
   CloseAuctionByBuyNowCommand,
@@ -144,6 +145,49 @@ const buyNowHashOf = (command: CloseAuctionByBuyNowCommand): string =>
   createHash('sha256')
     .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]))
     .digest('hex')
+
+type ActiveListItem = ActiveAuctionList['items'][number]
+
+const byId = (left: ActiveListItem, right: ActiveListItem): number =>
+  left.id.localeCompare(right.id)
+const byClosesAt = (left: ActiveListItem, right: ActiveListItem): number =>
+  left.closesAt.getTime() - right.closesAt.getTime()
+/**
+ * Mismo criterio que Postgres: puja lider o, si no hay, el minimo en creditos.
+ * Sin precio en creditos se comporta como el NULL de Postgres (mayor que todo);
+ * el caso de uso ya impide ordenar por precio fuera de CREDITS.
+ */
+const effectivePrice = (item: ActiveListItem): number =>
+  item.currentBidAmount ?? item.minimumBidCredits ?? Number.POSITIVE_INFINITY
+
+/** Espejo del ORDER BY de `PostgresAuctionRepository.listActive`. */
+const activeAuctionComparator = (
+  sort: ActiveAuctionSort | undefined,
+): ((left: ActiveListItem, right: ActiveListItem) => number) => {
+  switch (sort) {
+    case undefined:
+      return (left, right) =>
+        (left.publisherType === right.publisherType
+          ? 0
+          : left.publisherType === 'GAME_MASTER'
+            ? -1
+            : 1) ||
+        byClosesAt(left, right) ||
+        byId(left, right)
+    case 'closingSoon':
+      return (left, right) => byClosesAt(left, right) || byId(left, right)
+    case 'newest':
+      return (left, right) =>
+        right.publishedAt.getTime() - left.publishedAt.getTime() || byId(left, right)
+    case 'mostBids':
+      return (left, right) =>
+        right.bidCount - left.bidCount || byClosesAt(left, right) || byId(left, right)
+    case 'priceAsc':
+      return (left, right) => effectivePrice(left) - effectivePrice(right) || byId(left, right)
+    case 'priceDesc':
+      return (left, right) => effectivePrice(right) - effectivePrice(left) || byId(left, right)
+  }
+}
 
 export class InMemoryAuctionRepository
   implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
@@ -413,6 +457,7 @@ export class InMemoryAuctionRepository
           publishedAt: new Date(auction.publishedAt),
           closesAt: new Date(auction.closesAt),
           currentBidAmount: leader?.snapshot.amountCredits ?? null,
+          bidCount: this.countStoredBids(auction.id),
         }
       })
     const officialItems: ActiveAuctionList['items'][number][] = [...this.officialAuctions.values()]
@@ -437,17 +482,18 @@ export class InMemoryAuctionRepository
         publishedAt: new Date(auction.publishedAt),
         closesAt: new Date(auction.closesAt),
         currentBidAmount: null,
+        bidCount: this.countStoredBids(auction.id),
       }))
-    const active = [...officialItems, ...playerItems].sort(
-      (left, right) =>
-        (left.publisherType === right.publisherType
-          ? 0
-          : left.publisherType === 'GAME_MASTER'
-            ? -1
-            : 1) ||
-        left.closesAt.getTime() - right.closesAt.getTime() ||
-        left.id.localeCompare(right.id),
-    )
+    const filters = input.filters ?? {}
+    const active = [...officialItems, ...playerItems]
+      .filter(
+        (item) =>
+          (filters.publisherType === undefined || item.publisherType === filters.publisherType) &&
+          (filters.priceKind === undefined || item.priceKind === filters.priceKind) &&
+          (filters.hasBuyNow === undefined ||
+            (item.buyNowCredits !== null || item.buyNowAmountMinor !== null) === filters.hasBuyNow),
+      )
+      .sort(activeAuctionComparator(input.sort))
     const offset = (input.page - 1) * input.pageSize
     return Promise.resolve({
       total: active.length,
@@ -567,6 +613,15 @@ export class InMemoryAuctionRepository
       .map(toBidSnapshot)
 
     return Promise.resolve(history)
+  }
+
+  countBids(auctionId: string): Promise<number> {
+    return Promise.resolve(this.countStoredBids(auctionId))
+  }
+
+  private countStoredBids(auctionId: string): number {
+    return [...this.bids.values()].filter((stored) => stored.snapshot.auctionId === auctionId)
+      .length
   }
 
   findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {

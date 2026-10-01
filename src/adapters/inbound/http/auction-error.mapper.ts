@@ -16,6 +16,7 @@ import {
   PersistedAuctionNotFoundError,
   ProductNotEligibleForOfficialAuctionError,
 } from '../../../application/errors/AuctionPersistenceError'
+import { PriceSortRequiresCreditsError } from '../../../application/errors/MarketplaceQueryError'
 import {
   PendingClaimNotFoundError,
   PendingClaimOwnershipError,
@@ -53,6 +54,10 @@ export const toAuctionHttpException = (error: unknown): HttpException => {
 
   if (error instanceof ExternalResourceNotFoundError) {
     return new UnprocessableEntityException(body(422, 'PRODUCT_NOT_ELIGIBLE', error.message))
+  }
+
+  if (error instanceof PriceSortRequiresCreditsError) {
+    return new BadRequestException(body(400, 'PRICE_SORT_REQUIRES_CREDITS', error.message))
   }
 
   if (error instanceof IdempotencyConflictError) {
