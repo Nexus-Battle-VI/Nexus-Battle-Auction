@@ -125,6 +125,23 @@ const getAuctionDetailStub = {
         currentBid: null,
 
         bidCount: 0,
+
+        sellerDisplayName: null,
+
+        sellerAvatarUrl: null,
+      })
+    }
+
+    if (auctionId === 'auction-account-down') {
+      return Promise.resolve({
+        auction: {
+          ...auction,
+          id: auctionId,
+        },
+        currentBid: null,
+        bidCount: 0,
+        sellerDisplayName: null,
+        sellerAvatarUrl: null,
       })
     }
 
@@ -135,6 +152,10 @@ const getAuctionDetailStub = {
         currentBid: null,
 
         bidCount: 0,
+
+        sellerDisplayName: null,
+
+        sellerAvatarUrl: null,
       })
     }
 
@@ -152,6 +173,10 @@ const getAuctionDetailStub = {
       },
 
       bidCount: 4,
+
+      sellerDisplayName: 'Ana Ramirez',
+
+      sellerAvatarUrl: '/accounts/seller-1/avatar',
     })
   }),
 }
@@ -250,7 +275,33 @@ describe('GET detalle de subasta HU-63.6', () => {
       minimumBidAmountMinor: null,
       buyNowAmountMinor: null,
       officialMark: null,
+      sellerDisplayName: 'Ana Ramirez',
+      sellerAvatarUrl: '/accounts/seller-1/avatar',
     })
+  })
+
+  it('Account caido: 200 con sellerDisplayName/sellerAvatarUrl en null, el resto del detalle intacto', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/auctions/auction-account-down')
+      .set('Authorization', 'Bearer token-player')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      id: 'auction-account-down',
+      sellerDisplayName: null,
+      sellerAvatarUrl: null,
+      minimumBidCredits: 10,
+      status: 'ACTIVE',
+    })
+  })
+
+  it('perfil de vendedor ausente en Account: 200 con nulls, no se confunde con auction 404', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/api/v1/auctions/auction-empty')
+      .set('Authorization', 'Bearer token-player')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ sellerDisplayName: null, sellerAvatarUrl: null })
   })
 
   it('GAME_MASTER/REAL_MONEY: responde 200 (ya no 404) con publisherType, priceKind, currency, officialMark y montos minor', async () => {
@@ -272,6 +323,8 @@ describe('GET detalle de subasta HU-63.6', () => {
       buyNowCredits: null,
       currentBid: null,
       bidCount: 0,
+      sellerDisplayName: null,
+      sellerAvatarUrl: null,
     })
   })
 
