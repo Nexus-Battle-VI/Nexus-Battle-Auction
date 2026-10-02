@@ -323,19 +323,140 @@ export class BidResponseDto {
 }
 
 /**
- * Respuesta utilizada por la Web para HU-63.6.
+ * Respuesta utilizada por la Web para HU-63.6 y extendida por HU-88.
  *
- * La oferta lider puede ser null cuando aun nadie
- * ha realizado una puja.
+ * NO extiende `AuctionResponseDto` -ese sigue siendo la respuesta de
+ * publicacion (`POST /v1/auctions`), solo PLAYER/CREDITS- porque aqui
+ * `minimumBidCredits`/`buyNowCredits` deben admitir `null` (una subasta
+ * oficial no los tiene). Mismo vocabulario que `ActiveAuctionSummaryResponseDto`
+ * del listado -no se inventan nombres nuevos para los mismos conceptos-.
+ *
+ * La oferta lider (`currentBid`) puede ser null cuando aun nadie ha
+ * realizado una puja, o cuando la subasta es oficial (REAL_MONEY): esas no
+ * admiten pujas, solo compra inmediata.
  */
-export class AuctionDetailResponseDto extends AuctionResponseDto {
+export class AuctionDetailResponseDto {
+  @ApiProperty()
+  id!: string
+
+  @ApiProperty()
+  sellerId!: string
+
+  @ApiProperty()
+  productId!: string
+
+  @ApiProperty({ enum: ['PLAYER', 'GAME_MASTER'] })
+  publisherType!: 'PLAYER' | 'GAME_MASTER'
+
+  @ApiProperty({ enum: ['CREDITS', 'REAL_MONEY'] })
+  priceKind!: 'CREDITS' | 'REAL_MONEY'
+
+  @ApiProperty({
+    enum: [24, 48],
+  })
+  durationHours!: number
+
+  @ApiProperty()
+  publicationFeeCredits!: number
+
+  @ApiPropertyOptional({ nullable: true })
+  minimumBidCredits!: number | null
+
+  @ApiPropertyOptional({ nullable: true })
+  buyNowCredits!: number | null
+
+  @ApiPropertyOptional({ nullable: true, example: 'COP' })
+  currency!: string | null
+
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  minimumBidAmountMinor!: number | null
+
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  buyNowAmountMinor!: number | null
+
+  @ApiPropertyOptional({ nullable: true, enum: ['OFFICIAL', 'PREMIUM'] })
+  officialMark!: 'OFFICIAL' | 'PREMIUM' | null
+
+  @ApiProperty({
+    enum: ['ACTIVE', 'FINISHED', 'SOLD'],
+  })
+  status!: string
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  publishedAt!: Date
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  closesAt!: Date
+
   @ApiPropertyOptional({
     type: BidResponseDto,
     nullable: true,
   })
   currentBid!: BidResponseDto | null
+
   @ApiProperty({ minimum: 0, description: 'Total de pujas persistidas de la subasta.' })
   bidCount!: number
+}
+
+export class AuctionBidHistoryQueryDto {
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number
+
+  @ApiPropertyOptional({ default: 20, minimum: 1, maximum: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  pageSize?: number
+}
+
+/**
+ * Item publico del historial de pujas (HU-88).
+ *
+ * Deliberadamente NO incluye `bidderId`: la HU exige anonimizar cuando
+ * corresponda, pero no existe todavia una regla aprobada. Mientras eso no se
+ * decida, el minimo dato necesario para mostrar el historial es el monto y
+ * el momento de cada puja -nunca quien la hizo-.
+ */
+export class AuctionBidHistoryItemResponseDto {
+  @ApiProperty({
+    example: 'bid-123',
+  })
+  id!: string
+
+  @ApiProperty({
+    example: 25,
+    minimum: 1,
+  })
+  amountCredits!: number
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  placedAt!: Date
+}
+
+export class AuctionBidHistoryPageResponseDto {
+  @ApiProperty({ type: [AuctionBidHistoryItemResponseDto] })
+  items!: AuctionBidHistoryItemResponseDto[]
+  @ApiProperty({ minimum: 1 })
+  page!: number
+  @ApiProperty({ minimum: 1, maximum: 100 })
+  pageSize!: number
+  @ApiProperty({ minimum: 0 })
+  total!: number
 }
 
 export class ConfigureAutoBidRequestDto {

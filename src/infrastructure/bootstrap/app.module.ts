@@ -149,6 +149,7 @@ import {
   type WatchlistEventPublisherPort,
 } from '../../application/ports/WatchlistEventPublisherPort'
 import { DispatchClosingSoonReminders } from '../../application/use-cases/DispatchClosingSoonReminders'
+import { GetAuctionBidHistory } from '../../application/use-cases/GetAuctionBidHistory'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { FollowAuction } from '../../application/use-cases/FollowAuction'
 import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
@@ -927,6 +928,15 @@ export const createWatchlistEventPublisher = (
 
       useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
         new GetAuctionDetail(repository),
+
+      inject: [AUCTION_REPOSITORY],
+    },
+
+    {
+      provide: GetAuctionBidHistory,
+
+      useFactory: (repository: AuctionRepositoryPort): GetAuctionBidHistory =>
+        new GetAuctionBidHistory(repository),
 
       inject: [AUCTION_REPOSITORY],
     },

@@ -23,8 +23,11 @@ import {
 import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
+  AuctionDetailSnapshot,
   BidCreditOperationSnapshot,
   BidCreditOperationStatus,
+  BidHistoryPage,
+  BidHistoryPageInput,
   BuyNowOperationRecord,
   CloseAuctionByBuyNowCommand,
   CloseAuctionByBuyNowResult,
@@ -154,6 +157,60 @@ const toOfficialSnapshot = (row: AuctionRow): OfficialAuctionSnapshot | null => 
     publishedAt: new Date(row.published_at),
     closesAt: new Date(row.closes_at),
   }
+}
+
+/**
+ * HU-88: unifica ambas ramas de precio para el detalle, mismo vocabulario que
+ * el mapeo de fila a item de `listActive` (sin `currentBidAmount`/`bidCount`,
+ * que el detalle resuelve por separado). `null` solo si la fila no cumple los
+ * invariantes de ninguna rama -no deberia ocurrir con datos consistentes-.
+ */
+const toDetailSnapshot = (row: AuctionRow): AuctionDetailSnapshot | null => {
+  const base = {
+    id: row.id,
+    sellerId: row.seller_id,
+    productId: row.product_id,
+    durationHours: row.duration_hours as 24 | 48,
+    publicationFeeCredits: row.publication_fee_credits,
+    status: row.status as AuctionStatus,
+    publishedAt: new Date(row.published_at),
+    closesAt: new Date(row.closes_at),
+  }
+
+  if (row.price_kind === 'CREDITS' && row.minimum_bid_credits !== null) {
+    return {
+      ...base,
+      publisherType: 'PLAYER',
+      priceKind: 'CREDITS',
+      minimumBidCredits: row.minimum_bid_credits,
+      buyNowCredits: row.buy_now_credits,
+      currency: null,
+      minimumBidAmountMinor: null,
+      buyNowAmountMinor: null,
+      officialMark: null,
+    }
+  }
+
+  if (
+    row.price_kind === 'REAL_MONEY' &&
+    row.currency !== null &&
+    row.minimum_bid_amount_minor !== null &&
+    (row.official_mark === 'OFFICIAL' || row.official_mark === 'PREMIUM')
+  ) {
+    return {
+      ...base,
+      publisherType: 'GAME_MASTER',
+      priceKind: 'REAL_MONEY',
+      minimumBidCredits: null,
+      buyNowCredits: null,
+      currency: row.currency,
+      minimumBidAmountMinor: row.minimum_bid_amount_minor,
+      buyNowAmountMinor: row.buy_now_amount_minor,
+      officialMark: row.official_mark,
+    }
+  }
+
+  return null
 }
 
 /** Solo se llama con filas CREDITS; una fila REAL_MONEY aqui es un error del llamador. */
@@ -986,6 +1043,41 @@ export class PostgresAuctionRepository
     return row.total
   }
 
+  /**
+   * HU-88. Paginacion y `count(*)` en la base de datos -nunca carga el
+   * historico completo-. Selecciona solo `id`/`amount_credits`/`placed_at`:
+   * `bidder_id` ni siquiera viaja fuera de Postgres para esta consulta.
+   */
+  async listBidHistoryPage(input: BidHistoryPageInput): Promise<BidHistoryPage> {
+    const offset = (input.page - 1) * input.pageSize
+
+    const [rows, count] = await Promise.all([
+      this.db
+        .selectFrom('auction_bids')
+        .select(['id', 'amount_credits', 'placed_at'])
+        .where('auction_id', '=', input.auctionId)
+        .orderBy('placed_at', 'asc')
+        .orderBy('id', 'asc')
+        .limit(input.pageSize)
+        .offset(offset)
+        .execute(),
+      this.db
+        .selectFrom('auction_bids')
+        .select(sql<number>`count(*)::integer`.as('total'))
+        .where('auction_id', '=', input.auctionId)
+        .executeTakeFirstOrThrow(),
+    ])
+
+    return {
+      total: count.total,
+      items: rows.map((row) => ({
+        id: row.id,
+        amountCredits: row.amount_credits,
+        placedAt: new Date(row.placed_at),
+      })),
+    }
+  }
+
   async findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {
     const row = await this.db
       .selectFrom('auction_bids')
@@ -1021,6 +1113,16 @@ export class PostgresAuctionRepository
 
   findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null> {
     return findOfficialAuction(this.db, auctionId)
+  }
+
+  async findDetailById(auctionId: string): Promise<AuctionDetailSnapshot | null> {
+    const row = await this.db
+      .selectFrom('auctions')
+      .selectAll()
+      .where('id', '=', auctionId)
+      .executeTakeFirst()
+
+    return row === undefined ? null : toDetailSnapshot(row)
   }
 
   /** Solo CREDITS: la liquidacion en dinero real de una publicacion oficial no existe todavia. */

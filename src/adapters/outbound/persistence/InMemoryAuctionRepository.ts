@@ -15,7 +15,10 @@ import type {
   ActiveAuctionList,
   ActiveAuctionSort,
   ActiveAuctionUniverseInput,
+  AuctionDetailSnapshot,
   BidCreditOperationSnapshot,
+  BidHistoryPage,
+  BidHistoryPageInput,
   BuyNowOperationRecord,
   CloseAuctionByBuyNowCommand,
   CloseAuctionByBuyNowResult,
@@ -376,6 +379,57 @@ export class InMemoryAuctionRepository
     return Promise.resolve(auction === undefined ? null : cloneAuction(auction))
   }
 
+  /** HU-88: espejo de `PostgresAuctionRepository.findDetailById` sobre los dos mapas (PLAYER/GAME_MASTER). */
+  findDetailById(auctionId: string): Promise<AuctionDetailSnapshot | null> {
+    const player = this.auctions.get(auctionId)
+
+    if (player !== undefined) {
+      return Promise.resolve({
+        id: player.id,
+        sellerId: player.sellerId,
+        productId: player.productId,
+        durationHours: player.durationHours,
+        publicationFeeCredits: player.publicationFeeCredits,
+        status: player.status,
+        publishedAt: new Date(player.publishedAt),
+        closesAt: new Date(player.closesAt),
+        publisherType: 'PLAYER',
+        priceKind: 'CREDITS',
+        minimumBidCredits: player.minimumBidCredits,
+        buyNowCredits: player.buyNowCredits,
+        currency: null,
+        minimumBidAmountMinor: null,
+        buyNowAmountMinor: null,
+        officialMark: null,
+      })
+    }
+
+    const official = this.officialAuctions.get(auctionId)
+
+    if (official !== undefined) {
+      return Promise.resolve({
+        id: official.id,
+        sellerId: official.publisherId,
+        productId: official.productId,
+        durationHours: official.durationHours,
+        publicationFeeCredits: official.publicationFeeCredits,
+        status: official.status,
+        publishedAt: new Date(official.publishedAt),
+        closesAt: new Date(official.closesAt),
+        publisherType: 'GAME_MASTER',
+        priceKind: 'REAL_MONEY',
+        minimumBidCredits: null,
+        buyNowCredits: null,
+        currency: official.currency,
+        minimumBidAmountMinor: official.minimumBidAmountMinor,
+        buyNowAmountMinor: official.buyNowAmountMinor,
+        officialMark: official.mark,
+      })
+    }
+
+    return Promise.resolve(null)
+  }
+
   findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
     return Promise.resolve(
       [...this.auctions.values()]
@@ -628,6 +682,27 @@ export class InMemoryAuctionRepository
 
   countBids(auctionId: string): Promise<number> {
     return Promise.resolve(this.countStoredBids(auctionId))
+  }
+
+  /** HU-88: mismo orden estable (`placedAt`, `id`) que la version Postgres. */
+  listBidHistoryPage(input: BidHistoryPageInput): Promise<BidHistoryPage> {
+    const all = [...this.bids.values()]
+      .filter((stored) => stored.snapshot.auctionId === input.auctionId)
+      .sort(
+        (left, right) =>
+          left.snapshot.placedAt.getTime() - right.snapshot.placedAt.getTime() ||
+          left.snapshot.id.localeCompare(right.snapshot.id),
+      )
+    const offset = (input.page - 1) * input.pageSize
+
+    return Promise.resolve({
+      total: all.length,
+      items: all.slice(offset, offset + input.pageSize).map((stored) => ({
+        id: stored.snapshot.id,
+        amountCredits: stored.snapshot.amountCredits,
+        placedAt: new Date(stored.snapshot.placedAt),
+      })),
+    })
   }
 
   private countStoredBids(auctionId: string): number {

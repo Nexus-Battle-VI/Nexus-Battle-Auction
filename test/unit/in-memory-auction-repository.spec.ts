@@ -368,3 +368,212 @@ describe('InMemoryAuctionRepository, publicacion oficial (HU-66)', () => {
     await expect(repository.findOfficialById('auction-player')).resolves.toBeNull()
   })
 })
+
+describe('InMemoryAuctionRepository, detalle unificado y historial publico (HU-88)', () => {
+  it('findDetailById: PLAYER/CREDITS incluye publisherType, priceKind y los campos oficiales en null', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publish(command('auction-detail-player'))
+
+    await expect(repository.findDetailById('auction-detail-player')).resolves.toMatchObject({
+      publisherType: 'PLAYER',
+      priceKind: 'CREDITS',
+      minimumBidCredits: 10,
+      buyNowCredits: null,
+      currency: null,
+      minimumBidAmountMinor: null,
+      buyNowAmountMinor: null,
+      officialMark: null,
+    })
+  })
+
+  it('findDetailById: GAME_MASTER/REAL_MONEY ya no es null -corrige el bug de toSnapshot-', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publishOfficial(officialCommand('official-detail-1'))
+
+    await expect(repository.findDetailById('official-detail-1')).resolves.toMatchObject({
+      publisherType: 'GAME_MASTER',
+      priceKind: 'REAL_MONEY',
+      currency: 'COP',
+      minimumBidAmountMinor: 150_000,
+      officialMark: OfficialAuctionMark.Official,
+      minimumBidCredits: null,
+      buyNowCredits: null,
+    })
+  })
+
+  it('findDetailById: subasta inexistente devuelve null', async () => {
+    const repository = new InMemoryAuctionRepository()
+
+    await expect(repository.findDetailById('auction-missing')).resolves.toBeNull()
+  })
+
+  it('listBidHistoryPage: subasta existente sin pujas devuelve [] y total 0', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publish(command('auction-history-empty'))
+
+    await expect(
+      repository.listBidHistoryPage({ auctionId: 'auction-history-empty', page: 1, pageSize: 20 }),
+    ).resolves.toEqual({ items: [], total: 0 })
+  })
+
+  it('listBidHistoryPage: GAME_MASTER/REAL_MONEY valida devuelve [] y total 0 -no admite pujas-', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publishOfficial(officialCommand('official-history-empty'))
+
+    await expect(
+      repository.listBidHistoryPage({ auctionId: 'official-history-empty', page: 1, pageSize: 20 }),
+    ).resolves.toEqual({ items: [], total: 0 })
+  })
+
+  it('listBidHistoryPage: una puja la devuelve sin bidderId', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publish(command('auction-history-one'))
+    const firstBid = bid(
+      'bid-h1',
+      'auction-history-one',
+      'bidder-1',
+      20,
+      new Date('2026-09-21T12:00:10.000Z'),
+      null,
+    )
+    await repository.persistBid(firstBid)
+
+    await expect(
+      repository.listBidHistoryPage({ auctionId: 'auction-history-one', page: 1, pageSize: 20 }),
+    ).resolves.toEqual({
+      items: [{ id: 'bid-h1', amountCredits: 20, placedAt: firstBid.snapshot().placedAt }],
+      total: 1,
+    })
+  })
+
+  it('listBidHistoryPage: multiples pujas, orden estable placedAt/id y total correcto', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publish(command('auction-history-many', 'operation-many', 1))
+    const bids = [
+      bid(
+        'bid-m1',
+        'auction-history-many',
+        'bidder-1',
+        10,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      ),
+      bid(
+        'bid-m2',
+        'auction-history-many',
+        'bidder-2',
+        20,
+        new Date('2026-09-21T12:00:20.000Z'),
+        10,
+      ),
+      bid(
+        'bid-m3',
+        'auction-history-many',
+        'bidder-3',
+        30,
+        new Date('2026-09-21T12:00:30.000Z'),
+        20,
+      ),
+    ]
+    for (const oneBid of bids) {
+      await repository.persistBid(oneBid)
+    }
+
+    const result = await repository.listBidHistoryPage({
+      auctionId: 'auction-history-many',
+      page: 1,
+      pageSize: 20,
+    })
+
+    expect(result.total).toBe(3)
+    expect(result.items.map((item) => item.id)).toEqual(['bid-m1', 'bid-m2', 'bid-m3'])
+    for (const item of result.items) {
+      expect(item).not.toHaveProperty('bidderId')
+    }
+  })
+
+  it('listBidHistoryPage: pagina 1 y pagina 2 no se solapan y respetan pageSize', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publish(command('auction-history-paged', 'operation-paged', 1))
+    const bids = [
+      bid(
+        'bid-p1',
+        'auction-history-paged',
+        'bidder-1',
+        10,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      ),
+      bid(
+        'bid-p2',
+        'auction-history-paged',
+        'bidder-2',
+        20,
+        new Date('2026-09-21T12:00:20.000Z'),
+        10,
+      ),
+      bid(
+        'bid-p3',
+        'auction-history-paged',
+        'bidder-3',
+        30,
+        new Date('2026-09-21T12:00:30.000Z'),
+        20,
+      ),
+    ]
+    for (const oneBid of bids) {
+      await repository.persistBid(oneBid)
+    }
+
+    const firstPage = await repository.listBidHistoryPage({
+      auctionId: 'auction-history-paged',
+      page: 1,
+      pageSize: 2,
+    })
+    const secondPage = await repository.listBidHistoryPage({
+      auctionId: 'auction-history-paged',
+      page: 2,
+      pageSize: 2,
+    })
+
+    expect(firstPage.items.map((item) => item.id)).toEqual(['bid-p1', 'bid-p2'])
+    expect(firstPage.total).toBe(3)
+    expect(secondPage.items.map((item) => item.id)).toEqual(['bid-p3'])
+    expect(secondPage.total).toBe(3)
+  })
+
+  it('listBidHistoryPage: no mezcla pujas entre subastas distintas', async () => {
+    const repository = new InMemoryAuctionRepository()
+    await repository.publish(command('auction-isolated-a', 'operation-a', 1))
+    await repository.publish(command('auction-isolated-b', 'operation-b', 1))
+    await repository.persistBid(
+      bid(
+        'bid-a1',
+        'auction-isolated-a',
+        'bidder-1',
+        10,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      ),
+    )
+    await repository.persistBid(
+      bid(
+        'bid-b1',
+        'auction-isolated-b',
+        'bidder-2',
+        10,
+        new Date('2026-09-21T12:00:10.000Z'),
+        null,
+      ),
+    )
+
+    const pageA = await repository.listBidHistoryPage({
+      auctionId: 'auction-isolated-a',
+      page: 1,
+      pageSize: 20,
+    })
+
+    expect(pageA.items.map((item) => item.id)).toEqual(['bid-a1'])
+    expect(pageA.total).toBe(1)
+  })
+})
