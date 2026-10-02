@@ -414,6 +414,8 @@ export class AuctionController {
       ...detail.auction,
       currentBid: detail.currentBid,
       bidCount: detail.bidCount,
+      sellerDisplayName: detail.sellerDisplayName,
+      sellerAvatarUrl: detail.sellerAvatarUrl,
     }
   }
 

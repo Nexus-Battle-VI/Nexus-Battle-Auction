@@ -20,6 +20,7 @@ import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpO
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { HttpPublicationFeeClient } from '../../adapters/outbound/http/HttpPublicationFeeClient'
+import { HttpSellerPublicProfileClient } from '../../adapters/outbound/http/HttpSellerPublicProfileClient'
 import { HttpSellerSanctionClient } from '../../adapters/outbound/http/HttpSellerSanctionClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
 import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
@@ -31,6 +32,7 @@ import {
   UnavailableOfficialAuctionEligibility,
   UnavailableProductInventory,
   UnavailablePublicationFee,
+  UnavailableSellerPublicProfile,
   UnavailableSellerSanctions,
   UnavailableWallet,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
@@ -139,6 +141,10 @@ import {
   PUBLICATION_FEE,
   type PublicationFeePort,
 } from '../../application/ports/PublicationFeePort'
+import {
+  SELLER_PUBLIC_PROFILE,
+  type SellerPublicProfilePort,
+} from '../../application/ports/SellerPublicProfilePort'
 import {
   SELLER_SANCTIONS,
   type SellerSanctionPort,
@@ -828,6 +834,29 @@ export const createWatchlistEventPublisher = (
     },
 
     {
+      provide: SELLER_PUBLIC_PROFILE,
+
+      useFactory: (
+        config: AppConfig,
+        logger: Logger,
+        clock: ClockPort,
+      ): SellerPublicProfilePort => {
+        if (config.accountBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailableSellerPublicProfile()
+        }
+        return new HttpSellerPublicProfileClient({
+          baseUrl: config.accountBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.accountRequestTimeoutMs,
+          logger,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+
+    {
       provide: WATCHLIST_EVENT_PUBLISHER,
       useFactory: createWatchlistEventPublisher,
       inject: [APP_CONFIG, CLOCK],
@@ -926,10 +955,13 @@ export const createWatchlistEventPublisher = (
     {
       provide: GetAuctionDetail,
 
-      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
-        new GetAuctionDetail(repository),
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        sellerProfile: SellerPublicProfilePort,
+        logger: Logger,
+      ): GetAuctionDetail => new GetAuctionDetail(repository, sellerProfile, logger),
 
-      inject: [AUCTION_REPOSITORY],
+      inject: [AUCTION_REPOSITORY, SELLER_PUBLIC_PROFILE, LOGGER],
     },
 
     {

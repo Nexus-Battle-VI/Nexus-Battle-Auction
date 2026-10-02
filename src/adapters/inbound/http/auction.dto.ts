@@ -402,6 +402,21 @@ export class AuctionDetailResponseDto {
 
   @ApiProperty({ minimum: 0, description: 'Total de pujas persistidas de la subasta.' })
   bidCount!: number
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'Ana Ramirez',
+    description:
+      'Apodo publico del vendedor (sellerId), resuelto contra Account. Null si Account no lo resuelve.',
+  })
+  sellerDisplayName!: string | null
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Avatar publico del vendedor (sellerId), resuelto contra Account. Null si Account no lo resuelve.',
+  })
+  sellerAvatarUrl!: string | null
 }
 
 export class AuctionBidHistoryQueryDto {
