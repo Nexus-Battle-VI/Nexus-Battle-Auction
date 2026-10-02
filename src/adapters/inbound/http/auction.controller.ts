@@ -43,6 +43,7 @@ import {
 } from '../../../application/errors/ExternalDependencyError'
 import { PriceSortRequiresCreditsError } from '../../../application/errors/MarketplaceQueryError'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
+import { GetAuctionSuggestions } from '../../../application/use-cases/GetAuctionSuggestions'
 import { ListActiveAuctions } from '../../../application/use-cases/ListActiveAuctions'
 import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
 import { PublishAuction } from '../../../application/use-cases/PublishAuction'
@@ -52,6 +53,8 @@ import {
   AuctionDetailResponseDto,
   ActiveAuctionPageResponseDto,
   AuctionResponseDto,
+  AuctionSuggestionListResponseDto,
+  AuctionSuggestionsQueryDto,
   AutoBidConfigResponseDto,
   BidResponseDto,
   ClaimPendingProductsBatchItemResponseDto,
@@ -82,6 +85,7 @@ export class AuctionController {
     private readonly registerBid: RegisterBid,
     private readonly getAuctionDetail: GetAuctionDetail,
     private readonly listActiveAuctions: ListActiveAuctions,
+    private readonly getAuctionSuggestions: GetAuctionSuggestions,
     private readonly configureAutoBid: ConfigureAutoBid,
     private readonly getPendingClaims: GetPendingClaims,
     private readonly claimPendingProduct: ClaimPendingProduct,
@@ -174,6 +178,58 @@ export class AuctionController {
       // que antes de existir los filtros.
       throw error instanceof PriceSortRequiresCreditsError ||
         error instanceof ExternalDependencyUnavailableError ||
+        error instanceof ExternalContractError
+        ? toAuctionHttpException(error)
+        : error
+    }
+  }
+
+  /**
+   * HU-87.2.
+   *
+   * Declarada antes de ":auctionId" (igual que "me/pending-claims") para que
+   * "suggestions" nunca se interprete como un id de subasta.
+   */
+  @Get('suggestions')
+  @Roles(Role.Player, Role.GameMaster)
+  @ApiOperation({ summary: 'Sugerencias de autocomplete para el marketplace' })
+  @ApiQuery({ name: 'q', required: true, type: String, minLength: 3, maxLength: 80 })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    minimum: 1,
+    maximum: 20,
+    example: 8,
+  })
+  @ApiQuery({ name: 'publisherType', required: false, enum: MARKETPLACE_PUBLISHER_TYPES })
+  @ApiQuery({ name: 'priceKind', required: false, enum: MARKETPLACE_PRICE_KINDS })
+  @ApiQuery({ name: 'hasBuyNow', required: false, enum: ['true', 'false'] })
+  @ApiOkResponse({ type: AuctionSuggestionListResponseDto })
+  @ApiBadRequestResponse({
+    description: 'q ausente, de menos de 3 o mas de 80 caracteres, o filtros invalidos.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
+  @ApiServiceUnavailableResponse({ description: 'Catalog no disponible.' })
+  async suggestions(
+    @Query() query: AuctionSuggestionsQueryDto,
+  ): Promise<AuctionSuggestionListResponseDto> {
+    try {
+      const result = await this.getAuctionSuggestions.execute({
+        q: query.q,
+        limit: query.limit ?? 8,
+        filters: {
+          publisherType: query.publisherType,
+          priceKind: query.priceKind,
+          hasBuyNow: query.hasBuyNow,
+        },
+      })
+      return { items: [...result.items] }
+    } catch (error: unknown) {
+      // Igual que el listado: solo Catalog caido tiene traduccion (503); el
+      // resto se propaga igual que antes de existir este endpoint.
+      throw error instanceof ExternalDependencyUnavailableError ||
         error instanceof ExternalContractError
         ? toAuctionHttpException(error)
         : error
