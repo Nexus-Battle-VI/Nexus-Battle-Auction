@@ -42,6 +42,7 @@ import {
   ExternalDependencyUnavailableError,
 } from '../../../application/errors/ExternalDependencyError'
 import { PriceSortRequiresCreditsError } from '../../../application/errors/MarketplaceQueryError'
+import { GetAuctionBidHistory } from '../../../application/use-cases/GetAuctionBidHistory'
 import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetail'
 import { GetAuctionSuggestions } from '../../../application/use-cases/GetAuctionSuggestions'
 import { ListActiveAuctions } from '../../../application/use-cases/ListActiveAuctions'
@@ -50,6 +51,8 @@ import { PublishAuction } from '../../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../../application/use-cases/RegisterBid'
 import { CurrentIdentity, Roles } from './auth/decorators'
 import {
+  AuctionBidHistoryPageResponseDto,
+  AuctionBidHistoryQueryDto,
   AuctionDetailResponseDto,
   ActiveAuctionPageResponseDto,
   AuctionResponseDto,
@@ -84,6 +87,7 @@ export class AuctionController {
     private readonly publishAuction: PublishAuction,
     private readonly registerBid: RegisterBid,
     private readonly getAuctionDetail: GetAuctionDetail,
+    private readonly getAuctionBidHistory: GetAuctionBidHistory,
     private readonly listActiveAuctions: ListActiveAuctions,
     private readonly getAuctionSuggestions: GetAuctionSuggestions,
     private readonly configureAutoBid: ConfigureAutoBid,
@@ -483,6 +487,71 @@ export class AuctionController {
       }
 
       throw toAuctionHttpException(error)
+    }
+  }
+
+  /**
+   * HU-88.
+   *
+   * Historial publico y paginado de pujas. Nunca expone `bidderId`: no existe
+   * todavia una regla de anonimizacion aprobada, asi que mientras tanto el
+   * minimo dato necesario es el monto y el momento de cada puja.
+   *
+   * Mismo rol que el detalle (`Role.Player`): no se amplian permisos en este
+   * incremento.
+   */
+  @Get(':auctionId/bids')
+  @Roles(Role.Player)
+  @ApiOperation({
+    summary: 'Consultar el historial publico y paginado de pujas de una subasta',
+  })
+  @ApiParam({
+    name: 'auctionId',
+    required: true,
+    description: 'Identificador de la subasta.',
+    example: 'auction-123',
+  })
+  @ApiOkResponse({
+    type: AuctionBidHistoryPageResponseDto,
+    description: 'Pagina del historial de pujas, ordenado por fecha ascendente.',
+  })
+  @ApiBadRequestResponse({
+    description: 'page/pageSize invalidos o un parametro desconocido.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Access token ausente o invalido.',
+  })
+  @ApiForbiddenResponse({
+    description: 'La identidad no posee el rol requerido.',
+  })
+  @ApiNotFoundResponse({
+    description: 'La subasta solicitada no existe.',
+  })
+  async bidHistory(
+    @Param('auctionId')
+    auctionId: string,
+
+    @Query()
+    query: AuctionBidHistoryQueryDto,
+  ): Promise<AuctionBidHistoryPageResponseDto> {
+    const page = query.page ?? 1
+    const pageSize = query.pageSize ?? 20
+
+    const result = await this.getAuctionBidHistory.execute({ auctionId, page, pageSize })
+
+    if (result === null) {
+      throw new NotFoundException({
+        statusCode: HttpStatus.NOT_FOUND,
+        code: 'AUCTION_NOT_FOUND',
+        message: 'La subasta solicitada no existe.',
+      })
+    }
+
+    return {
+      items: result.items.map((item) => ({ ...item })),
+      total: result.total,
+      page,
+      pageSize,
     }
   }
 

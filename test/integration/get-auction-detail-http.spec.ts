@@ -22,6 +22,10 @@ const auction = {
 
   productId: 'product-1',
 
+  publisherType: 'PLAYER' as const,
+
+  priceKind: 'CREDITS' as const,
+
   durationHours: 24 as const,
 
   publicationFeeCredits: 1,
@@ -30,11 +34,38 @@ const auction = {
 
   buyNowCredits: null,
 
+  currency: null,
+
+  minimumBidAmountMinor: null,
+
+  buyNowAmountMinor: null,
+
+  officialMark: null,
+
   status: 'ACTIVE' as const,
 
   publishedAt: new Date('2026-09-22T12:00:00.000Z'),
 
   closesAt: new Date('2026-09-23T12:00:00.000Z'),
+}
+
+const officialAuction = {
+  id: 'auction-official-web',
+  sellerId: 'game-master-1',
+  productId: 'product-official-1',
+  publisherType: 'GAME_MASTER' as const,
+  priceKind: 'REAL_MONEY' as const,
+  durationHours: 48 as const,
+  publicationFeeCredits: 0,
+  minimumBidCredits: null,
+  buyNowCredits: null,
+  currency: 'COP',
+  minimumBidAmountMinor: 90_000,
+  buyNowAmountMinor: 120_000,
+  officialMark: 'PREMIUM' as const,
+  status: 'ACTIVE' as const,
+  publishedAt: new Date('2026-09-24T12:00:00.000Z'),
+  closesAt: new Date('2026-09-26T12:00:00.000Z'),
 }
 
 const currentBid = {
@@ -90,6 +121,16 @@ const getAuctionDetailStub = {
 
           id: auctionId,
         },
+
+        currentBid: null,
+
+        bidCount: 0,
+      })
+    }
+
+    if (auctionId === officialAuction.id) {
+      return Promise.resolve({
+        auction: officialAuction,
 
         currentBid: null,
 
@@ -201,6 +242,37 @@ describe('GET detalle de subasta HU-63.6', () => {
     })
 
     expect(getAuctionDetailStub.execute).toHaveBeenCalledWith('auction-web')
+
+    expect(response.body).toMatchObject({
+      publisherType: 'PLAYER',
+      priceKind: 'CREDITS',
+      currency: null,
+      minimumBidAmountMinor: null,
+      buyNowAmountMinor: null,
+      officialMark: null,
+    })
+  })
+
+  it('GAME_MASTER/REAL_MONEY: responde 200 (ya no 404) con publisherType, priceKind, currency, officialMark y montos minor', async () => {
+    const response = await request(app.getHttpServer())
+      .get(`/api/v1/auctions/${officialAuction.id}`)
+      .set('Authorization', 'Bearer token-player')
+
+    expect(response.status).toBe(200)
+
+    expect(response.body).toMatchObject({
+      id: officialAuction.id,
+      publisherType: 'GAME_MASTER',
+      priceKind: 'REAL_MONEY',
+      currency: 'COP',
+      minimumBidAmountMinor: 90_000,
+      buyNowAmountMinor: 120_000,
+      officialMark: 'PREMIUM',
+      minimumBidCredits: null,
+      buyNowCredits: null,
+      currentBid: null,
+      bidCount: 0,
+    })
   })
 
   it('devuelve currentBid null cuando nadie ha pujado', async () => {

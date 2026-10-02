@@ -3053,4 +3053,263 @@ describe('Persistencia PostgreSQL', () => {
       ).rejects.toBeDefined()
     })
   })
+
+  describe('detalle unificado y historial publico de pujas (HU-88)', () => {
+    const publication = (id: string, sellerId = 'seller-1', productId = `product-${id}`) => ({
+      operationId: `operation-${id}`,
+      auction: Auction.publish({
+        auctionId: id,
+        sellerId,
+        productId,
+        durationHours: 24,
+        minimumBidCredits: 10,
+        buyNowCredits: 20,
+        publishedAt: new Date('2026-09-21T12:00:00.000Z'),
+        eligibility: {
+          productOwnedBySeller: true,
+          productInUse: false,
+          productTradable: true,
+          sellerHasActiveSanctions: false,
+          activeAuctionCount: 0,
+        },
+      }),
+      inventoryCommitmentId: `commitment-${id}`,
+      feeChargeId: `charge-${id}`,
+    })
+
+    const officialPublication = (id: string) => ({
+      operationId: `operation-${id}`,
+      auction: OfficialAuction.publish({
+        auctionId: id,
+        publisherId: 'upb-company-subject',
+        publisherType: AuctionPublisherType.GameMaster,
+        productId: `exclusive-${id}`,
+        durationHours: 48,
+        pricing: {
+          kind: AuctionPriceKind.RealMoney,
+          minimumBid: { amountMinor: 150_000, currency: 'COP' },
+          buyNow: { amountMinor: 300_000, currency: 'COP' },
+        },
+        mark: OfficialAuctionMark.Premium,
+        publishedAt: new Date('2026-09-21T12:00:00.000Z'),
+      }),
+    })
+
+    const bid = (
+      bidId: string,
+      auctionId: string,
+      bidderId: string,
+      amountCredits: number,
+      placedAt: Date,
+      currentBidCredits: number | null,
+    ) =>
+      Bid.register({
+        bidId,
+        auctionId,
+        bidderId,
+        amountCredits,
+        placedAt,
+        eligibility: {
+          auctionStatus: 'ACTIVE',
+          sellerId: 'seller-1',
+          currentBidCredits,
+          minimumIncrementCredits: 10,
+          lastBidAtByBidder: null,
+          activeBidCount: 0,
+        },
+      })
+
+    beforeEach(async () => {
+      await sql`
+        truncate
+          auction_settlement_releases,
+          auction_settlements,
+          auction_early_closure_notifications,
+          auction_bid_credit_failures,
+          auction_bid_credit_operations,
+          auction_bids,
+          auction_publication_operations,
+          auction_audit_log,
+          auction_publication_failures,
+          outbox_events,
+          auctions
+        restart identity cascade
+      `.execute(db)
+    })
+
+    it('findDetailById: PLAYER/CREDITS trae publisherType/priceKind y los campos oficiales en null', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-detail-player'))
+
+      await expect(repository.findDetailById('auction-detail-player')).resolves.toMatchObject({
+        publisherType: 'PLAYER',
+        priceKind: 'CREDITS',
+        minimumBidCredits: 10,
+        buyNowCredits: 20,
+        currency: null,
+        minimumBidAmountMinor: null,
+        buyNowAmountMinor: null,
+        officialMark: null,
+      })
+    })
+
+    it('findDetailById: GAME_MASTER/REAL_MONEY ya no devuelve null -corrige el bug de toSnapshot-', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(officialPublication('official-detail-1'))
+
+      await expect(repository.findDetailById('official-detail-1')).resolves.toMatchObject({
+        publisherType: 'GAME_MASTER',
+        priceKind: 'REAL_MONEY',
+        currency: 'COP',
+        minimumBidAmountMinor: 150_000,
+        buyNowAmountMinor: 300_000,
+        officialMark: OfficialAuctionMark.Premium,
+        minimumBidCredits: null,
+        buyNowCredits: null,
+      })
+    })
+
+    it('findDetailById: subasta inexistente devuelve null', async () => {
+      const repository = new PostgresAuctionRepository(db)
+
+      await expect(repository.findDetailById('auction-missing')).resolves.toBeNull()
+    })
+
+    it('listBidHistoryPage: bidCount real contado en base de datos para 0, 1 y multiples pujas', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-count'))
+
+      await expect(repository.countBids('auction-count')).resolves.toBe(0)
+
+      await repository.persistBid(
+        bid(
+          'bid-count-1',
+          'auction-count',
+          'bidder-1',
+          20,
+          new Date('2026-09-21T12:00:10.000Z'),
+          null,
+        ),
+      )
+      await expect(repository.countBids('auction-count')).resolves.toBe(1)
+
+      await repository.persistBid(
+        bid(
+          'bid-count-2',
+          'auction-count',
+          'bidder-2',
+          30,
+          new Date('2026-09-21T12:00:20.000Z'),
+          20,
+        ),
+      )
+      await expect(repository.countBids('auction-count')).resolves.toBe(2)
+    })
+
+    it('listBidHistoryPage: filtra por auctionId, no mezcla pujas entre subastas', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-isolated-a'))
+      await repository.publish(publication('auction-isolated-b'))
+      await repository.persistBid(
+        bid(
+          'bid-iso-a1',
+          'auction-isolated-a',
+          'bidder-1',
+          20,
+          new Date('2026-09-21T12:00:10.000Z'),
+          null,
+        ),
+      )
+      await repository.persistBid(
+        bid(
+          'bid-iso-b1',
+          'auction-isolated-b',
+          'bidder-2',
+          20,
+          new Date('2026-09-21T12:00:10.000Z'),
+          null,
+        ),
+      )
+
+      const pageA = await repository.listBidHistoryPage({
+        auctionId: 'auction-isolated-a',
+        page: 1,
+        pageSize: 20,
+      })
+
+      expect(pageA.total).toBe(1)
+      expect(pageA.items.map((item) => item.id)).toEqual(['bid-iso-a1'])
+    })
+
+    it('listBidHistoryPage: orden estable placedAt/id, paginacion LIMIT/OFFSET y total real', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-history-paged'))
+      const bids = [
+        bid(
+          'bid-hp-1',
+          'auction-history-paged',
+          'bidder-1',
+          10,
+          new Date('2026-09-21T12:00:10.000Z'),
+          null,
+        ),
+        bid(
+          'bid-hp-2',
+          'auction-history-paged',
+          'bidder-2',
+          20,
+          new Date('2026-09-21T12:00:20.000Z'),
+          10,
+        ),
+        bid(
+          'bid-hp-3',
+          'auction-history-paged',
+          'bidder-3',
+          30,
+          new Date('2026-09-21T12:00:30.000Z'),
+          20,
+        ),
+      ]
+      for (const oneBid of bids) {
+        await repository.persistBid(oneBid)
+      }
+
+      const firstPage = await repository.listBidHistoryPage({
+        auctionId: 'auction-history-paged',
+        page: 1,
+        pageSize: 2,
+      })
+      const secondPage = await repository.listBidHistoryPage({
+        auctionId: 'auction-history-paged',
+        page: 2,
+        pageSize: 2,
+      })
+
+      expect(firstPage.items.map((item) => item.id)).toEqual(['bid-hp-1', 'bid-hp-2'])
+      expect(firstPage.total).toBe(3)
+      expect(secondPage.items.map((item) => item.id)).toEqual(['bid-hp-3'])
+      expect(secondPage.total).toBe(3)
+      for (const item of [...firstPage.items, ...secondPage.items]) {
+        expect(item).not.toHaveProperty('bidderId')
+      }
+    })
+
+    it('listBidHistoryPage: subasta existente sin pujas devuelve [] y total 0 (no 404)', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publish(publication('auction-no-bids'))
+
+      await expect(
+        repository.listBidHistoryPage({ auctionId: 'auction-no-bids', page: 1, pageSize: 20 }),
+      ).resolves.toEqual({ items: [], total: 0 })
+    })
+
+    it('listBidHistoryPage: GAME_MASTER/REAL_MONEY valida devuelve [] y total 0 -no admite pujas, solo compra inmediata-', async () => {
+      const repository = new PostgresAuctionRepository(db)
+      await repository.publishOfficial(officialPublication('official-no-bids'))
+
+      await expect(
+        repository.listBidHistoryPage({ auctionId: 'official-no-bids', page: 1, pageSize: 20 }),
+      ).resolves.toEqual({ items: [], total: 0 })
+    })
+  })
 })

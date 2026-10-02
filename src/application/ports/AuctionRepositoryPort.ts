@@ -1,4 +1,4 @@
-import type { Auction, AuctionSnapshot } from '../../domain/entities/Auction'
+import type { Auction, AuctionSnapshot, AuctionStatus } from '../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../domain/entities/AutoBidConfig'
 import type { AuctionClosingResult } from '../../domain/entities/AuctionClosingResult'
 import type { Bid, BidSnapshot } from '../../domain/entities/Bid'
@@ -88,6 +88,67 @@ export interface OfficialActiveAuctionListItem extends ActiveAuctionListItemBase
 }
 
 export type ActiveAuctionListItem = PlayerActiveAuctionListItem | OfficialActiveAuctionListItem
+
+/**
+ * Lectura unificada de una subasta para HU-88, independiente de su estado
+ * (a diferencia de `ActiveAuctionListItem`, que solo cubre `ACTIVE`): el
+ * detalle debe seguir mostrando una subasta `FINISHED`/`SOLD`. Mismo
+ * vocabulario que `ActiveAuctionListItem` -no se inventa uno nuevo-, sin
+ * `currentBidAmount`/`bidCount`: esos los sigue resolviendo `GetAuctionDetail`
+ * con `findLeadingBid`/`countBids`, que no cambian de semantica.
+ */
+interface AuctionDetailSnapshotBase {
+  readonly id: string
+  readonly sellerId: string
+  readonly productId: string
+  readonly durationHours: 24 | 48
+  readonly publicationFeeCredits: number
+  readonly status: AuctionStatus
+  readonly publishedAt: Date
+  readonly closesAt: Date
+}
+
+export interface PlayerAuctionDetailSnapshot extends AuctionDetailSnapshotBase {
+  readonly publisherType: 'PLAYER'
+  readonly priceKind: 'CREDITS'
+  readonly minimumBidCredits: number
+  readonly buyNowCredits: number | null
+  readonly currency: null
+  readonly minimumBidAmountMinor: null
+  readonly buyNowAmountMinor: null
+  readonly officialMark: null
+}
+
+export interface OfficialAuctionDetailSnapshot extends AuctionDetailSnapshotBase {
+  readonly publisherType: 'GAME_MASTER'
+  readonly priceKind: 'REAL_MONEY'
+  readonly minimumBidCredits: null
+  readonly buyNowCredits: null
+  readonly currency: string
+  readonly minimumBidAmountMinor: number
+  readonly buyNowAmountMinor: number | null
+  readonly officialMark: 'OFFICIAL' | 'PREMIUM'
+}
+
+export type AuctionDetailSnapshot = PlayerAuctionDetailSnapshot | OfficialAuctionDetailSnapshot
+
+/** Pagina publica del historial de pujas (HU-88): nunca incluye `bidderId`. */
+export interface BidHistoryItem {
+  readonly id: string
+  readonly amountCredits: number
+  readonly placedAt: Date
+}
+
+export interface BidHistoryPageInput {
+  readonly auctionId: string
+  readonly page: number
+  readonly pageSize: number
+}
+
+export interface BidHistoryPage {
+  readonly items: readonly BidHistoryItem[]
+  readonly total: number
+}
 
 /** Filtros opcionales del marketplace; ausentes = sin restriccion. */
 export interface ActiveAuctionFilters {
@@ -245,6 +306,14 @@ export interface AuctionRepositoryPort {
 
   findById(auctionId: string): Promise<AuctionSnapshot | null>
   findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null>
+
+  /**
+   * HU-88: detalle unificado PLAYER/GAME_MASTER en cualquier estado. NO
+   * reemplaza a `findById` (CREDITS-only, usado por reglas de negocio de
+   * puja/auto-puja/compra/publicacion/watchlist que no deben ver oficiales).
+   */
+  findDetailById(auctionId: string): Promise<AuctionDetailSnapshot | null>
+
   findAuctionAggregate(auctionId: string): Promise<Auction | null>
   findInventoryCommitmentId(auctionId: string): Promise<string | null>
   finishAuction(command: FinishAuctionCommand): Promise<void>
@@ -268,6 +337,13 @@ export interface AuctionRepositoryPort {
 
   /** Total de pujas persistidas de la subasta (buy-now no cuenta). */
   countBids(auctionId: string): Promise<number>
+
+  /**
+   * Pagina publica del historial de pujas (HU-88). Nunca expone `bidderId`.
+   * Orden estable `placedAt ASC, id ASC` -igual que `findBidHistory`, sin
+   * tocar su semantica interna, usada por settlement/recordatorios/auto-puja.
+   */
+  listBidHistoryPage(input: BidHistoryPageInput): Promise<BidHistoryPage>
 
   findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null>
 
