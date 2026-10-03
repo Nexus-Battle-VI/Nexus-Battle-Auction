@@ -135,6 +135,11 @@ export interface AppConfig {
   readonly auctionBuyNowPendingClaimRetrySchedulerEnabled: boolean
   readonly auctionBuyNowPendingClaimRetryPollIntervalMs: number
   readonly auctionBuyNowPendingClaimRetryBatchSize: number
+
+  readonly auctionCancellationReconcilerSchedulerEnabled: boolean
+  readonly auctionCancellationReconcilerPollIntervalMs: number
+  readonly auctionCancellationReconcilerBatchSize: number
+  readonly auctionCancellationReconcilerLeaseMs: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -518,6 +523,45 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  const auctionCancellationReconcilerSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionCancellationReconcilerPollIntervalMs = readInteger(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionCancellationReconcilerBatchSize = readInteger(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_BATCH_SIZE',
+    50,
+    1,
+    500,
+  )
+  const auctionCancellationReconcilerLeaseMs = readInteger(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_LEASE_MS',
+    60_000,
+    1_000,
+    600_000,
+  )
+  if (auctionCancellationReconcilerSchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (walletBaseUrl === '' || inventoryBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'WALLET_BASE_URL, INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
   return {
     nodeEnv,
 
@@ -602,5 +646,10 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionBuyNowPendingClaimRetrySchedulerEnabled,
     auctionBuyNowPendingClaimRetryPollIntervalMs,
     auctionBuyNowPendingClaimRetryBatchSize,
+
+    auctionCancellationReconcilerSchedulerEnabled,
+    auctionCancellationReconcilerPollIntervalMs,
+    auctionCancellationReconcilerBatchSize,
+    auctionCancellationReconcilerLeaseMs,
   }
 }

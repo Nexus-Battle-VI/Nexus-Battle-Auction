@@ -378,7 +378,7 @@ export class AuctionDetailResponseDto {
   officialMark!: 'OFFICIAL' | 'PREMIUM' | null
 
   @ApiProperty({
-    enum: ['ACTIVE', 'FINISHED', 'SOLD'],
+    enum: ['ACTIVE', 'FINISHED', 'SOLD', 'CANCELLED'],
   })
   status!: string
 
@@ -393,6 +393,14 @@ export class AuctionDetailResponseDto {
     format: 'date-time',
   })
   closesAt!: Date
+
+  @ApiPropertyOptional({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'HU-90: no nulo si y solo si status es CANCELLED.',
+  })
+  cancelledAt!: Date | null
 
   @ApiPropertyOptional({
     type: BidResponseDto,
@@ -646,6 +654,45 @@ export class ClaimPendingProductsBatchResponseDto {
     isArray: true,
   })
   results!: ClaimPendingProductsBatchItemResponseDto[]
+}
+
+/** HU-90. */
+export class AuctionCancellationResponseDto {
+  @ApiProperty()
+  auctionId!: string
+
+  @ApiProperty({ enum: ['CANCELLED'] })
+  status!: string
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  cancelledAt!: Date
+
+  @ApiProperty({
+    description: '50% de publicationFeeCredits (7.7.10): 1 -> 0.5; 3 -> 1.5.',
+  })
+  refundAmountCredits!: number
+
+  @ApiProperty({
+    enum: ['PENDING', 'CONFIRMED', 'RETRYABLE', 'TERMINAL_ERROR'],
+    description:
+      'Progreso del refund parcial en Wallet. PENDING/RETRYABLE: reintente la misma Idempotency-Key.',
+  })
+  walletRefundStatus!: string
+
+  @ApiProperty({
+    enum: ['PENDING', 'CONFIRMED', 'RETRYABLE', 'TERMINAL_ERROR'],
+    description:
+      'Progreso del release del producto en Player-Inventory. PENDING/RETRYABLE: reintente la misma Idempotency-Key.',
+  })
+  inventoryReleaseStatus!: string
+
+  @ApiProperty({
+    description: 'true si esta respuesta es el replay de una cancelacion ya confirmada.',
+  })
+  replayed!: boolean
 }
 
 export const assertIdempotencyKey = (value: string | undefined): string => {

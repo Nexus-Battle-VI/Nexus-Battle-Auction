@@ -525,6 +525,48 @@ describe('Configuracion del servicio', () => {
     )
   })
 
+  it('configura fail-closed el reconciler de cancelaciones (HU-90)', () => {
+    expect(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        WALLET_BASE_URL: 'http://wallet:3006',
+        INVENTORY_BASE_URL: 'http://inventory:3006',
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED: 'true',
+        AUCTION_CANCELLATION_RECONCILER_POLL_INTERVAL_MS: '45000',
+        AUCTION_CANCELLATION_RECONCILER_BATCH_SIZE: '30',
+        AUCTION_CANCELLATION_RECONCILER_LEASE_MS: '120000',
+      }),
+    ).toMatchObject({
+      auctionCancellationReconcilerSchedulerEnabled: true,
+      auctionCancellationReconcilerPollIntervalMs: 45_000,
+      auctionCancellationReconcilerBatchSize: 30,
+      auctionCancellationReconcilerLeaseMs: 120_000,
+    })
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED: 'true' })).toThrow(
+      /PERSISTENCE_DRIVER/,
+    )
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        INVENTORY_BASE_URL: 'http://inventory:3006',
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED: 'true',
+      }),
+    ).toThrow(/WALLET_BASE_URL/)
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_POLL_INTERVAL_MS: '999' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_BATCH_SIZE: '501' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_LEASE_MS: '999' })).toThrow(
+      ConfigurationError,
+    )
+  })
+
   it.each(['999', '3600001', 'invalid'])(
     'rechaza poll interval de retry invalido: %s',
     (interval) => {
