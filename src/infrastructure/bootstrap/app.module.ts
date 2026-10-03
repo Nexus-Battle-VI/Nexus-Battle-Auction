@@ -61,6 +61,7 @@ import {
   type WatchlistRepositoryPort,
 } from '../../application/ports/WatchlistRepositoryPort'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
+import { InMemoryAuctionCancellationRepository } from '../../adapters/outbound/persistence/InMemoryAuctionCancellationRepository'
 import { InMemoryAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPublicationIntentRepository'
 import { InMemoryAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
 import { InMemoryAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
@@ -70,6 +71,7 @@ import { InMemoryAuctionSettlementWorkRepository } from '../../adapters/outbound
 import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { InMemoryEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
+import { PostgresAuctionCancellationRepository } from '../../adapters/outbound/persistence/PostgresAuctionCancellationRepository'
 import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
 import { PostgresAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
@@ -129,6 +131,10 @@ import {
   AUCTION_SETTLEMENT_REPOSITORY,
   type AuctionSettlementRepositoryPort,
 } from '../../application/ports/AuctionSettlementRepositoryPort'
+import {
+  AUCTION_CANCELLATION_REPOSITORY,
+  type AuctionCancellationRepositoryPort,
+} from '../../application/ports/AuctionCancellationRepositoryPort'
 import {
   AUCTION_SETTLEMENT_OUTBOX_REPOSITORY,
   type AuctionSettlementOutboxRepositoryPort,
@@ -194,6 +200,8 @@ import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
+import { CancelAuction } from '../../application/use-cases/CancelAuction'
+import { AuctionCancellationReconciler } from '../../application/use-cases/AuctionCancellationReconciler'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
 import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
 import { BuyNowPendingClaimRegistrationService } from '../../application/services/BuyNowPendingClaimRegistrationService'
@@ -209,6 +217,7 @@ import { AuctionPendingClaimExpirationScheduler } from '../scheduling/AuctionPen
 import { EarlyClosureRetryScheduler } from '../scheduling/EarlyClosureRetryScheduler'
 import { BuyNowPendingClaimRetryScheduler } from '../scheduling/BuyNowPendingClaimRetryScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
+import { AuctionCancellationReconcilerScheduler } from '../scheduling/AuctionCancellationReconcilerScheduler'
 import {
   NodeSchedulerTimer,
   SCHEDULER_TIMER,
@@ -447,12 +456,32 @@ export const createWatchlistEventPublisher = (
     },
 
     {
-      provide: AUCTION_REPOSITORY,
+      provide: AUCTION_CANCELLATION_REPOSITORY,
 
-      useFactory: (db: Kysely<Database> | null): AuctionRepositoryPort =>
-        db === null ? new InMemoryAuctionRepository() : new PostgresAuctionRepository(db),
+      useFactory: (db: Kysely<Database> | null): AuctionCancellationRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionCancellationRepository()
+          : new PostgresAuctionCancellationRepository(db),
 
       inject: [DATABASE],
+    },
+
+    {
+      provide: AUCTION_REPOSITORY,
+
+      // HU-90: en memoria, `cancelAuction()` necesita el MISMO
+      // `InMemoryAuctionCancellationRepository` que ya resolvio
+      // AUCTION_CANCELLATION_REPOSITORY -no un almacen duplicado-. El cast es
+      // seguro: ambas factories ramifican sobre el mismo DATABASE inyectado.
+      useFactory: (
+        db: Kysely<Database> | null,
+        cancellations: AuctionCancellationRepositoryPort,
+      ): AuctionRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionRepository(cancellations as InMemoryAuctionCancellationRepository)
+          : new PostgresAuctionRepository(db),
+
+      inject: [DATABASE, AUCTION_CANCELLATION_REPOSITORY],
     },
 
     {
@@ -786,6 +815,64 @@ export const createWatchlistEventPublisher = (
         })
       },
       inject: [APP_CONFIG, CLOCK],
+    },
+
+    {
+      provide: CancelAuction,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        cancellations: AuctionCancellationRepositoryPort,
+        fees: PublicationFeePort,
+        inventory: ProductInventoryPort,
+        clock: ClockPort,
+      ): CancelAuction => new CancelAuction(auctions, cancellations, fees, inventory, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        AUCTION_CANCELLATION_REPOSITORY,
+        PUBLICATION_FEE,
+        PRODUCT_INVENTORY,
+        CLOCK,
+      ],
+    },
+
+    {
+      provide: AuctionCancellationReconciler,
+      useFactory: (
+        cancellations: AuctionCancellationRepositoryPort,
+        cancelAuction: CancelAuction,
+        clock: ClockPort,
+        logger: Logger,
+        identifiers: IdentifierGeneratorPort,
+        config: AppConfig,
+      ): AuctionCancellationReconciler =>
+        new AuctionCancellationReconciler(cancellations, cancelAuction, clock, logger, {
+          batchSize: config.auctionCancellationReconcilerBatchSize,
+          leaseMs: config.auctionCancellationReconcilerLeaseMs,
+          workerId: `auction-cancellation-reconciler-${identifiers.generate()}`,
+        }),
+      inject: [
+        AUCTION_CANCELLATION_REPOSITORY,
+        CancelAuction,
+        CLOCK,
+        LOGGER,
+        IDENTIFIER_GENERATOR,
+        APP_CONFIG,
+      ],
+    },
+
+    {
+      provide: AuctionCancellationReconcilerScheduler,
+      useFactory: (
+        worker: AuctionCancellationReconciler,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionCancellationReconcilerScheduler =>
+        new AuctionCancellationReconcilerScheduler(worker, timer, logger, {
+          enabled: config.auctionCancellationReconcilerSchedulerEnabled,
+          pollIntervalMs: config.auctionCancellationReconcilerPollIntervalMs,
+        }),
+      inject: [AuctionCancellationReconciler, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
     },
 
     {

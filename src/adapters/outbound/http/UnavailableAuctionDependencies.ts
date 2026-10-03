@@ -98,9 +98,10 @@ export class UnavailablePublicationFee implements PublicationFeePort {
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
   }
 
-  refund(operationId: string, chargeId: string): Promise<void> {
+  refund(operationId: string, chargeId: string, amount: number): Promise<void> {
     void operationId
     void chargeId
+    void amount
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
   }
 }

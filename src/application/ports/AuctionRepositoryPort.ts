@@ -106,6 +106,8 @@ interface AuctionDetailSnapshotBase {
   readonly status: AuctionStatus
   readonly publishedAt: Date
   readonly closesAt: Date
+  /** HU-90: no nulo si y solo si `status === AuctionStatus.Cancelled`. */
+  readonly cancelledAt: Date | null
 }
 
 export interface PlayerAuctionDetailSnapshot extends AuctionDetailSnapshotBase {
@@ -286,6 +288,29 @@ export interface BuyNowOperationRecord {
   readonly completedAt: Date
 }
 
+/**
+ * HU-90. Transicion local ACTIVE -> CANCELLED, idempotencia por
+ * `operationId` y creacion del seguimiento de efectos externos, todo en la
+ * misma transaccion (mismo patron que `closeByBuyNow`).
+ */
+export interface CancelAuctionCommand {
+  readonly operationId: string
+  readonly auctionId: string
+  readonly sellerId: string
+  readonly productId: string
+  readonly cancelledAt: Date
+  readonly inventoryCommitmentId: string
+  readonly feeChargeId: string | null
+  readonly refundAmountCredits: number
+  readonly walletRefundOperationId: string
+  readonly inventoryReleaseOperationId: string
+}
+
+export interface CancelAuctionResult {
+  readonly auction: AuctionSnapshot
+  readonly replayed: boolean
+}
+
 export interface RecordBuyNowFailureCommand {
   readonly operationId: string
   readonly auctionId: string
@@ -316,7 +341,21 @@ export interface AuctionRepositoryPort {
 
   findAuctionAggregate(auctionId: string): Promise<Auction | null>
   findInventoryCommitmentId(auctionId: string): Promise<string | null>
+  /** HU-90: necesario para el refund del 50% al cancelar. */
+  findFeeChargeId(auctionId: string): Promise<string | null>
   finishAuction(command: FinishAuctionCommand): Promise<void>
+
+  /**
+   * HU-90. CAS `ACTIVE -> CANCELLED` serializado con el MISMO
+   * `pg_advisory_xact_lock(hashtext(auctionId))` que usan `persistBid` y
+   * `closeByBuyNow`, para que una puja o una compra inmediata concurrentes
+   * nunca puedan entrelazarse con una cancelacion a medias. Revalida
+   * ACTIVE/sin-pujas/ventana-de-6h bajo el lock -no confia en la lectura
+   * previa del llamador, igual que `persistBid` revalida contra el lider
+   * real-: lanza `AuctionRuleViolation` (mismos codigos que el dominio) si
+   * el estado cambio mientras se esperaba el lock.
+   */
+  cancelAuction(command: CancelAuctionCommand): Promise<CancelAuctionResult>
 
   /** Subastas activas cuyo cierre cae en `(from, until]`. */
   findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]>
