@@ -27,6 +27,8 @@ import type {
   BidHistoryPage,
   BidHistoryPageInput,
   BuyNowOperationRecord,
+  CancelAuctionCommand,
+  CancelAuctionResult,
   CloseAuctionByBuyNowCommand,
   CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
@@ -46,15 +48,18 @@ import type {
   AuctionSettlementCandidate,
   AuctionSettlementCandidateReaderPort,
 } from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
+import { AuctionRuleCode, AuctionRuleViolation } from '../../../domain/errors/AuctionRuleViolation'
 import {
   Auction,
   AuctionStatus,
+  CANCELLATION_WINDOW_MS,
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 import type { OfficialAuctionSnapshot } from '../../../domain/entities/OfficialAuction'
+import { InMemoryAuctionCancellationRepository } from './InMemoryAuctionCancellationRepository'
 
 interface OperationRecord {
   readonly hash: string
@@ -157,6 +162,11 @@ const buyNowHashOf = (command: CloseAuctionByBuyNowCommand): string =>
     .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]))
     .digest('hex')
 
+const cancellationHashOf = (command: CancelAuctionCommand): string =>
+  createHash('sha256')
+    .update(JSON.stringify([command.auctionId, command.sellerId]))
+    .digest('hex')
+
 type ActiveListItem = ActiveAuctionList['items'][number]
 
 const byId = (left: ActiveListItem, right: ActiveListItem): number =>
@@ -215,6 +225,10 @@ export class InMemoryAuctionRepository
 
   private readonly inventoryCommitmentIds = new Map<string, string>()
 
+  private readonly feeChargeIds = new Map<string, string>()
+
+  private readonly cancellationOperations = new Map<string, OperationRecord>()
+
   private readonly officialAuctions = new Map<string, OfficialAuctionSnapshot>()
 
   private readonly operations = new Map<string, OperationRecord>()
@@ -234,6 +248,17 @@ export class InMemoryAuctionRepository
   private readonly buyNowOperations = new Map<string, BuyNowOperationEntry>()
 
   private readonly buyNowFailures = new Map<string, RecordBuyNowFailureCommand>()
+
+  /**
+   * HU-90: `cancellations` es el MISMO `InMemoryAuctionCancellationRepository`
+   * que recibe `CancelAuction` -no un almacen paralelo-, igual que
+   * `InMemoryAuctionCommitmentRepository` de Player-Inventory recibe el
+   * repositorio de inventario del que depende. Opcional para no romper a
+   * quienes construyen este repositorio sin tocar cancelacion.
+   */
+  constructor(
+    private readonly cancellations: InMemoryAuctionCancellationRepository = new InMemoryAuctionCancellationRepository(),
+  ) {}
 
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     const hash = hashOf(command)
@@ -265,6 +290,7 @@ export class InMemoryAuctionRepository
 
     this.auctions.set(snapshot.id, snapshot)
     this.inventoryCommitmentIds.set(snapshot.id, command.inventoryCommitmentId)
+    this.feeChargeIds.set(snapshot.id, command.feeChargeId)
 
     this.operations.set(command.operationId, {
       hash,
@@ -466,6 +492,7 @@ export class InMemoryAuctionRepository
         status: player.status,
         publishedAt: new Date(player.publishedAt),
         closesAt: new Date(player.closesAt),
+        cancelledAt: player.cancelledAt ?? null,
         publisherType: 'PLAYER',
         priceKind: 'CREDITS',
         minimumBidCredits: player.minimumBidCredits,
@@ -489,6 +516,7 @@ export class InMemoryAuctionRepository
         status: official.status,
         publishedAt: new Date(official.publishedAt),
         closesAt: new Date(official.closesAt),
+        cancelledAt: null,
         publisherType: 'GAME_MASTER',
         priceKind: 'REAL_MONEY',
         minimumBidCredits: null,
@@ -544,6 +572,10 @@ export class InMemoryAuctionRepository
 
   findInventoryCommitmentId(auctionId: string): Promise<string | null> {
     return Promise.resolve(this.inventoryCommitmentIds.get(auctionId) ?? null)
+  }
+
+  findFeeChargeId(auctionId: string): Promise<string | null> {
+    return Promise.resolve(this.feeChargeIds.get(auctionId) ?? null)
   }
 
   /** Replica la ventana `(from, until]` utilizada por PostgreSQL. */
@@ -905,6 +937,77 @@ export class InMemoryAuctionRepository
       transactionId: command.transactionId,
       replayed: false,
     })
+  }
+
+  /** HU-90: mismo esqueleto que `closeByBuyNow`, ver el comentario de la version Postgres. */
+  cancelAuction(command: CancelAuctionCommand): Promise<CancelAuctionResult> {
+    const hash = cancellationHashOf(command)
+    const previous = this.cancellationOperations.get(command.operationId)
+
+    if (previous !== undefined) {
+      if (previous.hash !== hash) {
+        return Promise.reject(new IdempotencyConflictError())
+      }
+      const auction = this.auctions.get(previous.auctionId)
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+      return Promise.resolve({ auction, replayed: true })
+    }
+
+    const auction = this.auctions.get(command.auctionId)
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+    if (auction.status !== AuctionStatus.Active) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        ),
+      )
+    }
+    if (this.countStoredBids(command.auctionId) > 0) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionHasBids,
+          'Una subasta con pujas registradas no puede cancelarse manualmente.',
+        ),
+      )
+    }
+    if (auction.closesAt.getTime() - command.cancelledAt.getTime() <= CANCELLATION_WINDOW_MS) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionCancellationWindowClosed,
+          'No se puede cancelar una subasta con 6 horas o menos para su cierre.',
+        ),
+      )
+    }
+
+    const cancelled: AuctionSnapshot = {
+      ...auction,
+      status: AuctionStatus.Cancelled,
+      cancelledAt: new Date(command.cancelledAt),
+    }
+    this.auctions.set(cancelled.id, cancelled)
+    this.cancellationOperations.set(command.operationId, {
+      hash,
+      auctionId: command.auctionId,
+    })
+    this.cancellations.createIfAbsent({
+      auctionId: command.auctionId,
+      operationId: command.operationId,
+      sellerId: command.sellerId,
+      productId: command.productId,
+      inventoryCommitmentId: command.inventoryCommitmentId,
+      feeChargeId: command.feeChargeId,
+      refundAmountCredits: command.refundAmountCredits,
+      walletRefundOperationId: command.walletRefundOperationId,
+      inventoryReleaseOperationId: command.inventoryReleaseOperationId,
+      cancelledAt: command.cancelledAt,
+    })
+
+    return Promise.resolve({ auction: cancelled, replayed: false })
   }
 
   recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {

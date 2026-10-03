@@ -56,6 +56,7 @@ describe('Dominio de publicacion de subasta HU-62', () => {
       status: AuctionStatus.Active,
       publishedAt,
       closesAt: new Date(closesAt),
+      cancelledAt: null,
     })
   })
 

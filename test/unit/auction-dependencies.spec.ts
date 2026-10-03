@@ -149,7 +149,7 @@ describe('Dependencias de HU-62 aun no publicadas', () => {
     await expect(
       wallet.charge({ operationId: 'operation', sellerId: 'seller', amount: 1 }),
     ).rejects.toBeInstanceOf(ExternalDependencyUnavailableError)
-    await expect(wallet.refund('operation', 'charge')).rejects.toBeInstanceOf(
+    await expect(wallet.refund('operation', 'charge', 0.5)).rejects.toBeInstanceOf(
       ExternalDependencyUnavailableError,
     )
   })
