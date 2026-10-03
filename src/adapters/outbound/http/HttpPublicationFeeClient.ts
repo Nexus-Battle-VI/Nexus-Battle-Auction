@@ -80,9 +80,9 @@ export class HttpPublicationFeeClient implements PublicationFeePort {
     return { chargeId: payload.chargeId }
   }
 
-  async refund(operationId: string, chargeId: string): Promise<void> {
+  async refund(operationId: string, chargeId: string, amount: number): Promise<void> {
     const path = `/api/internal/v1/wallet/auction-publication-fees/${encodeURIComponent(chargeId)}/refunds`
-    const body = { operationId }
+    const body = { operationId, amount }
 
     const response = await this.request('POST', path, body)
 

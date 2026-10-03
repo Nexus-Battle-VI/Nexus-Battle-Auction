@@ -131,25 +131,29 @@ describe('HttpPublicationFeeClient.refund', () => {
   it('firma la ruta con el chargeId codificado en el path', async () => {
     const fetchImpl = mockFetch(() => Promise.resolve(response(200, {})))
 
-    await client(fetchImpl).refund('operation-1', 'charge/1')
+    await client(fetchImpl).refund('operation-1', 'charge/1', 0.5)
 
     const [url, request] = fetchImpl.mock.calls[0]!
     expect(url).toBe(
       'http://wallet:3006/api/internal/v1/wallet/auction-publication-fees/charge%2F1/refunds',
     )
     expect(request?.method).toBe('POST')
+    expect(JSON.parse(request?.body as string)).toEqual({
+      operationId: 'operation-1',
+      amount: 0.5,
+    })
   })
 
   it('trata un cargo ya inexistente (404) como reembolso resuelto', async () => {
     const fetchImpl = mockFetch(() => Promise.resolve(response(404, {})))
 
-    await expect(client(fetchImpl).refund('operation-1', 'charge-1')).resolves.toBeUndefined()
+    await expect(client(fetchImpl).refund('operation-1', 'charge-1', 0.5)).resolves.toBeUndefined()
   })
 
   it('traduce un conflicto de operacion (409) a IdempotencyConflictError', async () => {
     const fetchImpl = mockFetch(() => Promise.resolve(response(409, {})))
 
-    await expect(client(fetchImpl).refund('operation-1', 'charge-1')).rejects.toBeInstanceOf(
+    await expect(client(fetchImpl).refund('operation-1', 'charge-1', 0.5)).rejects.toBeInstanceOf(
       IdempotencyConflictError,
     )
   })
@@ -157,7 +161,7 @@ describe('HttpPublicationFeeClient.refund', () => {
   it.each([500, 503])('falla cerrado ante HTTP %i', async (status) => {
     const fetchImpl = mockFetch(() => Promise.resolve(response(status, {})))
 
-    await expect(client(fetchImpl).refund('operation-1', 'charge-1')).rejects.toBeInstanceOf(
+    await expect(client(fetchImpl).refund('operation-1', 'charge-1', 0.5)).rejects.toBeInstanceOf(
       ExternalDependencyUnavailableError,
     )
   })
@@ -165,7 +169,7 @@ describe('HttpPublicationFeeClient.refund', () => {
   it('falla cerrado ante errores de red', async () => {
     const fetchImpl = mockFetch(() => Promise.reject(new TypeError('network error')))
 
-    await expect(client(fetchImpl).refund('operation-1', 'charge-1')).rejects.toBeInstanceOf(
+    await expect(client(fetchImpl).refund('operation-1', 'charge-1', 0.5)).rejects.toBeInstanceOf(
       ExternalDependencyUnavailableError,
     )
   })

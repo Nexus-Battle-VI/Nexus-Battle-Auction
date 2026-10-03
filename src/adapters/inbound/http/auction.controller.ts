@@ -32,6 +32,7 @@ import {
 
 import type { AuctionPendingClaimSnapshot } from '../../../application/ports/AuctionPendingClaimRepositoryPort'
 import { CLOCK, type ClockPort } from '../../../application/ports/ClockPort'
+import { CancelAuction } from '../../../application/use-cases/CancelAuction'
 import { ExecuteBuyNowUseCase } from '../../../application/use-cases/ExecuteBuyNowUseCase'
 import { Role, type VerifiedIdentity } from '../../../application/ports/TokenVerifierPort'
 import { ClaimPendingProduct } from '../../../application/use-cases/ClaimPendingProduct'
@@ -53,6 +54,7 @@ import { CurrentIdentity, Roles } from './auth/decorators'
 import {
   AuctionBidHistoryPageResponseDto,
   AuctionBidHistoryQueryDto,
+  AuctionCancellationResponseDto,
   AuctionDetailResponseDto,
   ActiveAuctionPageResponseDto,
   AuctionResponseDto,
@@ -97,6 +99,7 @@ export class AuctionController {
     @Inject(CLOCK)
     private readonly clock: ClockPort,
     private readonly executeBuyNow: ExecuteBuyNowUseCase,
+    private readonly cancelAuction: CancelAuction,
   ) {}
 
   /**
@@ -758,6 +761,74 @@ export class AuctionController {
         })
       }
       throw toBuyNowHttpException(error)
+    }
+  }
+
+  /**
+   * HU-90, `7.7.10`. Cancelacion manual del vendedor propietario. Solo
+   * cubre la cancelacion ya implementada (ACTIVE, sin pujas, mas de 6h
+   * para el cierre); CA-05 (cancelacion automatica) queda fuera de este PR.
+   */
+  @Post(':auctionId/cancel')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Role.Player)
+  @ApiOperation({ summary: 'Cancelar manualmente una subasta activa propia' })
+  @ApiParam({
+    name: 'auctionId',
+    required: true,
+    description: 'Identificador de la subasta.',
+    example: 'auction-123',
+  })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description: 'Identificador unico de hasta 128 caracteres para reintentos seguros.',
+  })
+  @ApiOkResponse({ type: AuctionCancellationResponseDto })
+  @ApiBadRequestResponse({ description: 'Idempotency-Key invalida.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({
+    description: 'Rol insuficiente o la identidad no es el vendedor propietario.',
+  })
+  @ApiNotFoundResponse({ description: 'La subasta no existe.' })
+  @ApiConflictResponse({
+    description:
+      'La subasta ya no esta activa (incluida una cancelacion ya confirmada), tiene pujas registradas, o la operacion ya se uso con otros datos.',
+  })
+  @ApiUnprocessableEntityResponse({
+    description: 'Faltan 6 horas o menos para el cierre (7.7.10).',
+  })
+  @ApiServiceUnavailableResponse({ description: 'Dependencia requerida no disponible.' })
+  async cancel(
+    @CurrentIdentity() identity: VerifiedIdentity,
+    @Param('auctionId') auctionId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+  ): Promise<AuctionCancellationResponseDto> {
+    try {
+      const operationId = assertIdempotencyKey(idempotencyKey)
+      const result = await this.cancelAuction.execute({
+        operationId,
+        auctionId,
+        sellerId: identity.subject,
+      })
+      return {
+        auctionId: result.auction.id,
+        status: result.auction.status,
+        cancelledAt: result.cancellation.cancelledAt,
+        refundAmountCredits: result.cancellation.refundAmountCredits,
+        walletRefundStatus: result.cancellation.walletRefundStatus,
+        inventoryReleaseStatus: result.cancellation.inventoryReleaseStatus,
+        replayed: result.replayed,
+      }
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message === 'INVALID_IDEMPOTENCY_KEY') {
+        throw new BadRequestException({
+          statusCode: 400,
+          code: 'INVALID_IDEMPOTENCY_KEY',
+          message: 'Idempotency-Key es obligatorio y debe ser valido.',
+        })
+      }
+      throw toAuctionHttpException(error)
     }
   }
 }
