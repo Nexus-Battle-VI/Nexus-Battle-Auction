@@ -80,6 +80,9 @@ export interface AppConfig {
   readonly notificationsBaseUrl: string | null
 
   readonly notificationsTimeoutMs: number
+  readonly auctionConfirmationDispatchEnabled: boolean
+  readonly auctionConfirmationDispatchBatchSize: number
+  readonly auctionConfirmationDispatchPollIntervalMs: number
 
   /**
    * URL interna del servidor de Notifications que recibe los eventos de
@@ -272,6 +275,38 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   const notificationsBaseUrl = readString(env, 'NOTIFICATIONS_BASE_URL', '')
 
   const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  const auctionConfirmationDispatchEnabled = readBoolean(
+    env,
+    'AUCTION_CONFIRMATION_DISPATCH_ENABLED',
+    false,
+  )
+  const auctionConfirmationDispatchBatchSize = readInteger(
+    env,
+    'AUCTION_CONFIRMATION_DISPATCH_BATCH_SIZE',
+    25,
+    1,
+    100,
+  )
+  const auctionConfirmationDispatchPollIntervalMs = readInteger(
+    env,
+    'AUCTION_CONFIRMATION_DISPATCH_POLL_INTERVAL_MS',
+    5_000,
+    1_000,
+    3_600_000,
+  )
+  if (auctionConfirmationDispatchEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser postgres cuando AUCTION_CONFIRMATION_DISPATCH_ENABLED=true.',
+      )
+    }
+    if (notificationsBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'NOTIFICATIONS_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_CONFIRMATION_DISPATCH_ENABLED=true.',
+      )
+    }
+  }
 
   const notificationsWatchlistBaseUrl = readString(env, 'NOTIFICATIONS_WATCHLIST_BASE_URL', '')
 
@@ -555,6 +590,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
 
     notificationsTimeoutMs,
+    auctionConfirmationDispatchEnabled,
+    auctionConfirmationDispatchBatchSize,
+    auctionConfirmationDispatchPollIntervalMs,
 
     notificationsWatchlistBaseUrl:
       notificationsWatchlistBaseUrl === '' ? null : notificationsWatchlistBaseUrl,

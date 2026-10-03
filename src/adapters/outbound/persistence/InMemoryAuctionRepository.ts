@@ -1,3 +1,10 @@
+import type {
+  AuctionConfirmationEvent,
+  AuctionConfirmationOutboxRepositoryPort,
+} from '../../../application/ports/AuctionConfirmationOutboxRepositoryPort'
+import type { AuctionBidAcceptedEventV1 } from '../../../domain/events/AuctionBidAcceptedEventV1'
+import type { AuctionPublishedEventV1 } from '../../../domain/events/AuctionPublishedEventV1'
+
 import { createHash } from 'node:crypto'
 
 import {
@@ -194,8 +201,16 @@ const activeAuctionComparator = (
 }
 
 export class InMemoryAuctionRepository
-  implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
+  implements
+    AuctionRepositoryPort,
+    AuctionSettlementCandidateReaderPort,
+    AuctionConfirmationOutboxRepositoryPort
 {
+  private readonly confirmationEvents = new Map<
+    string,
+    { readonly event: AuctionConfirmationEvent; publishedAt: Date | null }
+  >()
+
   private readonly auctions = new Map<string, AuctionSnapshot>()
 
   private readonly inventoryCommitmentIds = new Map<string, string>()
@@ -255,6 +270,24 @@ export class InMemoryAuctionRepository
       hash,
       auctionId: snapshot.id,
     })
+
+    const event: AuctionPublishedEventV1 = {
+      eventId: `${command.operationId}:published`,
+      eventType: 'auction.published',
+      eventVersion: 1,
+      aggregateId: snapshot.id,
+      occurredAt: snapshot.publishedAt.toISOString(),
+      producer: 'auction',
+      correlationId: command.operationId,
+      data: {
+        auctionId: snapshot.id,
+        sellerId: snapshot.sellerId,
+        productId: snapshot.productId,
+        publishedAt: snapshot.publishedAt.toISOString(),
+        closesAt: snapshot.closesAt.toISOString(),
+      },
+    }
+    this.confirmationEvents.set(event.eventId, { event, publishedAt: null })
 
     return Promise.resolve({
       auction: snapshot,
@@ -339,11 +372,52 @@ export class InMemoryAuctionRepository
 
   updateBidCreditOperation(command: UpdateBidCreditOperationCommand): Promise<void> {
     const previous = this.bidCreditOperations.get(command.operationId)
-
     if (previous === undefined) {
       return Promise.reject(new Error(`La operacion de creditos ${command.operationId} no existe.`))
     }
-
+    if (command.status === 'COMPLETED') {
+      if (
+        previous.reservationId !== command.reservationId ||
+        previous.previousReservationId !== command.previousReservationId
+      ) {
+        return Promise.reject(new IdempotencyConflictError())
+      }
+      if (previous.status === 'COMPLETED') return Promise.resolve()
+      if (previous.status !== 'BID_PERSISTED' || previous.reservationId === null) {
+        return Promise.reject(new Error('Solo una puja persistida con reserva puede completarse.'))
+      }
+      const auction = this.auctions.get(previous.auctionId)
+      const bid = this.bids.get(previous.bidId)?.snapshot
+      if (
+        auction === undefined ||
+        bid?.auctionId !== previous.auctionId ||
+        bid.bidderId !== previous.bidderId ||
+        bid.amountCredits !== previous.amountCredits
+      ) {
+        return Promise.reject(new Error('La operacion no coincide con una puja persistida.'))
+      }
+      const acceptedAt = command.updatedAt.toISOString()
+      const event: AuctionBidAcceptedEventV1 = {
+        eventId: `${command.operationId}:bid-accepted`,
+        eventType: 'auction.bid.accepted',
+        eventVersion: 1,
+        aggregateId: previous.auctionId,
+        occurredAt: acceptedAt,
+        producer: 'auction',
+        correlationId: command.operationId,
+        data: {
+          operationId: command.operationId,
+          auctionId: previous.auctionId,
+          productId: auction.productId,
+          sellerId: auction.sellerId,
+          bidderId: previous.bidderId,
+          bidId: previous.bidId,
+          amountCredits: previous.amountCredits,
+          acceptedAt,
+        },
+      }
+      this.confirmationEvents.set(event.eventId, { event, publishedAt: null })
+    }
     this.bidCreditOperations.set(command.operationId, {
       ...previous,
       status: command.status,
@@ -351,7 +425,6 @@ export class InMemoryAuctionRepository
       previousReservationId: command.previousReservationId,
       updatedAt: new Date(command.updatedAt),
     })
-
     return Promise.resolve()
   }
 
@@ -873,5 +946,27 @@ export class InMemoryAuctionRepository
 
   private count(sellerId: string): number {
     return [...this.auctions.values()].filter((auction) => auction.sellerId === sellerId).length
+  }
+  findPending(input: { readonly limit: number }): Promise<readonly AuctionConfirmationEvent[]> {
+    const events = [...this.confirmationEvents.values()]
+      .filter((entry) => entry.publishedAt === null)
+      .map((entry) => entry.event)
+      .sort(
+        (left, right) =>
+          Date.parse(left.occurredAt) - Date.parse(right.occurredAt) ||
+          left.eventId.localeCompare(right.eventId),
+      )
+      .slice(0, input.limit)
+      .map((event) => structuredClone(event))
+    return Promise.resolve(events)
+  }
+
+  markPublished(input: { readonly eventId: string; readonly publishedAt: Date }): Promise<void> {
+    const entry = this.confirmationEvents.get(input.eventId)
+    if (entry === undefined) {
+      return Promise.reject(new Error(`El evento ${input.eventId} no existe.`))
+    }
+    entry.publishedAt ??= new Date(input.publishedAt)
+    return Promise.resolve()
   }
 }
