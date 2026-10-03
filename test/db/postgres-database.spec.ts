@@ -22,6 +22,7 @@ import type {
 import { PersistBidWithCredits } from '../../src/application/use-cases/PersistBidWithCredits'
 import { PostgresAuctionSettlementRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionSettlementRepository'
 import { PostgresAuctionSettlementOutboxRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionSettlementOutboxRepository'
+import { PostgresAuctionConfirmationOutboxRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionConfirmationOutboxRepository'
 import { PostgresAuctionPendingClaimRepository } from '../../src/adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
 import { PostgresBidCreditOperationReader } from '../../src/adapters/outbound/persistence/PostgresBidCreditOperationReader'
 import {
@@ -2114,6 +2115,83 @@ describe('Persistencia PostgreSQL', () => {
           bidId: 'bid-lookup',
           reservationId: 'reservation-lookup',
         })
+      })
+    })
+
+    describe('outbox de confirmaciones HU-92.2', () => {
+      it('recupera publicacion y puja confirmada, y conserva pendiente solo lo no publicado', async () => {
+        const auctionId = 'confirmation-outbox'
+        const operationId = 'confirmation-outbox:bid'
+        const repository = new PostgresAuctionRepository(db)
+        await repository.publish(publication(auctionId))
+        const nextBid = bid(
+          `${auctionId}-bid`,
+          auctionId,
+          'bidder-1',
+          20,
+          new Date('2026-09-21T12:00:10.000Z'),
+          null,
+        )
+        await repository.createBidCreditOperation({
+          operationId,
+          bidId: nextBid.snapshot().id,
+          auctionId,
+          bidderId: 'bidder-1',
+          amountCredits: 20,
+          createdAt: now,
+        })
+        await repository.persistBid(nextBid, 'hold-confirmation', operationId)
+        await repository.updateBidCreditOperation({
+          operationId,
+          status: 'COMPLETED',
+          reservationId: 'hold-confirmation',
+          previousReservationId: null,
+          updatedAt: now,
+        })
+
+        const outbox = new PostgresAuctionConfirmationOutboxRepository(db)
+        const pending = await outbox.findPending({ limit: 10 })
+        expect(pending).toEqual([
+          expect.objectContaining({
+            eventType: 'auction.published',
+            aggregateId: auctionId,
+            data: expect.objectContaining({ sellerId: 'seller-1' }),
+          }),
+          expect.objectContaining({
+            eventId: `${operationId}:bid-accepted`,
+            eventType: 'auction.bid.accepted',
+            data: expect.objectContaining({ bidderId: 'bidder-1', amountCredits: 20 }),
+          }),
+        ])
+
+        await outbox.markPublished({ eventId: pending[0]!.eventId, publishedAt: now })
+        await expect(outbox.findPending({ limit: 10 })).resolves.toEqual([pending[1]])
+      })
+
+      it('rechaza limites, ids y contratos de puja invalidos', async () => {
+        const outbox = new PostgresAuctionConfirmationOutboxRepository(db)
+        await expect(outbox.findPending({ limit: 0 })).rejects.toThrow(/l[ií]mite/)
+        await expect(
+          outbox.markPublished({ eventId: 'missing-confirmation', publishedAt: now }),
+        ).rejects.toThrow('no existe')
+
+        await db
+          .insertInto('outbox_events')
+          .values({
+            id: 'invalid-bid-confirmation',
+            aggregate_id: 'auction-invalid-confirmation',
+            event_type: 'auction.bid.accepted.v1',
+            payload: sql`jsonb_build_object(
+              'eventType', 'auction.bid.accepted',
+              'eventVersion', 1,
+              'producer', 'auction',
+              'data', jsonb_build_object('amountCredits', 1)
+            )`,
+            occurred_at: now,
+            published_at: null,
+          })
+          .execute()
+        await expect(outbox.findPending({ limit: 10 })).rejects.toThrow('identificador')
       })
     })
 

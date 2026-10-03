@@ -69,6 +69,7 @@ import {
   AuctionPublisherType,
   type OfficialAuctionSnapshot,
 } from '../../../domain/entities/OfficialAuction'
+import type { AuctionBidAcceptedEventV1 } from '../../../domain/events/AuctionBidAcceptedEventV1'
 import type { Database } from './schema'
 
 type AuctionRow = Selectable<Database['auctions']>
@@ -850,20 +851,96 @@ export class PostgresAuctionRepository
   }
 
   async updateBidCreditOperation(command: UpdateBidCreditOperationCommand): Promise<void> {
-    const result = await this.db
-      .updateTable('auction_bid_credit_operations')
-      .set({
-        status: command.status,
-        reservation_id: command.reservationId,
-        previous_reservation_id: command.previousReservationId,
-        updated_at: command.updatedAt,
-      })
-      .where('operation_id', '=', command.operationId)
-      .executeTakeFirst()
+    await this.db.transaction().execute(async (transaction) => {
+      const operation = await transaction
+        .selectFrom('auction_bid_credit_operations')
+        .selectAll()
+        .where('operation_id', '=', command.operationId)
+        .forUpdate()
+        .executeTakeFirst()
 
-    if (result.numUpdatedRows === 0n) {
-      throw new Error(`La operacion de creditos ${command.operationId} no existe.`)
-    }
+      if (operation === undefined) {
+        throw new Error(`La operacion de creditos ${command.operationId} no existe.`)
+      }
+
+      if (command.status === 'COMPLETED' && operation.status === 'BID_PERSISTED') {
+        if (
+          operation.reservation_id !== command.reservationId ||
+          operation.previous_reservation_id !== command.previousReservationId
+        ) {
+          throw new IdempotencyConflictError()
+        }
+
+        if (operation.reservation_id === null) {
+          throw new Error('Solo una puja persistida con reserva puede completarse.')
+        }
+
+        const auction = await transaction
+          .selectFrom('auctions')
+          .select(['seller_id', 'product_id'])
+          .where('id', '=', operation.auction_id)
+          .executeTakeFirst()
+
+        const bid = await transaction
+          .selectFrom('auction_bids')
+          .select(['id', 'auction_id', 'bidder_id', 'amount_credits'])
+          .where('id', '=', operation.bid_id)
+          .executeTakeFirst()
+
+        if (
+          auction === undefined ||
+          bid?.auction_id !== operation.auction_id ||
+          bid.bidder_id !== operation.bidder_id ||
+          bid.amount_credits !== operation.amount_credits
+        ) {
+          throw new Error('La operacion no coincide con una puja persistida.')
+        }
+
+        const acceptedAt = command.updatedAt.toISOString()
+        const event: AuctionBidAcceptedEventV1 = {
+          eventId: `${command.operationId}:bid-accepted`,
+          eventType: 'auction.bid.accepted',
+          eventVersion: 1,
+          aggregateId: operation.auction_id,
+          occurredAt: acceptedAt,
+          producer: 'auction',
+          correlationId: command.operationId,
+          data: {
+            operationId: command.operationId,
+            auctionId: operation.auction_id,
+            productId: auction.product_id,
+            sellerId: auction.seller_id,
+            bidderId: operation.bidder_id,
+            bidId: operation.bid_id,
+            amountCredits: operation.amount_credits,
+            acceptedAt,
+          },
+        }
+
+        await transaction
+          .insertInto('outbox_events')
+          .values({
+            id: event.eventId,
+            aggregate_id: event.aggregateId,
+            event_type: 'auction.bid.accepted.v1',
+            payload: event,
+            occurred_at: command.updatedAt,
+            published_at: null,
+          })
+          .execute()
+      }
+
+      await transaction
+        .updateTable('auction_bid_credit_operations')
+        .set({
+          status: command.status,
+          reservation_id: command.reservationId,
+          previous_reservation_id: command.previousReservationId,
+          updated_at: command.updatedAt,
+        })
+        .where('operation_id', '=', command.operationId)
+        .executeTakeFirstOrThrow()
+    })
   }
 
   async findBidCreditOperation(operationId: string): Promise<BidCreditOperationSnapshot | null> {

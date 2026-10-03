@@ -1,3 +1,16 @@
+import {
+  AUCTION_CONFIRMATION_OUTBOX_REPOSITORY,
+  type AuctionConfirmationOutboxRepositoryPort,
+} from '../../application/ports/AuctionConfirmationOutboxRepositoryPort'
+import {
+  AUCTION_CONFIRMATION_EVENT_PUBLISHER,
+  type AuctionConfirmationEventPublisherPort,
+} from '../../application/ports/AuctionConfirmationEventPublisherPort'
+import { AuctionConfirmationOutboxDispatcher } from '../../application/use-cases/AuctionConfirmationOutboxDispatcher'
+import { PostgresAuctionConfirmationOutboxRepository } from '../../adapters/outbound/persistence/PostgresAuctionConfirmationOutboxRepository'
+import { HttpAuctionConfirmationEventPublisher } from '../../adapters/outbound/http/HttpAuctionConfirmationEventPublisher'
+import { AuctionConfirmationDispatchScheduler } from '../scheduling/AuctionConfirmationDispatchScheduler'
+
 import { Module, type CanActivate } from '@nestjs/common'
 import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
@@ -287,6 +300,82 @@ export const createWatchlistEventPublisher = (
   ],
 
   providers: [
+    {
+      provide: AUCTION_CONFIRMATION_OUTBOX_REPOSITORY,
+      useFactory: (
+        db: Kysely<Database> | null,
+        auctions: AuctionRepositoryPort,
+      ): AuctionConfirmationOutboxRepositoryPort => {
+        if (db !== null) return new PostgresAuctionConfirmationOutboxRepository(db)
+        if (!(auctions instanceof InMemoryAuctionRepository)) {
+          throw new Error('El outbox en memoria requiere la misma instancia de Auction.')
+        }
+        return auctions
+      },
+      inject: [DATABASE, AUCTION_REPOSITORY],
+    },
+    {
+      provide: AUCTION_CONFIRMATION_EVENT_PUBLISHER,
+      useFactory: (config: AppConfig, clock: ClockPort): AuctionConfirmationEventPublisherPort => {
+        if (!config.auctionConfirmationDispatchEnabled) {
+          return {
+            publish: (): Promise<void> =>
+              Promise.reject(new Error('El despacho de confirmaciones está desactivado.')),
+          }
+        }
+        if (config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null) {
+          throw new Error('Notifications requiere URL y secreto para entregar confirmaciones.')
+        }
+        return new HttpAuctionConfirmationEventPublisher({
+          baseUrl: config.notificationsBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.notificationsTimeoutMs,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, CLOCK],
+    },
+    {
+      provide: AuctionConfirmationOutboxDispatcher,
+      useFactory: (
+        outbox: AuctionConfirmationOutboxRepositoryPort,
+        publisher: AuctionConfirmationEventPublisherPort,
+        clock: ClockPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionConfirmationOutboxDispatcher =>
+        new AuctionConfirmationOutboxDispatcher(
+          outbox,
+          publisher,
+          clock,
+          logger,
+          config.auctionConfirmationDispatchBatchSize,
+          config.auctionConfirmationDispatchEnabled,
+        ),
+      inject: [
+        AUCTION_CONFIRMATION_OUTBOX_REPOSITORY,
+        AUCTION_CONFIRMATION_EVENT_PUBLISHER,
+        CLOCK,
+        LOGGER,
+        APP_CONFIG,
+      ],
+    },
+    {
+      provide: AuctionConfirmationDispatchScheduler,
+      useFactory: (
+        worker: AuctionConfirmationOutboxDispatcher,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionConfirmationDispatchScheduler =>
+        new AuctionConfirmationDispatchScheduler(worker, timer, logger, {
+          enabled: config.auctionConfirmationDispatchEnabled,
+          pollIntervalMs: config.auctionConfirmationDispatchPollIntervalMs,
+        }),
+      inject: [AuctionConfirmationOutboxDispatcher, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+
     {
       provide: APP_CONFIG,
 
