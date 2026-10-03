@@ -2170,7 +2170,7 @@ describe('Persistencia PostgreSQL', () => {
 
       it('rechaza limites, ids y contratos de puja invalidos', async () => {
         const outbox = new PostgresAuctionConfirmationOutboxRepository(db)
-        await expect(outbox.findPending({ limit: 0 })).rejects.toThrow('limite')
+        await expect(outbox.findPending({ limit: 0 })).rejects.toThrow(/l[ií]mite/)
         await expect(
           outbox.markPublished({ eventId: 'missing-confirmation', publishedAt: now }),
         ).rejects.toThrow('no existe')
