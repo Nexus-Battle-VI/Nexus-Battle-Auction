@@ -2181,11 +2181,12 @@ describe('Persistencia PostgreSQL', () => {
             id: 'invalid-bid-confirmation',
             aggregate_id: 'auction-invalid-confirmation',
             event_type: 'auction.bid.accepted.v1',
-            payload: sql`${JSON.stringify({
-              eventType: 'auction.bid.accepted',
-              eventVersion: 1,
-              producer: 'auction',
-            })}::jsonb`,
+            payload: sql`jsonb_build_object(
+              'eventType', 'auction.bid.accepted',
+              'eventVersion', 1,
+              'producer', 'auction',
+              'data', jsonb_build_object('amountCredits', 1)
+            )`,
             occurred_at: now,
             published_at: null,
           })
