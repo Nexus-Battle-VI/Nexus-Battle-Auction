@@ -29,6 +29,12 @@ describe('Configuracion del servicio', () => {
 
       notificationsTimeoutMs: 3_000,
 
+      auctionConfirmationDispatchEnabled: false,
+
+      auctionConfirmationDispatchBatchSize: 25,
+
+      auctionConfirmationDispatchPollIntervalMs: 5_000,
+
       notificationsWatchlistBaseUrl: null,
 
       auctionSettlementBatchSize: 25,
@@ -195,6 +201,40 @@ describe('Configuracion del servicio', () => {
     expect(config.notificationsBaseUrl).toBe('http://notifications:3005')
 
     expect(config.notificationsTimeoutMs).toBe(2_500)
+  })
+
+  it('exige Postgres y el transporte de Notifications al activar confirmaciones', () => {
+    expect(() =>
+      loadConfig({
+        AUCTION_CONFIRMATION_DISPATCH_ENABLED: 'true',
+      }),
+    ).toThrow(/PERSISTENCE_DRIVER/)
+
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://usuario@db/auction',
+        AUCTION_CONFIRMATION_DISPATCH_ENABLED: 'true',
+      }),
+    ).toThrow(/NOTIFICATIONS_BASE_URL/)
+  })
+
+  it('configura el despacho durable de confirmaciones', () => {
+    const config = loadConfig({
+      PERSISTENCE_DRIVER: 'postgres',
+      DATABASE_URL: 'postgres://usuario@db/auction',
+      INTERNAL_SERVICE_AUTH_SECRET: 'shared-secret',
+      NOTIFICATIONS_BASE_URL: 'http://notifications:3005',
+      AUCTION_CONFIRMATION_DISPATCH_ENABLED: 'true',
+      AUCTION_CONFIRMATION_DISPATCH_BATCH_SIZE: '10',
+      AUCTION_CONFIRMATION_DISPATCH_POLL_INTERVAL_MS: '10000',
+    })
+
+    expect(config).toMatchObject({
+      auctionConfirmationDispatchEnabled: true,
+      auctionConfirmationDispatchBatchSize: 10,
+      auctionConfirmationDispatchPollIntervalMs: 10_000,
+    })
   })
 
   /**
