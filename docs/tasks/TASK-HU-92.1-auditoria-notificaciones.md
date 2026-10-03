@@ -58,6 +58,7 @@ avisos nuevos de HU-92.
 - PostgresAuctionSettlementOutboxRepository selecciona exclusivamente
   `auction.settled.v1`; no despacha `auction.published.v1`.
 - AuctionSettlementOutboxDispatcher está registrado en AppModule.
+- La búsqueda en package.json, scripts, .github, docs y README.md tampoco encontró referencias de activación del dispatcher. No se inspeccionaron mecanismos externos de Infrastructure.
 - No se encontró invocación del dispatcher dentro de `src` mediante
   las búsquedas realizadas. Revisar scripts y mecanismos externos.
 - Auction requiere revisar:
@@ -70,6 +71,37 @@ avisos nuevos de HU-92.
   `AUCTION_SETTLEMENT_QUEUE_URL` y `AWS_REGION`.
 - Tener código y configuración declarados no demuestra ejecución
   ni entrega en un ambiente desplegado.
+
+  ## Persistencia e idempotencia verificadas
+
+Notifications dispone de MongoCatalogNotificationRepository, que persiste
+las notificaciones en catalog_notifications. El identificador de la
+notificación se utiliza como _id y se consulta mediante findById.
+Los índices adicionales de sourceEventId y sourceEventType no son únicos.
+
+El bootstrap crea un InMemoryIdempotencyStore. Sus reservas tienen TTL,
+no sobreviven a reinicios y no se comparten entre instancias.
+
+CreateAuctionClosedByBuyNowNotification consulta primero la notificación
+por operationId y verifica su contenido antes de devolver un resultado
+duplicado. Si el documento está persistido en Mongo, esa comprobación
+permite reconocer reintentos después de un reinicio.
+
+La unicidad de _id impide documentos duplicados, pero no demuestra por sí
+sola que dos solicitudes concurrentes reciban una respuesta satisfactoria.
+Queda pendiente validar concurrencia entre instancias y recuperación
+ante fallos en HU-92.4.
+
+El contrato de liquidación utiliza eventType: auction.settled y
+eventVersion: 1. La identificación auction.settled.v1 se utiliza en
+el outbox y como sourceEventType de las notificaciones.
+
+El contrato incluye finalAmountCredits y correlationId, pero no una
+referencia explícita de la operación de Wallet. El contrato de cierre
+por compra inmediata incluye transactionId.
+
+Esta revisión verifica código y contratos. No se ejecutaron pruebas
+con Mongo real, reinicios ni múltiples instancias.
 
 ## Evidencia de pruebas ejecutadas
 
