@@ -42,6 +42,7 @@ describe('completion InMemory', () => {
         winnerId: winner.winnerId,
         winningBidId: winner.winningBidId,
         finalAmountCredits: winner.finalAmountCredits,
+        captureOperationId: winner.captureOperationId,
         loserBidderIds: [],
         settledAt: now,
       }),

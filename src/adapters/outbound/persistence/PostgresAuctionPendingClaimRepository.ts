@@ -85,21 +85,53 @@ export class PostgresAuctionPendingClaimRepository implements AuctionPendingClai
     // el guard `claim_status = 'PENDING'` de abajo cubre la carrera entre esta
     // lectura y el UPDATE.
     const claimed = AuctionPendingClaim.restore(current).claim(claimedAt)
-    const result = await this.db
-      .updateTable('auction_pending_claims')
-      .set({
-        claim_status: claimed.claimStatus,
-        claimed_at: claimed.claimedAt,
-        updated_at: claimed.updatedAt,
-      })
-      .where('auction_id', '=', auctionId)
-      .where('claim_status', '=', 'PENDING')
-      .executeTakeFirst()
-    if (result.numUpdatedRows === 0n)
-      throw new AuctionPendingClaimRuleViolation(
-        AuctionPendingClaimRuleCode.AlreadyClaimed,
-        'El producto ya fue reclamado.',
-      )
+    await this.db.transaction().execute(async (transaction) => {
+      const result = await transaction
+        .updateTable('auction_pending_claims')
+        .set({
+          claim_status: claimed.claimStatus,
+          claimed_at: claimed.claimedAt,
+          updated_at: claimed.updatedAt,
+        })
+        .where('auction_id', '=', auctionId)
+        .where('claim_status', '=', 'PENDING')
+        .executeTakeFirst()
+      if (result.numUpdatedRows === 0n)
+        throw new AuctionPendingClaimRuleViolation(
+          AuctionPendingClaimRuleCode.AlreadyClaimed,
+          'El producto ya fue reclamado.',
+        )
+
+      // HU-92.3: el aviso se conserva en el mismo commit que CLAIMED. Por
+      // tanto, una caida posterior no inventa una entrega y el dispatcher
+      // puede reintentar con una identidad estable.
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: `auction:${auctionId}:product-claimed`,
+          aggregate_id: auctionId,
+          event_type: 'auction.product.claimed.v1',
+          payload: {
+            eventId: `auction:${auctionId}:product-claimed`,
+            eventType: 'auction.product.claimed',
+            eventVersion: 1,
+            aggregateId: auctionId,
+            occurredAt: claimedAt.toISOString(),
+            producer: 'auction',
+            correlationId: `auction:${auctionId}:inventory:claim`,
+            data: {
+              auctionId,
+              winnerId: claimed.winnerId,
+              productId: claimed.productId,
+              claimedAt: claimedAt.toISOString(),
+            },
+          },
+          occurred_at: claimedAt,
+          published_at: null,
+        })
+        .onConflict((conflict) => conflict.column('id').doNothing())
+        .execute()
+    })
     return claimed
   }
   async findExpirablePending(

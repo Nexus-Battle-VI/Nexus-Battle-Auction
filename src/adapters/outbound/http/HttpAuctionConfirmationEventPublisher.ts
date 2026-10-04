@@ -86,7 +86,10 @@ export class HttpAuctionConfirmationEventPublisher implements AuctionConfirmatio
       }
 
       const result = payload as Record<string, unknown>
-      const expectedRecipients = event.eventType === 'auction.published' ? 1 : 2
+      const expectedRecipients =
+        event.eventType === 'auction.published' || event.eventType === 'auction.product.claimed'
+          ? 1
+          : 2
 
       if (
         result.eventId !== event.eventId ||

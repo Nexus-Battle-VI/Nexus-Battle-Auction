@@ -5,9 +5,16 @@ import type {
   AuctionConfirmationOutboxRepositoryPort,
 } from '../../../application/ports/AuctionConfirmationOutboxRepositoryPort'
 import type { AuctionBidAcceptedEventV1 } from '../../../domain/events/AuctionBidAcceptedEventV1'
+import type { AuctionBuyNowCompletedEventV1 } from '../../../domain/events/AuctionBuyNowCompletedEventV1'
+import type { AuctionProductClaimedEventV1 } from '../../../domain/events/AuctionProductClaimedEventV1'
 import type { Database } from './schema'
 
-const eventTypes = ['auction.published.v1', 'auction.bid.accepted.v1']
+const eventTypes = [
+  'auction.published.v1',
+  'auction.bid.accepted.v1',
+  'auction.buy-now.completed.v1',
+  'auction.product.claimed.v1',
+]
 
 const objectOf = (value: unknown): Record<string, unknown> => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -81,6 +88,88 @@ const parseBidAccepted = (payload: unknown): AuctionBidAcceptedEventV1 => {
   return parsed
 }
 
+const parseBuyNowCompleted = (payload: unknown): AuctionBuyNowCompletedEventV1 => {
+  const event = objectOf(payload)
+  const data = objectOf(event.data)
+  if (
+    event.eventType !== 'auction.buy-now.completed' ||
+    event.eventVersion !== 1 ||
+    event.producer !== 'auction'
+  ) {
+    throw new Error('Contrato de compra inmediata no soportado.')
+  }
+  const amount = data.amountCredits
+  if (typeof amount !== 'number' || !Number.isSafeInteger(amount) || amount <= 0) {
+    throw new Error('El importe de compra inmediata debe ser un entero positivo.')
+  }
+  const parsed: AuctionBuyNowCompletedEventV1 = {
+    eventId: textOf(event.eventId),
+    eventType: 'auction.buy-now.completed',
+    eventVersion: 1,
+    aggregateId: textOf(event.aggregateId),
+    occurredAt: dateOf(event.occurredAt),
+    producer: 'auction',
+    correlationId: textOf(event.correlationId),
+    data: {
+      operationId: textOf(data.operationId),
+      transactionId: textOf(data.transactionId),
+      transferId: textOf(data.transferId),
+      auctionId: textOf(data.auctionId),
+      productId: textOf(data.productId),
+      sellerId: textOf(data.sellerId),
+      buyerId: textOf(data.buyerId),
+      amountCredits: amount,
+      completedAt: dateOf(data.completedAt),
+    },
+  }
+  if (
+    parsed.aggregateId !== parsed.data.auctionId ||
+    parsed.correlationId !== parsed.data.operationId ||
+    parsed.eventId !== `${parsed.data.operationId}:buy-now-completed` ||
+    parsed.occurredAt !== parsed.data.completedAt ||
+    parsed.data.sellerId === parsed.data.buyerId
+  ) {
+    throw new Error('La compra inmediata contiene una identidad inconsistente.')
+  }
+  return parsed
+}
+
+const parseProductClaimed = (payload: unknown): AuctionProductClaimedEventV1 => {
+  const event = objectOf(payload)
+  const data = objectOf(event.data)
+  if (
+    event.eventType !== 'auction.product.claimed' ||
+    event.eventVersion !== 1 ||
+    event.producer !== 'auction'
+  ) {
+    throw new Error('Contrato de producto reclamado no soportado.')
+  }
+  const parsed: AuctionProductClaimedEventV1 = {
+    eventId: textOf(event.eventId),
+    eventType: 'auction.product.claimed',
+    eventVersion: 1,
+    aggregateId: textOf(event.aggregateId),
+    occurredAt: dateOf(event.occurredAt),
+    producer: 'auction',
+    correlationId: textOf(event.correlationId),
+    data: {
+      auctionId: textOf(data.auctionId),
+      winnerId: textOf(data.winnerId),
+      productId: textOf(data.productId),
+      claimedAt: dateOf(data.claimedAt),
+    },
+  }
+  if (
+    parsed.aggregateId !== parsed.data.auctionId ||
+    parsed.correlationId !== `auction:${parsed.data.auctionId}:inventory:claim` ||
+    parsed.eventId !== `auction:${parsed.data.auctionId}:product-claimed` ||
+    parsed.occurredAt !== parsed.data.claimedAt
+  ) {
+    throw new Error('El producto reclamado contiene una identidad inconsistente.')
+  }
+  return parsed
+}
+
 export class PostgresAuctionConfirmationOutboxRepository implements AuctionConfirmationOutboxRepositoryPort {
   constructor(private readonly db: Kysely<Database>) {}
 
@@ -115,6 +204,32 @@ export class PostgresAuctionConfirmationOutboxRepository implements AuctionConfi
           throw new Error(`Outbox de puja inconsistente: ${row.id}.`)
         }
 
+        events.push(event)
+        continue
+      }
+
+      if (row.event_type === 'auction.buy-now.completed.v1') {
+        const event = parseBuyNowCompleted(row.payload)
+        if (
+          event.eventId !== row.id ||
+          event.aggregateId !== row.aggregate_id ||
+          event.occurredAt !== dateOf(row.occurred_at)
+        ) {
+          throw new Error(`Outbox de compra inmediata inconsistente: ${row.id}.`)
+        }
+        events.push(event)
+        continue
+      }
+
+      if (row.event_type === 'auction.product.claimed.v1') {
+        const event = parseProductClaimed(row.payload)
+        if (
+          event.eventId !== row.id ||
+          event.aggregateId !== row.aggregate_id ||
+          event.occurredAt !== dateOf(row.occurred_at)
+        ) {
+          throw new Error(`Outbox de reclamo inconsistente: ${row.id}.`)
+        }
         events.push(event)
         continue
       }
