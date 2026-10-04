@@ -2564,7 +2564,7 @@ describe('Persistencia PostgreSQL', () => {
           event_type: 'auction.product.claimed.v1',
           payload: expect.objectContaining({
             correlationId: `auction:${claimedId}:inventory:claim`,
-            data: expect.objectContaining({ winnerId: 'winner-1' }),
+            data: expect.objectContaining({ winnerId: 'winner' }),
           }),
         })
         const farFuture = new Date('2026-02-01T00:00:00.000Z')
