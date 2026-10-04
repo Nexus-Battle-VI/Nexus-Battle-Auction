@@ -1143,7 +1143,7 @@ export class InMemoryAuctionRepository
     const records: PersonalAuctionTransaction[] = []
     for (const [operationId, operation] of this.operations) {
       const auction = this.auctions.get(operation.auctionId)
-      if (auction?.sellerId === input.playerId && auction.minimumBidCredits !== undefined) {
+      if (auction?.sellerId === input.playerId) {
         records.push({
           id: `publication:${operationId}`,
           auctionId: auction.id,

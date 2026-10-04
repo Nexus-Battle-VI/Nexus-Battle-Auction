@@ -64,26 +64,29 @@ export class PostgresAuctionActivityRepository implements AuctionActivityReposit
 
     return {
       total: count.total,
-      items: rows.map((row) => ({
-        auctionId: row.id,
-        productId: row.product_id,
-        status: row.status as AuctionStatus,
-        minimumBidCredits: row.minimum_bid_credits ?? 0,
-        buyNowCredits: row.buy_now_credits,
-        currentBidCredits: row.current_bid_credits,
-        bidCount: row.bid_count,
-        publishedAt: new Date(row.published_at),
-        closesAt: new Date(row.closes_at),
-        finishedAt: row.finished_at === null ? null : new Date(row.finished_at),
-        cancelledAt: row.cancelled_at === null ? null : new Date(row.cancelled_at),
-        actions: {
-          view: true,
-          cancel:
-            row.status === AuctionStatus.Active &&
-            row.bid_count === 0 &&
-            new Date(row.closes_at).getTime() - input.now.getTime() > CANCELLATION_WINDOW_MS,
-        },
-      })),
+      items: rows.map((row) => {
+        const status = row.status as AuctionStatus
+        return {
+          auctionId: row.id,
+          productId: row.product_id,
+          status,
+          minimumBidCredits: row.minimum_bid_credits ?? 0,
+          buyNowCredits: row.buy_now_credits,
+          currentBidCredits: row.current_bid_credits,
+          bidCount: row.bid_count,
+          publishedAt: new Date(row.published_at),
+          closesAt: new Date(row.closes_at),
+          finishedAt: row.finished_at === null ? null : new Date(row.finished_at),
+          cancelledAt: row.cancelled_at === null ? null : new Date(row.cancelled_at),
+          actions: {
+            view: true,
+            cancel:
+              status === AuctionStatus.Active &&
+              row.bid_count === 0 &&
+              new Date(row.closes_at).getTime() - input.now.getTime() > CANCELLATION_WINDOW_MS,
+          },
+        }
+      }),
     }
   }
 
@@ -138,25 +141,28 @@ export class PostgresAuctionActivityRepository implements AuctionActivityReposit
 
     return {
       total: count.total,
-      items: rows.map((row) => ({
-        auctionId: row.auction_id,
-        productId: row.product_id,
-        auctionStatus: row.status as AuctionStatus,
-        participationStatus:
-          row.status === AuctionStatus.Active
-            ? row.leader_bidder_id === input.playerId
-              ? 'LEADING'
-              : 'OUTBID'
-            : row.winner_id === input.playerId
-              ? 'WON'
-              : 'LOST',
-        ownLatestBidCredits: row.own_amount_credits,
-        ownLatestBidAt: new Date(row.own_placed_at),
-        currentBidCredits:
-          row.leader_amount_credits ??
-          (row.final_amount_credits === null ? null : Number(row.final_amount_credits)),
-        closesAt: new Date(row.closes_at),
-      })),
+      items: rows.map((row) => {
+        const status = row.status as AuctionStatus
+        return {
+          auctionId: row.auction_id,
+          productId: row.product_id,
+          auctionStatus: status,
+          participationStatus:
+            status === AuctionStatus.Active
+              ? row.leader_bidder_id === input.playerId
+                ? 'LEADING'
+                : 'OUTBID'
+              : row.winner_id === input.playerId
+                ? 'WON'
+                : 'LOST',
+          ownLatestBidCredits: row.own_amount_credits,
+          ownLatestBidAt: new Date(row.own_placed_at),
+          currentBidCredits:
+            row.leader_amount_credits ??
+            (row.final_amount_credits === null ? null : Number(row.final_amount_credits)),
+          closesAt: new Date(row.closes_at),
+        }
+      }),
     }
   }
 
