@@ -1536,6 +1536,41 @@ export class PostgresAuctionRepository
         })
         .execute()
 
+      // HU-92.3: este evento no duplica el cierre de HU-64.5. Es la
+      // confirmacion dirigida al comprador y la acreditacion al vendedor,
+      // creada solo cuando Wallet ya devolvio una transferencia confirmada y
+      // el cierre quedo durable en esta misma transaccion.
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: `${command.operationId}:buy-now-completed`,
+          aggregate_id: command.auctionId,
+          event_type: 'auction.buy-now.completed.v1',
+          payload: {
+            eventId: `${command.operationId}:buy-now-completed`,
+            eventType: 'auction.buy-now.completed',
+            eventVersion: 1,
+            aggregateId: command.auctionId,
+            occurredAt: command.closedAt.toISOString(),
+            producer: 'auction',
+            correlationId: command.operationId,
+            data: {
+              operationId: command.operationId,
+              transactionId: command.transactionId,
+              transferId: command.transferId,
+              auctionId: command.auctionId,
+              productId: auctionRow.product_id,
+              sellerId: auctionRow.seller_id,
+              buyerId: command.buyerId,
+              amountCredits: command.priceCredits,
+              completedAt: command.closedAt.toISOString(),
+            },
+          },
+          occurred_at: command.closedAt,
+          published_at: null,
+        })
+        .execute()
+
       const auction = await findAuction(transaction, command.auctionId)
 
       if (auction === null) {

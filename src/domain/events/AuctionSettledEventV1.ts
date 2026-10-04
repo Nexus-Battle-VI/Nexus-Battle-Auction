@@ -19,6 +19,8 @@ export type AuctionSettledEventDataV1 =
       readonly winnerId: string
       readonly winningBidId: string
       readonly finalAmountCredits: number
+      /** Operacion de Wallet que confirma la acreditacion al vendedor. */
+      readonly captureOperationId: string
       readonly loserBidderIds: readonly string[]
       readonly settledAt: string
     }
@@ -74,6 +76,7 @@ export const createAuctionSettledEventV1 = (
         readonly winnerId: string
         readonly winningBidId: string
         readonly finalAmountCredits: number
+        readonly captureOperationId: string
         readonly loserBidderIds: readonly string[]
         readonly settledAt: Date
       },
@@ -99,6 +102,7 @@ export const createAuctionSettledEventV1 = (
           winnerId: input.winnerId,
           winningBidId: input.winningBidId,
           finalAmountCredits: input.finalAmountCredits,
+          captureOperationId: input.captureOperationId,
           loserBidderIds: [...new Set(input.loserBidderIds)].sort((left, right) =>
             left.localeCompare(right),
           ),

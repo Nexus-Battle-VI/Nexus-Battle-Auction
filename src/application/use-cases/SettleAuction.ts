@@ -172,6 +172,7 @@ export class SettleAuction {
       winnerId: closing.winnerId,
       winningBidId: closing.winningBidId,
       finalAmountCredits: closing.finalAmountCredits,
+      captureOperationId: operationId,
       loserBidderIds: this.loserBidderIds(bids, closing.winnerId),
     })
     if (settlement.captureStatus === CaptureStatus.Confirmed)
@@ -368,6 +369,7 @@ export class SettleAuction {
     readonly winnerId: string
     readonly winningBidId: string
     readonly finalAmountCredits: number
+    readonly captureOperationId: string
     readonly loserBidderIds: readonly string[]
   }): SettlementEventPreflight {
     const settledAt = this.clock.now()

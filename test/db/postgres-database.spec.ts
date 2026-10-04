@@ -1903,6 +1903,25 @@ describe('Persistencia PostgreSQL', () => {
           auctionId: 'auction-buy-now-1',
           productId: 'product-auction-buy-now-1',
         })
+
+        await expect(
+          db
+            .selectFrom('outbox_events')
+            .selectAll()
+            .where('id', '=', 'operation-buy-now-auction-buy-now-1:buy-now-completed')
+            .executeTakeFirstOrThrow(),
+        ).resolves.toMatchObject({
+          aggregate_id: 'auction-buy-now-1',
+          event_type: 'auction.buy-now.completed.v1',
+          payload: expect.objectContaining({
+            correlationId: 'operation-buy-now-auction-buy-now-1',
+            data: expect.objectContaining({
+              buyerId: 'buyer-1',
+              sellerId: 'seller-1',
+              transferId: 'transfer-auction-buy-now-1',
+            }),
+          }),
+        })
       })
 
       it('reintentar el mismo operationId devuelve la misma confirmacion sin duplicar efectos', async () => {
@@ -2166,6 +2185,56 @@ describe('Persistencia PostgreSQL', () => {
 
         await outbox.markPublished({ eventId: pending[0]!.eventId, publishedAt: now })
         await expect(outbox.findPending({ limit: 10 })).resolves.toEqual([pending[1]])
+      })
+
+      it('recupera compra inmediata y reclamo solo despues de sus estados durables', async () => {
+        const auctionId = 'confirmation-buy-now'
+        const operationId = 'confirmation-buy-now:operation'
+        const repository = new PostgresAuctionRepository(db)
+        await repository.publish(publication(auctionId))
+        await repository.closeByBuyNow({
+          operationId,
+          transactionId: 'confirmation-buy-now:transaction',
+          auctionId,
+          buyerId: 'buyer-1',
+          transferId: 'confirmation-buy-now:transfer',
+          priceCredits: 20,
+          remainingCredits: 80,
+          closedAt: now,
+        })
+
+        const claims = new PostgresAuctionPendingClaimRepository(db)
+        await claims.createIfAbsent({
+          auctionId,
+          winnerId: 'buyer-1',
+          productId: `product-${auctionId}`,
+          winningBidId: `buy-now:${auctionId}`,
+          finalAmountCredits: 20,
+          settledAt: now,
+          createdAt: now,
+        })
+        await claims.markClaimed(auctionId, now)
+
+        const pending = await new PostgresAuctionConfirmationOutboxRepository(db).findPending({
+          limit: 10,
+        })
+        expect(pending).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              eventId: `${operationId}:buy-now-completed`,
+              eventType: 'auction.buy-now.completed',
+              data: expect.objectContaining({
+                transferId: 'confirmation-buy-now:transfer',
+                buyerId: 'buyer-1',
+              }),
+            }),
+            expect.objectContaining({
+              eventId: `auction:${auctionId}:product-claimed`,
+              eventType: 'auction.product.claimed',
+              data: expect.objectContaining({ winnerId: 'buyer-1' }),
+            }),
+          ]),
+        )
       })
 
       it('rechaza limites, ids y contratos de puja invalidos', async () => {
@@ -2484,6 +2553,20 @@ describe('Persistencia PostgreSQL', () => {
         const settledAt = new Date('2026-01-03T00:00:00.000Z')
         await repository.createIfAbsent({ ...input(claimedId), settledAt, createdAt: settledAt })
         await repository.markClaimed(claimedId, new Date(settledAt.getTime() + 1000))
+        await expect(
+          db
+            .selectFrom('outbox_events')
+            .selectAll()
+            .where('id', '=', `auction:${claimedId}:product-claimed`)
+            .executeTakeFirstOrThrow(),
+        ).resolves.toMatchObject({
+          aggregate_id: claimedId,
+          event_type: 'auction.product.claimed.v1',
+          payload: expect.objectContaining({
+            correlationId: `auction:${claimedId}:inventory:claim`,
+            data: expect.objectContaining({ winnerId: 'winner-1' }),
+          }),
+        })
         const farFuture = new Date('2026-02-01T00:00:00.000Z')
 
         await expect(repository.markExpired(claimedId, farFuture)).rejects.toThrow()
@@ -2585,6 +2668,7 @@ describe('Persistencia PostgreSQL', () => {
             winnerId: 'winner',
             winningBidId: `bid-${auctionId}`,
             finalAmountCredits: 30,
+            captureOperationId: `auction:${auctionId}:settlement:capture`,
             loserBidderIds: [],
             settledAt: at,
           }),
