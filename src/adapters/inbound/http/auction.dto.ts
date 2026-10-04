@@ -695,6 +695,119 @@ export class AuctionCancellationResponseDto {
   replayed!: boolean
 }
 
+/** Paginacion comun de las consultas privadas de HU-89. */
+export class PersonalAuctionActivityQueryDto {
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number
+
+  @ApiPropertyOptional({ default: 16, minimum: 1, maximum: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  pageSize?: number
+}
+
+export class PersonalAuctionActionsResponseDto {
+  @ApiProperty({ example: true }) view!: true
+  @ApiProperty({ description: 'Elegibilidad informativa; HU-90 revalida al ejecutar.' })
+  cancel!: boolean
+}
+
+export class PersonalAuctionItemResponseDto {
+  @ApiProperty() auctionId!: string
+  @ApiProperty() productId!: string
+  @ApiProperty({ enum: ['ACTIVE', 'FINISHED', 'SOLD', 'CANCELLED'] }) status!: string
+  @ApiProperty() minimumBidCredits!: number
+  @ApiPropertyOptional({ nullable: true }) buyNowCredits!: number | null
+  @ApiPropertyOptional({ nullable: true }) currentBidCredits!: number | null
+  @ApiProperty() bidCount!: number
+  @ApiProperty({ type: String, format: 'date-time' }) publishedAt!: Date
+  @ApiProperty({ type: String, format: 'date-time' }) closesAt!: Date
+  @ApiPropertyOptional({ type: String, format: 'date-time', nullable: true })
+  finishedAt!: Date | null
+  @ApiPropertyOptional({ type: String, format: 'date-time', nullable: true })
+  cancelledAt!: Date | null
+  @ApiProperty({ type: PersonalAuctionActionsResponseDto })
+  actions!: PersonalAuctionActionsResponseDto
+}
+
+export class PersonalAuctionPageResponseDto {
+  @ApiProperty({ type: PersonalAuctionItemResponseDto, isArray: true })
+  items!: PersonalAuctionItemResponseDto[]
+  @ApiProperty() total!: number
+  @ApiProperty() page!: number
+  @ApiProperty() pageSize!: number
+}
+
+export class PersonalBidItemResponseDto {
+  @ApiProperty() auctionId!: string
+  @ApiProperty() productId!: string
+  @ApiProperty({ enum: ['ACTIVE', 'FINISHED', 'SOLD', 'CANCELLED'] }) auctionStatus!: string
+  @ApiProperty({ enum: ['LEADING', 'OUTBID', 'WON', 'LOST'] }) participationStatus!: string
+  @ApiProperty() ownLatestBidCredits!: number
+  @ApiProperty({ type: String, format: 'date-time' }) ownLatestBidAt!: Date
+  @ApiPropertyOptional({ nullable: true }) currentBidCredits!: number | null
+  @ApiProperty({ type: String, format: 'date-time' }) closesAt!: Date
+}
+
+export class PersonalBidPageResponseDto {
+  @ApiProperty({ type: PersonalBidItemResponseDto, isArray: true })
+  items!: PersonalBidItemResponseDto[]
+  @ApiProperty() total!: number
+  @ApiProperty() page!: number
+  @ApiProperty() pageSize!: number
+}
+
+export class AuctionTransactionValueResponseDto {
+  @ApiProperty() amount!: number
+  @ApiProperty({ enum: ['CREDITS'] }) unit!: 'CREDITS'
+}
+
+export class PersonalTransactionItemResponseDto {
+  @ApiProperty() id!: string
+  @ApiProperty() auctionId!: string
+  @ApiProperty({
+    enum: [
+      'PUBLICATION_FEE',
+      'BID_RESERVATION',
+      'BUY_NOW_PURCHASE',
+      'SETTLEMENT_SALE',
+      'SETTLEMENT_WIN',
+      'CANCELLATION_REFUND',
+      'PRODUCT_CLAIM',
+    ],
+  })
+  type!: string
+  @ApiProperty() reference!: string
+  @ApiProperty({ type: String, format: 'date-time' }) occurredAt!: Date
+  @ApiProperty() status!: string
+  @ApiPropertyOptional({ type: AuctionTransactionValueResponseDto, nullable: true })
+  value!: AuctionTransactionValueResponseDto | null
+}
+
+export class PersonalTransactionPageResponseDto {
+  @ApiProperty({ type: PersonalTransactionItemResponseDto, isArray: true })
+  items!: PersonalTransactionItemResponseDto[]
+  @ApiProperty() total!: number
+  @ApiProperty() page!: number
+  @ApiProperty() pageSize!: number
+}
+
+export class AuctionViewStatisticsResponseDto {
+  @ApiProperty({ enum: ['UNAVAILABLE'] })
+  availability!: 'UNAVAILABLE'
+  @ApiProperty({ enum: ['AUTHORITATIVE_SOURCE_NOT_CONFIGURED'] })
+  reason!: 'AUTHORITATIVE_SOURCE_NOT_CONFIGURED'
+  @ApiProperty({ type: Object, isArray: true })
+  metrics!: readonly []
+}
+
 export const assertIdempotencyKey = (value: string | undefined): string => {
   if (value === undefined || value.trim().length === 0 || value.length > 128) {
     throw new Error('INVALID_IDEMPOTENCY_KEY')

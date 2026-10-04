@@ -48,6 +48,9 @@ import { GetAuctionDetail } from '../../../application/use-cases/GetAuctionDetai
 import { GetAuctionSuggestions } from '../../../application/use-cases/GetAuctionSuggestions'
 import { ListActiveAuctions } from '../../../application/use-cases/ListActiveAuctions'
 import { GetPendingClaims } from '../../../application/use-cases/GetPendingClaims'
+import { GetMyAuctionActivity } from '../../../application/use-cases/GetMyAuctionActivity'
+import { GetMyAuctionTransactions } from '../../../application/use-cases/GetMyAuctionTransactions'
+import { GetMyAuctionViewStatistics } from '../../../application/use-cases/GetMyAuctionViewStatistics'
 import { PublishAuction } from '../../../application/use-cases/PublishAuction'
 import { RegisterBid } from '../../../application/use-cases/RegisterBid'
 import { CurrentIdentity, Roles } from './auth/decorators'
@@ -68,6 +71,11 @@ import {
   ConfigureAutoBidRequestDto,
   PendingClaimResponseDto,
   ListActiveAuctionsQueryDto,
+  PersonalAuctionActivityQueryDto,
+  PersonalAuctionPageResponseDto,
+  PersonalBidPageResponseDto,
+  PersonalTransactionPageResponseDto,
+  AuctionViewStatisticsResponseDto,
   MARKETPLACE_PRICE_KINDS,
   MARKETPLACE_PUBLISHER_TYPES,
   MARKETPLACE_SORTS,
@@ -100,6 +108,9 @@ export class AuctionController {
     private readonly clock: ClockPort,
     private readonly executeBuyNow: ExecuteBuyNowUseCase,
     private readonly cancelAuction: CancelAuction,
+    private readonly getMyAuctionActivity: GetMyAuctionActivity,
+    private readonly getMyAuctionTransactions: GetMyAuctionTransactions,
+    private readonly getMyAuctionViewStatistics: GetMyAuctionViewStatistics,
   ) {}
 
   /**
@@ -134,6 +145,83 @@ export class AuctionController {
     const now = this.clock.now()
 
     return claims.map((claim) => this.toPendingClaimResponse(claim, now))
+  }
+
+  /** HU-89 / TASK 89.1: publicaciones del titular del token. */
+  @Get('me/owned')
+  @Roles(Role.Player)
+  @ApiOperation({ summary: 'Consultar mis subastas' })
+  @ApiOkResponse({ type: PersonalAuctionPageResponseDto })
+  @ApiBadRequestResponse({ description: 'Paginacion invalida.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
+  async ownedAuctions(
+    @CurrentIdentity() identity: VerifiedIdentity,
+    @Query() query: PersonalAuctionActivityQueryDto,
+  ): Promise<PersonalAuctionPageResponseDto> {
+    const page = query.page ?? 1
+    const pageSize = query.pageSize ?? 16
+    const result = await this.getMyAuctionActivity.listOwned({
+      playerId: identity.subject,
+      page,
+      pageSize,
+    })
+    return { ...result, items: [...result.items], page, pageSize }
+  }
+
+  /** HU-89 / TASK 89.1: una fila por subasta en la que participo el titular. */
+  @Get('me/bids')
+  @Roles(Role.Player)
+  @ApiOperation({ summary: 'Consultar mis participaciones en pujas' })
+  @ApiOkResponse({ type: PersonalBidPageResponseDto })
+  @ApiBadRequestResponse({ description: 'Paginacion invalida.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
+  async myBids(
+    @CurrentIdentity() identity: VerifiedIdentity,
+    @Query() query: PersonalAuctionActivityQueryDto,
+  ): Promise<PersonalBidPageResponseDto> {
+    const page = query.page ?? 1
+    const pageSize = query.pageSize ?? 16
+    const result = await this.getMyAuctionActivity.listBids({
+      playerId: identity.subject,
+      page,
+      pageSize,
+    })
+    return { ...result, items: [...result.items], page, pageSize }
+  }
+
+  /** HU-89 / TASK 89.2: operaciones locales autoritativas del titular. */
+  @Get('me/transactions')
+  @Roles(Role.Player)
+  @ApiOperation({ summary: 'Consultar mi historial de transacciones de subasta' })
+  @ApiOkResponse({ type: PersonalTransactionPageResponseDto })
+  @ApiBadRequestResponse({ description: 'Paginacion invalida.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
+  async myTransactions(
+    @CurrentIdentity() identity: VerifiedIdentity,
+    @Query() query: PersonalAuctionActivityQueryDto,
+  ): Promise<PersonalTransactionPageResponseDto> {
+    const page = query.page ?? 1
+    const pageSize = query.pageSize ?? 16
+    const result = await this.getMyAuctionTransactions.execute({
+      playerId: identity.subject,
+      page,
+      pageSize,
+    })
+    return { ...result, items: [...result.items], page, pageSize }
+  }
+
+  /** HU-89 / TASK 89.3: ausencia explicita; nunca responde contadores inventados. */
+  @Get('me/view-statistics')
+  @Roles(Role.Player)
+  @ApiOperation({ summary: 'Consultar disponibilidad de estadisticas reales de visualizacion' })
+  @ApiOkResponse({ type: AuctionViewStatisticsResponseDto })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no posee el rol requerido.' })
+  viewStatistics(): AuctionViewStatisticsResponseDto {
+    return this.getMyAuctionViewStatistics.execute()
   }
 
   /** Marketplace de subastas activas y no vencidas. */

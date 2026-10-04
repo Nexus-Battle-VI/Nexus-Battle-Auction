@@ -45,6 +45,15 @@ import type {
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
 import type {
+  AuctionActivityRepositoryPort,
+  PersonalAuctionPage,
+  PersonalBidPage,
+  PersonalTransactionPage,
+  OwnedAuctionPageInput,
+  PersonalPageInput,
+  PersonalAuctionTransaction,
+} from '../../../application/ports/AuctionActivityRepositoryPort'
+import type {
   AuctionSettlementCandidate,
   AuctionSettlementCandidateReaderPort,
 } from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
@@ -213,6 +222,7 @@ const activeAuctionComparator = (
 export class InMemoryAuctionRepository
   implements
     AuctionRepositoryPort,
+    AuctionActivityRepositoryPort,
     AuctionSettlementCandidateReaderPort,
     AuctionConfirmationOutboxRepositoryPort
 {
@@ -1045,6 +1055,139 @@ export class InMemoryAuctionRepository
       ([, value]) => value.auctionId === auctionId,
     )
     return entry === undefined ? Promise.resolve(null) : this.findBuyNowOperation(entry[0])
+  }
+
+  /** Proyeccion privada de publicaciones propias para HU-89. */
+  listOwnedAuctions(input: OwnedAuctionPageInput): Promise<PersonalAuctionPage> {
+    const all = [...this.auctions.values()]
+      .filter((auction) => auction.sellerId === input.playerId)
+      .sort(
+        (left, right) =>
+          right.publishedAt.getTime() - left.publishedAt.getTime() ||
+          left.id.localeCompare(right.id),
+      )
+      .map((auction) => {
+        const bids = [...this.bids.values()].filter(
+          (entry) => entry.snapshot.auctionId === auction.id,
+        )
+        const leadingId = this.leadingBidByAuction.get(auction.id)
+        const leader = leadingId === undefined ? undefined : this.bids.get(leadingId)
+        return {
+          auctionId: auction.id,
+          productId: auction.productId,
+          status: auction.status,
+          minimumBidCredits: auction.minimumBidCredits,
+          buyNowCredits: auction.buyNowCredits,
+          currentBidCredits: leader?.snapshot.amountCredits ?? null,
+          bidCount: bids.length,
+          publishedAt: new Date(auction.publishedAt),
+          closesAt: new Date(auction.closesAt),
+          finishedAt: auction.completion?.finishedAt ?? null,
+          cancelledAt: auction.cancelledAt ?? null,
+          actions: {
+            view: true as const,
+            cancel:
+              auction.status === AuctionStatus.Active &&
+              bids.length === 0 &&
+              auction.closesAt.getTime() - input.now.getTime() > CANCELLATION_WINDOW_MS,
+          },
+        }
+      })
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({ items: all.slice(offset, offset + input.pageSize), total: all.length })
+  }
+
+  /** Una fila por subasta participada; nunca devuelve identificadores de otros pujadores. */
+  listBidParticipations(input: PersonalPageInput): Promise<PersonalBidPage> {
+    const ownBids = [...this.bids.values()]
+      .map((entry) => entry.snapshot)
+      .filter((bid) => bid.bidderId === input.playerId)
+      .sort((left, right) => right.placedAt.getTime() - left.placedAt.getTime())
+    const latestByAuction = new Map<string, BidSnapshot>()
+    for (const bid of ownBids)
+      if (!latestByAuction.has(bid.auctionId)) latestByAuction.set(bid.auctionId, bid)
+
+    const all = [...latestByAuction.values()].flatMap((bid) => {
+      const auction = this.auctions.get(bid.auctionId)
+      if (auction === undefined) return []
+      const leaderId = this.leadingBidByAuction.get(auction.id)
+      const leader = leaderId === undefined ? undefined : this.bids.get(leaderId)?.snapshot
+      const won = auction.completion?.winnerId === input.playerId
+      return [
+        {
+          auctionId: auction.id,
+          productId: auction.productId,
+          auctionStatus: auction.status,
+          participationStatus:
+            auction.status === AuctionStatus.Active
+              ? leader?.bidderId === input.playerId
+                ? ('LEADING' as const)
+                : ('OUTBID' as const)
+              : won
+                ? ('WON' as const)
+                : ('LOST' as const),
+          ownLatestBidCredits: bid.amountCredits,
+          ownLatestBidAt: new Date(bid.placedAt),
+          currentBidCredits:
+            leader?.amountCredits ?? auction.completion?.finalAmountCredits ?? null,
+          closesAt: new Date(auction.closesAt),
+        },
+      ]
+    })
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({ items: all.slice(offset, offset + input.pageSize), total: all.length })
+  }
+
+  /** Historial derivado unicamente de registros durables mantenidos por este adaptador. */
+  listTransactions(input: PersonalPageInput): Promise<PersonalTransactionPage> {
+    const records: PersonalAuctionTransaction[] = []
+    for (const [operationId, operation] of this.operations) {
+      const auction = this.auctions.get(operation.auctionId)
+      if (auction?.sellerId === input.playerId && auction.minimumBidCredits !== undefined) {
+        records.push({
+          id: `publication:${operationId}`,
+          auctionId: auction.id,
+          type: 'PUBLICATION_FEE',
+          reference: operationId,
+          occurredAt: new Date(auction.publishedAt),
+          status: 'COMPLETED',
+          value: { amount: auction.publicationFeeCredits, unit: 'CREDITS' },
+        })
+      }
+    }
+    for (const operation of this.bidCreditOperations.values()) {
+      if (operation.bidderId === input.playerId)
+        records.push({
+          id: `bid:${operation.operationId}`,
+          auctionId: operation.auctionId,
+          type: 'BID_RESERVATION',
+          reference: operation.operationId,
+          occurredAt: new Date(operation.createdAt),
+          status: operation.status,
+          value: { amount: operation.amountCredits, unit: 'CREDITS' },
+        })
+    }
+    for (const [operationId, operation] of this.buyNowOperations) {
+      if (operation.buyerId === input.playerId)
+        records.push({
+          id: `buy-now:${operationId}`,
+          auctionId: operation.auctionId,
+          type: 'BUY_NOW_PURCHASE',
+          reference: operation.transactionId,
+          occurredAt: new Date(operation.completedAt),
+          status: 'COMPLETED',
+          value: { amount: operation.priceCredits, unit: 'CREDITS' },
+        })
+    }
+    records.sort(
+      (left, right) =>
+        right.occurredAt.getTime() - left.occurredAt.getTime() || left.id.localeCompare(right.id),
+    )
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({
+      items: records.slice(offset, offset + input.pageSize),
+      total: records.length,
+    })
   }
 
   private count(sellerId: string): number {

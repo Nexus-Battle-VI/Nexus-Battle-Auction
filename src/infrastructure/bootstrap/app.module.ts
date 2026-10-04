@@ -71,6 +71,7 @@ import { InMemoryAuctionSettlementWorkRepository } from '../../adapters/outbound
 import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { InMemoryEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
+import { PostgresAuctionActivityRepository } from '../../adapters/outbound/persistence/PostgresAuctionActivityRepository'
 import { PostgresAuctionCancellationRepository } from '../../adapters/outbound/persistence/PostgresAuctionCancellationRepository'
 import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
@@ -87,6 +88,10 @@ import {
   AUCTION_REPOSITORY,
   type AuctionRepositoryPort,
 } from '../../application/ports/AuctionRepositoryPort'
+import {
+  AUCTION_ACTIVITY_REPOSITORY,
+  type AuctionActivityRepositoryPort,
+} from '../../application/ports/AuctionActivityRepositoryPort'
 import { BID_CREDITS, type BidCreditsPort } from '../../application/ports/BidCreditsPort'
 import {
   BID_CREDIT_OPERATION_READER,
@@ -184,6 +189,9 @@ import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchli
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
+import { GetMyAuctionActivity } from '../../application/use-cases/GetMyAuctionActivity'
+import { GetMyAuctionTransactions } from '../../application/use-cases/GetMyAuctionTransactions'
+import { GetMyAuctionViewStatistics } from '../../application/use-cases/GetMyAuctionViewStatistics'
 import { WALLET, type WalletPort } from '../../application/ports/WalletPort'
 import { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
 import { ExecuteBuyNowUseCase } from '../../application/use-cases/ExecuteBuyNowUseCase'
@@ -482,6 +490,18 @@ export const createWatchlistEventPublisher = (
           : new PostgresAuctionRepository(db),
 
       inject: [DATABASE, AUCTION_CANCELLATION_REPOSITORY],
+    },
+
+    {
+      provide: AUCTION_ACTIVITY_REPOSITORY,
+      useFactory: (
+        db: Kysely<Database> | null,
+        auctions: AuctionRepositoryPort,
+      ): AuctionActivityRepositoryPort =>
+        db === null
+          ? (auctions as InMemoryAuctionRepository)
+          : new PostgresAuctionActivityRepository(db),
+      inject: [DATABASE, AUCTION_REPOSITORY],
     },
 
     {
@@ -1157,6 +1177,24 @@ export const createWatchlistEventPublisher = (
 
       inject: [AUCTION_PENDING_CLAIM_REPOSITORY],
     },
+
+    {
+      provide: GetMyAuctionActivity,
+      useFactory: (
+        repository: AuctionActivityRepositoryPort,
+        clock: ClockPort,
+      ): GetMyAuctionActivity => new GetMyAuctionActivity(repository, clock),
+      inject: [AUCTION_ACTIVITY_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: GetMyAuctionTransactions,
+      useFactory: (repository: AuctionActivityRepositoryPort): GetMyAuctionTransactions =>
+        new GetMyAuctionTransactions(repository),
+      inject: [AUCTION_ACTIVITY_REPOSITORY],
+    },
+
+    GetMyAuctionViewStatistics,
 
     {
       provide: ClaimPendingProduct,
