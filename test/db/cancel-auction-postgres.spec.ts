@@ -334,6 +334,7 @@ describe('Cancelacion manual contra PostgreSQL real (HU-90)', () => {
       expect(after.applied).toEqual([
         '017-create-auction-cancellation',
         '018-add-auction-cancellation-reconciler-lease',
+        '019-add-auction-metrics-indexes',
       ])
 
       const preserved = await sql<{

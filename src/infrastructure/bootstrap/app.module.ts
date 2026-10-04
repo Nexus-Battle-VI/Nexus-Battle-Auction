@@ -16,6 +16,7 @@ import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
 
 import { AuctionController } from '../../adapters/inbound/http/auction.controller'
+import { AuctionMetricsController } from '../../adapters/inbound/http/auction-metrics.controller'
 import { OfficialAuctionController } from '../../adapters/inbound/http/official-auction.controller'
 import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymous.guard'
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
@@ -72,6 +73,8 @@ import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persis
 import { InMemoryEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
 import { PostgresAuctionActivityRepository } from '../../adapters/outbound/persistence/PostgresAuctionActivityRepository'
+import { PostgresAuctionMetricsRepository } from '../../adapters/outbound/persistence/PostgresAuctionMetricsRepository'
+import { InMemoryAuctionMetricsRepository } from '../../adapters/outbound/persistence/InMemoryAuctionMetricsRepository'
 import { PostgresAuctionCancellationRepository } from '../../adapters/outbound/persistence/PostgresAuctionCancellationRepository'
 import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
@@ -92,6 +95,10 @@ import {
   AUCTION_ACTIVITY_REPOSITORY,
   type AuctionActivityRepositoryPort,
 } from '../../application/ports/AuctionActivityRepositoryPort'
+import {
+  AUCTION_METRICS_REPOSITORY,
+  type AuctionMetricsRepositoryPort,
+} from '../../application/ports/AuctionMetricsRepositoryPort'
 import { BID_CREDITS, type BidCreditsPort } from '../../application/ports/BidCreditsPort'
 import {
   BID_CREDIT_OPERATION_READER,
@@ -189,6 +196,8 @@ import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchli
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
+import { GetAuctionClosingTimeAndTrends } from '../../application/use-cases/GetAuctionClosingTimeAndTrends'
+import { GetAuctionVolumeAndSuccess } from '../../application/use-cases/GetAuctionVolumeAndSuccess'
 import { GetMyAuctionActivity } from '../../application/use-cases/GetMyAuctionActivity'
 import { GetMyAuctionTransactions } from '../../application/use-cases/GetMyAuctionTransactions'
 import { GetMyAuctionViewStatistics } from '../../application/use-cases/GetMyAuctionViewStatistics'
@@ -304,6 +313,7 @@ export const createWatchlistEventPublisher = (
     HealthController,
     WatchlistController,
     AuctionController,
+    AuctionMetricsController,
     OfficialAuctionController,
   ],
 
@@ -1185,6 +1195,33 @@ export const createWatchlistEventPublisher = (
         clock: ClockPort,
       ): GetMyAuctionActivity => new GetMyAuctionActivity(repository, clock),
       inject: [AUCTION_ACTIVITY_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: AUCTION_METRICS_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): AuctionMetricsRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionMetricsRepository()
+          : new PostgresAuctionMetricsRepository(db),
+      inject: [DATABASE],
+    },
+
+    {
+      provide: GetAuctionVolumeAndSuccess,
+      useFactory: (
+        repository: AuctionMetricsRepositoryPort,
+        clock: ClockPort,
+      ): GetAuctionVolumeAndSuccess => new GetAuctionVolumeAndSuccess(repository, clock),
+      inject: [AUCTION_METRICS_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: GetAuctionClosingTimeAndTrends,
+      useFactory: (
+        repository: AuctionMetricsRepositoryPort,
+        clock: ClockPort,
+      ): GetAuctionClosingTimeAndTrends => new GetAuctionClosingTimeAndTrends(repository, clock),
+      inject: [AUCTION_METRICS_REPOSITORY, CLOCK],
     },
 
     {
