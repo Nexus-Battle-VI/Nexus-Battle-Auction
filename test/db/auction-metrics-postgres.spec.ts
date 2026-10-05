@@ -11,6 +11,7 @@ import { PostgresAuctionRepository } from '../../src/adapters/outbound/persisten
 import type { Database } from '../../src/adapters/outbound/persistence/schema'
 import type { AuctionMetricsRepositoryPort } from '../../src/application/ports/AuctionMetricsRepositoryPort'
 import type { ClockPort } from '../../src/application/ports/ClockPort'
+import { GetAuctionProductRankings } from '../../src/application/use-cases/GetAuctionProductRankings'
 import { GetAuctionClosingTimeAndTrends } from '../../src/application/use-cases/GetAuctionClosingTimeAndTrends'
 import { GetAuctionVolumeAndSuccess } from '../../src/application/use-cases/GetAuctionVolumeAndSuccess'
 import { Auction } from '../../src/domain/entities/Auction'
@@ -51,12 +52,15 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
   const publishPlayer = async (
     id: string,
     publishedAt: Date,
-    options: { readonly closed?: Partial<MetricsAuctionFact> } = {},
+    options: {
+      readonly closed?: Partial<MetricsAuctionFact>
+      readonly productId?: string
+    } = {},
   ): Promise<MetricsAuctionFact> => {
     const auction = Auction.publish({
       auctionId: id,
       sellerId: `seller-${id}`,
-      productId: `product-${id}`,
+      productId: options.productId ?? `product-${id}`,
       durationHours: 24,
       minimumBidCredits: 10,
       buyNowCredits: 50,
@@ -77,6 +81,7 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
     })
     const fact: MetricsAuctionFact = {
       id,
+      productId: options.productId ?? `product-${id}`,
       priceKind: 'CREDITS',
       status: 'ACTIVE',
       publishedAt,
@@ -92,8 +97,9 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
     publishedAt: Date,
     outcome: 'WITH_WINNER' | 'WITHOUT_BIDS',
     lagMs = 30_000,
+    productId?: string,
   ): Promise<MetricsAuctionFact> => {
-    const base = await publishPlayer(id, publishedAt)
+    const base = await publishPlayer(id, publishedAt, productId === undefined ? {} : { productId })
     const finishedAt = plus(base.closesAt, lagMs)
     await auctions.finishAuction({
       auctionId: id,
@@ -133,8 +139,9 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
     id: string,
     publishedAt: Date,
     afterMs: number,
+    productId?: string,
   ): Promise<MetricsAuctionFact> => {
-    const base = await publishPlayer(id, publishedAt)
+    const base = await publishPlayer(id, publishedAt, productId === undefined ? {} : { productId })
     const closedAt = plus(publishedAt, afterMs)
     await auctions.closeByBuyNow(buyNowCommand(id, closedAt))
     const fact: MetricsAuctionFact = { ...base, status: 'SOLD', buyNowCompletedAt: closedAt }
@@ -142,11 +149,16 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
     return fact
   }
 
-  const cancelCommand = (id: string, cancelledAt: Date, operationId = `cancel:${id}`) => ({
+  const cancelCommand = (
+    id: string,
+    cancelledAt: Date,
+    operationId = `cancel:${id}`,
+    productId = `product-${id}`,
+  ) => ({
     operationId,
     auctionId: id,
     sellerId: `seller-${id}`,
-    productId: `product-${id}`,
+    productId,
     cancelledAt,
     inventoryCommitmentId: `commitment:${id}`,
     feeChargeId: `charge:${id}`,
@@ -159,21 +171,27 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
     id: string,
     publishedAt: Date,
     cancelledAt: Date,
+    productId?: string,
   ): Promise<MetricsAuctionFact> => {
-    const base = await publishPlayer(id, publishedAt)
-    await auctions.cancelAuction(cancelCommand(id, cancelledAt))
+    const base = await publishPlayer(id, publishedAt, productId === undefined ? {} : { productId })
+    await auctions.cancelAuction(cancelCommand(id, cancelledAt, `cancel:${id}`, productId))
     const fact: MetricsAuctionFact = { ...base, status: 'CANCELLED', cancelledAt }
     facts.splice(facts.indexOf(base), 1, fact)
     return fact
   }
 
-  const officialCommand = (id: string, publishedAt: Date, mark: OfficialAuctionMark) => ({
+  const officialCommand = (
+    id: string,
+    publishedAt: Date,
+    mark: OfficialAuctionMark,
+    productId = `product-${id}`,
+  ) => ({
     operationId: `publish-official:${id}`,
     auction: OfficialAuction.publish({
       auctionId: id,
       publisherId: 'upb-company',
       publisherType: AuctionPublisherType.GameMaster,
-      productId: `product-${id}`,
+      productId,
       durationHours: 24,
       pricing: {
         kind: AuctionPriceKind.RealMoney,
@@ -189,10 +207,12 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
     id: string,
     publishedAt: Date,
     mark: OfficialAuctionMark,
+    productId?: string,
   ): Promise<void> => {
-    await auctions.publishOfficial(officialCommand(id, publishedAt, mark))
+    await auctions.publishOfficial(officialCommand(id, publishedAt, mark, productId))
     facts.push({
       id,
+      productId: productId ?? `product-${id}`,
       priceKind: 'REAL_MONEY',
       status: 'ACTIVE',
       publishedAt,
@@ -511,6 +531,174 @@ describe('Metricas de Subasta contra PostgreSQL real (HU-91.2)', () => {
 
       await metricsIndexes.up(db as unknown as Kysely<unknown>)
       expect(await existing()).toEqual([...expected].sort())
+    })
+  })
+
+  describe('ranking de productos HU-91.3 (contrato §3.4 / §4.2)', () => {
+    // Periodo propio (agosto): aislado de los datos y las idempotencias de arriba.
+    const rankPeriod = {
+      from: new Date('2026-08-01T00:00:00.000Z'),
+      to: new Date('2026-08-08T00:00:00.000Z'),
+    }
+    const rankQuery = { from: '2026-08-01T00:00:00Z', to: '2026-08-08T00:00:00Z' }
+    const P1 = 'rk-prod-1'
+    const P2 = 'rk-prod-2'
+
+    beforeAll(async () => {
+      // P1: el MISMO producto publicado cuatro veces (republicado) y de tres formas.
+      await finish('rk-a1', at('2026-08-02T10:00:00Z'), 'WITH_WINNER', 30_000, P1)
+      // Tres pujas sobre a1: un JOIN contra auction_bids contaria a1 tres veces.
+      await db
+        .insertInto('auction_bids')
+        .values(
+          [1, 2, 3].map((n) => ({
+            id: `rk-bid-${String(n)}`,
+            auction_id: 'rk-a1',
+            bidder_id: `bidder-${String(n)}`,
+            amount_credits: 10 + n,
+            placed_at: at(`2026-08-02T10:0${String(n)}:00Z`),
+            is_leader: n === 3,
+            credit_reservation_id: null,
+          })),
+        )
+        .execute()
+      await cancel('rk-a2', at('2026-08-03T10:00:00Z'), at('2026-08-03T11:00:00Z'), P1)
+      await sell('rk-a3', at('2026-08-04T10:00:00Z'), 2 * HOUR, P1)
+      await publishOfficial('rk-a4', at('2026-08-05T10:00:00Z'), OfficialAuctionMark.Premium, P1)
+
+      await finish('rk-b1', at('2026-08-02T11:00:00Z'), 'WITHOUT_BIDS', 30_000, P2)
+      await finish('rk-b2', at('2026-08-04T11:00:00Z'), 'WITH_WINNER', 30_000, P2)
+
+      // Tres productos empatados con una venta cada uno: el desempate es por productId.
+      await finish('rk-c1', at('2026-08-06T10:00:00Z'), 'WITH_WINNER', 30_000, 'rk-zzz')
+      await finish('rk-c2', at('2026-08-06T10:00:00Z'), 'WITH_WINNER', 30_000, 'rk-tie')
+      await finish('rk-c3', at('2026-08-06T10:00:00Z'), 'WITH_WINNER', 30_000, 'RK-tie')
+    })
+
+    it('mas subastados: una fila por publicacion, jugador y oficial por separado, sin multiplicar por pujas', async () => {
+      const { mostAuctioned } = await metrics.getProductRankings(rankPeriod, 10)
+
+      expect(mostAuctioned).toEqual([
+        // a1 (3 pujas) + a2 (cancelada) + a3 (compra inmediata) + a4 (oficial) = 4, NO 6.
+        { productId: P1, total: 4, playerCredits: 3, officialRealMoney: 1 },
+        { productId: P2, total: 2, playerCredits: 2, officialRealMoney: 0 },
+        // Empate a 1 desempatado por productId ASC en orden de bytes (collate "C").
+        { productId: 'RK-tie', total: 1, playerCredits: 1, officialRealMoney: 0 },
+        { productId: 'rk-tie', total: 1, playerCredits: 1, officialRealMoney: 0 },
+        { productId: 'rk-zzz', total: 1, playerCredits: 1, officialRealMoney: 0 },
+      ])
+    })
+
+    it('mas vendidos: solo jugador con venta cerrada; la cancelada, la oficial y la sin pujas no cuentan', async () => {
+      const { mostSold } = await metrics.getProductRankings(rankPeriod, 10)
+
+      expect(mostSold).toEqual([
+        { productId: P1, total: 2, byAuctionClose: 1, byBuyNow: 1 }, // a1 + a3
+        { productId: 'RK-tie', total: 1, byAuctionClose: 1, byBuyNow: 0 },
+        { productId: P2, total: 1, byAuctionClose: 1, byBuyNow: 0 }, // solo b2; b1 fue sin pujas
+        { productId: 'rk-tie', total: 1, byAuctionClose: 1, byBuyNow: 0 },
+        { productId: 'rk-zzz', total: 1, byAuctionClose: 1, byBuyNow: 0 },
+      ])
+    })
+
+    it('limit recorta cada lista tras ordenar', async () => {
+      const { mostAuctioned, mostSold } = await metrics.getProductRankings(rankPeriod, 2)
+
+      expect(mostAuctioned.map((entry) => entry.productId)).toEqual([P1, P2])
+      expect(mostSold.map((entry) => entry.productId)).toEqual([P1, 'RK-tie'])
+    })
+
+    it('PARIDAD: PostgreSQL y el adaptador en memoria devuelven los mismos rankings', async () => {
+      const memory = memoryRepository()
+
+      for (const limit of [1, 2, 3, 10, 50]) {
+        expect(await metrics.getProductRankings(rankPeriod, limit)).toEqual(
+          await memory.getProductRankings(rankPeriod, limit),
+        )
+      }
+      // Tambien sobre el periodo grande de las pruebas anteriores.
+      const wide = { from: at('2026-09-01T00:00:00Z'), to: at('2026-10-04T00:00:00Z') }
+      expect(await metrics.getProductRankings(wide, 50)).toEqual(
+        await memory.getProductRankings(wide, 50),
+      )
+    })
+
+    it('el caso de uso completo coincide en ambos adaptadores (Catalog simulado)', async () => {
+      const catalog = { findProducts: () => Promise.resolve([]) }
+      const fromPostgres = await new GetAuctionProductRankings(metrics, catalog, clock).execute(
+        rankQuery,
+      )
+      const fromMemory = await new GetAuctionProductRankings(
+        memoryRepository(),
+        catalog,
+        clock,
+      ).execute(rankQuery)
+
+      expect(fromPostgres).toEqual(fromMemory)
+      expect(fromPostgres.enrichment.status).toBe('PARTIAL')
+    })
+
+    it('idempotencia (contrato §5): reintentar publicacion, compra inmediata y cancelacion no cambia el ranking', async () => {
+      const before = await metrics.getProductRankings(rankPeriod, 50)
+
+      const publishReplay = await auctions.publish({
+        operationId: 'publish:rk-a1',
+        auction: Auction.publish({
+          auctionId: 'rk-a1',
+          sellerId: 'seller-rk-a1',
+          productId: P1,
+          durationHours: 24,
+          minimumBidCredits: 10,
+          buyNowCredits: 50,
+          publishedAt: at('2026-08-02T10:00:00Z'),
+          eligibility: {
+            productOwnedBySeller: true,
+            productInUse: false,
+            productTradable: true,
+            sellerHasActiveSanctions: false,
+            activeAuctionCount: 0,
+          },
+        }),
+        inventoryCommitmentId: 'commitment:rk-a1',
+        feeChargeId: 'charge:rk-a1',
+      })
+      const buyNowReplay = await auctions.closeByBuyNow(
+        buyNowCommand('rk-a3', at('2026-08-04T12:00:00Z')),
+      )
+      const cancelReplay = await auctions.cancelAuction(
+        cancelCommand('rk-a2', at('2026-08-03T11:00:00Z'), 'cancel:rk-a2', P1),
+      )
+
+      expect([publishReplay.replayed, buyNowReplay.replayed, cancelReplay.replayed]).toEqual([
+        true,
+        true,
+        true,
+      ])
+      expect(await metrics.getProductRankings(rankPeriod, 50)).toEqual(before)
+    })
+
+    it('el periodo es semiabierto [from, to) y cada ranking usa su ancla', async () => {
+      // Solo el 2 de agosto: a1 y b1 se publicaron ese dia, pero sus cierres caen el 3.
+      const publishedDay = {
+        from: at('2026-08-02T00:00:00Z'),
+        to: at('2026-08-03T00:00:00Z'),
+      }
+      const { mostAuctioned, mostSold } = await metrics.getProductRankings(publishedDay, 10)
+
+      expect(mostAuctioned.map((entry) => [entry.productId, entry.total])).toEqual([
+        [P1, 1],
+        [P2, 1],
+      ])
+      expect(mostSold).toEqual([])
+    })
+
+    it('un periodo sin datos devuelve listas vacias', async () => {
+      const empty = { from: at('2025-01-01T00:00:00Z'), to: at('2025-01-08T00:00:00Z') }
+
+      expect(await metrics.getProductRankings(empty, 10)).toEqual({
+        mostAuctioned: [],
+        mostSold: [],
+      })
     })
   })
 })

@@ -99,6 +99,10 @@ import {
   AUCTION_METRICS_REPOSITORY,
   type AuctionMetricsRepositoryPort,
 } from '../../application/ports/AuctionMetricsRepositoryPort'
+import {
+  CATALOG_PRODUCT_DETAILS,
+  type CatalogProductDetailsPort,
+} from '../../application/ports/CatalogProductDetailsPort'
 import { BID_CREDITS, type BidCreditsPort } from '../../application/ports/BidCreditsPort'
 import {
   BID_CREDIT_OPERATION_READER,
@@ -198,6 +202,7 @@ import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingPro
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
 import { GetAuctionClosingTimeAndTrends } from '../../application/use-cases/GetAuctionClosingTimeAndTrends'
+import { GetAuctionProductRankings } from '../../application/use-cases/GetAuctionProductRankings'
 import { GetAuctionVolumeAndSuccess } from '../../application/use-cases/GetAuctionVolumeAndSuccess'
 import { GetMyAuctionActivity } from '../../application/use-cases/GetMyAuctionActivity'
 import { GetMyAuctionTransactions } from '../../application/use-cases/GetMyAuctionTransactions'
@@ -704,6 +709,28 @@ export const createWatchlistEventPublisher = (
           logger,
         }),
       inject: [APP_CONFIG, LOGGER],
+    },
+
+    {
+      // HU-91.3: mismo lookup publico de Catalog, ahora para nombrar el ranking.
+      provide: CATALOG_PRODUCT_DETAILS,
+      useFactory: (config: AppConfig, logger: Logger): CatalogProductDetailsPort =>
+        new CatalogProductLookupClient({
+          baseUrl: config.catalogBaseUrl,
+          timeoutMs: 3_000,
+          logger,
+        }),
+      inject: [APP_CONFIG, LOGGER],
+    },
+
+    {
+      provide: GetAuctionProductRankings,
+      useFactory: (
+        repository: AuctionMetricsRepositoryPort,
+        catalog: CatalogProductDetailsPort,
+        clock: ClockPort,
+      ): GetAuctionProductRankings => new GetAuctionProductRankings(repository, catalog, clock),
+      inject: [AUCTION_METRICS_REPOSITORY, CATALOG_PRODUCT_DETAILS, CLOCK],
     },
 
     {

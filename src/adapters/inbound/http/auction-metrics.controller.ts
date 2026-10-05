@@ -15,12 +15,20 @@ import {
   type ClosingTimeAndTrendsResponse,
 } from '../../../application/use-cases/GetAuctionClosingTimeAndTrends'
 import {
+  GetAuctionProductRankings,
+  type ProductRankingsResponse,
+} from '../../../application/use-cases/GetAuctionProductRankings'
+import {
   GetAuctionVolumeAndSuccess,
   type VolumeAndSuccessResponse,
 } from '../../../application/use-cases/GetAuctionVolumeAndSuccess'
 import { Role } from '../../../application/ports/TokenVerifierPort'
 import { AuthenticationRequired, Roles } from './auth/decorators'
-import { AuctionMetricsPeriodQueryDto, ClosingTimeAndTrendsQueryDto } from './auction-metrics.dto'
+import {
+  AuctionMetricsPeriodQueryDto,
+  ClosingTimeAndTrendsQueryDto,
+  ProductRankingsQueryDto,
+} from './auction-metrics.dto'
 
 const toMetricsHttpException = (error: unknown): Error => {
   if (error instanceof AuctionMetricsQueryError) {
@@ -49,6 +57,7 @@ export class AuctionMetricsController {
   constructor(
     private readonly getVolumeAndSuccess: GetAuctionVolumeAndSuccess,
     private readonly getClosingTimeAndTrends: GetAuctionClosingTimeAndTrends,
+    private readonly getProductRankings: GetAuctionProductRankings,
   ) {}
 
   /** HU-91.2 / CA-01 (contrato §4.1). */
@@ -63,6 +72,24 @@ export class AuctionMetricsController {
   ): Promise<VolumeAndSuccessResponse> {
     try {
       return await this.getVolumeAndSuccess.execute(query)
+    } catch (error: unknown) {
+      throw toMetricsHttpException(error)
+    }
+  }
+
+  /** HU-91.3 / CA-02 (contrato §4.2). El nombre de producto es enriquecimiento de Catalog. */
+  @Get('product-rankings')
+  @ApiOperation({ summary: 'Productos mas subastados y mas vendidos' })
+  @ApiOkResponse({
+    description:
+      'Rankings con enrichment COMPLETE, PARTIAL o UNAVAILABLE; Catalog caido no falla el endpoint (hu-91.v1 §4.2).',
+  })
+  @ApiBadRequestResponse({ description: 'INVALID_PERIOD o INVALID_PARAMETER (limit 1-50).' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no es ADMINISTRATOR ni SUPER_ADMINISTRATOR.' })
+  async productRankings(@Query() query: ProductRankingsQueryDto): Promise<ProductRankingsResponse> {
+    try {
+      return await this.getProductRankings.execute(query)
     } catch (error: unknown) {
       throw toMetricsHttpException(error)
     }

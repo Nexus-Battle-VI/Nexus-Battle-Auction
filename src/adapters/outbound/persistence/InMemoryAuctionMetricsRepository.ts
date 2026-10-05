@@ -3,6 +3,9 @@ import {
   type ClosingTimeAggregate,
   type CloseReason,
   type MetricsPeriod,
+  type ProductAuctionedCount,
+  type ProductRankingsAggregate,
+  type ProductSoldCount,
   type TrendGranularity,
   type TrendPoint,
   type VolumeAndSuccessAggregate,
@@ -16,6 +19,8 @@ import { bucketStartOf } from '../../../application/services/auction-metrics-per
  */
 export interface MetricsAuctionFact {
   readonly id: string
+  /** Producto de Catalog; por defecto el `id` de la subasta. */
+  readonly productId?: string
   readonly priceKind: 'CREDITS' | 'REAL_MONEY'
   readonly status: 'ACTIVE' | 'FINISHED' | 'SOLD' | 'CANCELLED'
   readonly publishedAt: Date
@@ -30,6 +35,7 @@ export interface MetricsAuctionFact {
 }
 
 interface ClosedRow {
+  readonly productId: string
   readonly reason: CloseReason
   readonly closedAt: Date
   readonly publishedAt: Date
@@ -78,6 +84,7 @@ export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositor
       if (fact.priceKind !== 'CREDITS') continue
       if (fact.status === 'FINISHED' && within(fact.finishedAt, period)) {
         rows.push({
+          productId: fact.productId ?? fact.id,
           reason:
             fact.closingResultType === 'WITH_WINNER'
               ? 'EXPIRED_WITH_WINNER'
@@ -89,6 +96,7 @@ export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositor
         })
       } else if (fact.status === 'SOLD' && within(fact.buyNowCompletedAt, period)) {
         rows.push({
+          productId: fact.productId ?? fact.id,
           reason: 'BUY_NOW',
           closedAt: fact.buyNowCompletedAt,
           publishedAt: fact.publishedAt,
@@ -140,6 +148,57 @@ export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositor
         },
       },
     })
+  }
+
+  getProductRankings(period: MetricsPeriod, limit: number): Promise<ProductRankingsAggregate> {
+    const auctioned = new Map<string, { total: number; player: number; official: number }>()
+    for (const fact of this.facts.values()) {
+      if (!within(fact.publishedAt, period)) continue
+      const productId = fact.productId ?? fact.id
+      const entry = auctioned.get(productId) ?? { total: 0, player: 0, official: 0 }
+      entry.total += 1
+      if (fact.priceKind === 'CREDITS') entry.player += 1
+      else entry.official += 1
+      auctioned.set(productId, entry)
+    }
+
+    const sold = new Map<string, { total: number; byClose: number; byBuyNow: number }>()
+    for (const row of this.closedRows(period)) {
+      if (row.reason === 'EXPIRED_WITHOUT_BIDS') continue
+      const entry = sold.get(row.productId) ?? { total: 0, byClose: 0, byBuyNow: 0 }
+      entry.total += 1
+      if (row.reason === 'BUY_NOW') entry.byBuyNow += 1
+      else entry.byClose += 1
+      sold.set(row.productId, entry)
+    }
+
+    const byTotalThenProduct = <T extends { readonly total: number; readonly productId: string }>(
+      left: T,
+      right: T,
+    ): number =>
+      right.total - left.total ||
+      (left.productId < right.productId ? -1 : left.productId > right.productId ? 1 : 0)
+
+    const mostAuctioned: ProductAuctionedCount[] = [...auctioned.entries()]
+      .map(([productId, entry]) => ({
+        productId,
+        total: entry.total,
+        playerCredits: entry.player,
+        officialRealMoney: entry.official,
+      }))
+      .sort(byTotalThenProduct)
+      .slice(0, limit)
+    const mostSold: ProductSoldCount[] = [...sold.entries()]
+      .map(([productId, entry]) => ({
+        productId,
+        total: entry.total,
+        byAuctionClose: entry.byClose,
+        byBuyNow: entry.byBuyNow,
+      }))
+      .sort(byTotalThenProduct)
+      .slice(0, limit)
+
+    return Promise.resolve({ mostAuctioned, mostSold })
   }
 
   getClosingTime(period: MetricsPeriod): Promise<ClosingTimeAggregate> {
