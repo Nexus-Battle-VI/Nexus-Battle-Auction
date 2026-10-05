@@ -147,7 +147,7 @@ const silentLogger: AuctionCancellationReconcilerLogger = {
 /**
  * HU-90, CA-05. Persistencia y concurrencia REALES de la cancelacion
  * automatica: `cancelAuctionAutomatically`, las consultas del sondeo, la
- * migracion 019 y el reclamo del reconciler contra PostgreSQL de verdad.
+ * migracion 020 y el reclamo del reconciler contra PostgreSQL de verdad.
  */
 describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
   let container: StartedPostgreSqlContainer
@@ -1100,26 +1100,26 @@ describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
     })
   })
 
-  describe('migracion 019', () => {
-    it('se aplica sobre un esquema 001-018 con una cancelacion manual previa y la clasifica MANUAL', async () => {
+  describe('migracion 020', () => {
+    it('se aplica sobre un esquema 001-019 con una cancelacion manual previa y la clasifica MANUAL', async () => {
       const upgradeContainer = await new PostgreSqlContainer('postgres:17-alpine').start()
       const upgradeDb = createDatabase({ connectionString: upgradeContainer.getConnectionUri() })
       try {
-        const preMigration019 = Object.fromEntries(
-          Object.entries(MIGRATIONS).filter(([name]) => name < '019'),
+        const preMigration020 = Object.fromEntries(
+          Object.entries(MIGRATIONS).filter(([name]) => name < '020'),
         )
-        const before = await migrateToLatest(upgradeDb, preMigration019)
+        const before = await migrateToLatest(upgradeDb, preMigration020)
         expect(before.error).toBeUndefined()
 
         const closesAt = new Date(now.getTime() + 24 * 60 * 60 * 1000)
-        for (const id of ['pre-019-manual', 'pre-019-automatic']) {
+        for (const id of ['pre-020-manual', 'pre-020-automatic']) {
           await sql`
             insert into auctions (
               id, seller_id, product_id, duration_hours, publisher_type, price_kind,
               publication_fee_credits, minimum_bid_credits, status, published_at, closes_at,
               inventory_commitment_id, fee_charge_id, cancelled_at
             ) values (
-              ${id}, 'seller-pre-019', ${`product:${id}`}, 24, 'PLAYER', 'CREDITS',
+              ${id}, 'seller-pre-020', ${`product:${id}`}, 24, 'PLAYER', 'CREDITS',
               1, 10, 'CANCELLED', ${now}, ${closesAt},
               ${`commitment:${id}`}, ${`charge:${id}`}, ${now}
             )
@@ -1132,19 +1132,19 @@ describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
             wallet_refund_status, inventory_release_operation_id, inventory_release_status,
             cancelled_at, created_at, updated_at
           ) values (
-            'pre-019-manual', 'op-pre-019', 'seller-pre-019', 'product:pre-019-manual',
-            'commitment:pre-019-manual', 'charge:pre-019-manual', 0.5, 'refund-pre-019',
-            'CONFIRMED', 'release-pre-019', 'CONFIRMED', ${now}, ${now}, ${now}
+            'pre-020-manual', 'op-pre-020', 'seller-pre-020', 'product:pre-020-manual',
+            'commitment:pre-020-manual', 'charge:pre-020-manual', 0.5, 'refund-pre-020',
+            'CONFIRMED', 'release-pre-020', 'CONFIRMED', ${now}, ${now}, ${now}
           )
         `.execute(upgradeDb)
 
         const after = await migrateToLatest(upgradeDb, MIGRATIONS)
         expect(after.error).toBeUndefined()
-        expect(after.applied).toEqual(['019-add-automatic-auction-cancellation'])
+        expect(after.applied).toEqual(['020-add-automatic-auction-cancellation'])
 
         const preserved = await sql<{ origin: string; trigger_reference_id: string | null }>`
           select origin, trigger_reference_id from auction_cancellations
-          where auction_id = 'pre-019-manual'
+          where auction_id = 'pre-020-manual'
         `.execute(upgradeDb)
         expect(preserved.rows[0]).toEqual({ origin: 'MANUAL', trigger_reference_id: null })
 
@@ -1161,12 +1161,12 @@ describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
             wallet_refund_status, inventory_release_operation_id, inventory_release_status,
             cancelled_at, created_at, updated_at
           ) values (
-            'pre-019-automatic', 'op-auto-019', 'TERMS_VIOLATION',
+            'pre-020-automatic', 'op-auto-020', 'TERMS_VIOLATION',
             ${'trigger' in overrides ? overrides.trigger : 'sanction-1'},
-            'seller-pre-019', 'product:pre-019-automatic', 'commitment:pre-019-automatic',
+            'seller-pre-020', 'product:pre-020-automatic', 'commitment:pre-020-automatic',
             ${overrides.refund ?? 0},
             ${'walletOperationId' in overrides ? overrides.walletOperationId : null},
-            ${overrides.walletStatus ?? 'NOT_REQUIRED'}, 'release-auto-019', 'PENDING',
+            ${overrides.walletStatus ?? 'NOT_REQUIRED'}, 'release-auto-020', 'PENDING',
             ${now}, ${now}, ${now}
           )
         `.execute(upgradeDb)
@@ -1180,13 +1180,13 @@ describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
         await expect(
           sql`
             update auction_cancellations set wallet_refund_status = 'NOT_REQUIRED'
-            where auction_id = 'pre-019-manual'
+            where auction_id = 'pre-020-manual'
           `.execute(upgradeDb),
         ).rejects.toThrow()
         await expect(
           sql`
             update auction_cancellations set refund_amount_credits = 0
-            where auction_id = 'pre-019-manual'
+            where auction_id = 'pre-020-manual'
           `.execute(upgradeDb),
         ).rejects.toThrow()
 
@@ -1194,20 +1194,20 @@ describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
         await sql`
           insert into auction_cancellation_reservation_releases (
             auction_id, reservation_id, operation_id, status, created_at, updated_at
-          ) values ('pre-019-automatic', 'hold-1', 'release-op-1', 'PENDING', ${now}, ${now})
+          ) values ('pre-020-automatic', 'hold-1', 'release-op-1', 'PENDING', ${now}, ${now})
         `.execute(upgradeDb)
         // Una reserva se sigue una sola vez por subasta, con estado valido.
         await expect(
           sql`
             insert into auction_cancellation_reservation_releases (
               auction_id, reservation_id, operation_id, status, created_at, updated_at
-            ) values ('pre-019-automatic', 'hold-1', 'release-op-2', 'PENDING', ${now}, ${now})
+            ) values ('pre-020-automatic', 'hold-1', 'release-op-2', 'PENDING', ${now}, ${now})
           `.execute(upgradeDb),
         ).rejects.toThrow()
         await expect(
           sql`
             update auction_cancellation_reservation_releases set status = 'NOT_REQUIRED'
-            where auction_id = 'pre-019-automatic'
+            where auction_id = 'pre-020-automatic'
           `.execute(upgradeDb),
         ).rejects.toThrow()
       } finally {
@@ -1224,8 +1224,8 @@ describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
       try {
         const outcome = await migrateToLatest(migrationDb)
         expect(outcome.error).toBeUndefined()
-        const migration = MIGRATIONS['019-add-automatic-auction-cancellation']
-        if (migration?.down === undefined) throw new Error('La migracion 019 no tiene down.')
+        const migration = MIGRATIONS['020-add-automatic-auction-cancellation']
+        if (migration?.down === undefined) throw new Error('La migracion 020 no tiene down.')
 
         await migration.down(migrationDb)
         const columns = await sql<{ column_name: string }>`

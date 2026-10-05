@@ -30,3 +30,17 @@ La acción `cancel` de “Mis subastas” es informativa y reutiliza las condici
 - Se añadieron cuatro rutas privadas al controlador existente y sus contratos OpenAPI.
 - Se añadieron pruebas unitarias, HTTP y PostgreSQL con dos identidades distintas.
 - No se modificaron Watchlist (HU-68), Pending Claims (HU-69) ni la operación de cancelación (HU-90).
+
+## TASK 89.5 — QA / Security backend
+
+La validación de seguridad amplía la evidencia de TASK 89.1, TASK 89.2 y TASK 89.3 sin cambiar código productivo:
+
+- prueba los cuatro endpoints con autenticación ausente, token inválido y rol sin permiso;
+- verifica que `identity.subject` selecciona los datos de Usuario A y Usuario B;
+- rechaza `userId`, `playerId`, `sellerId` y `bidderId` en los contratos paginados;
+- comprueba el aislamiento antes de paginar tanto en memoria como en PostgreSQL;
+- demuestra que publicaciones, pujas e historial no exponen identificadores de terceros;
+- conserva la indisponibilidad explícita de estadísticas sin generar métricas ficticias.
+
+Los escenarios, resultados y limitaciones de ejecución están registrados en
+[`docs/tasks/TASK-89.5-qa-security-backend.md`](tasks/TASK-89.5-qa-security-backend.md).
