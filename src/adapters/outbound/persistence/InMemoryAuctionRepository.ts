@@ -27,6 +27,7 @@ import type {
   BidHistoryPage,
   BidHistoryPageInput,
   BuyNowOperationRecord,
+  CancelAuctionAutomaticallyCommand,
   CancelAuctionCommand,
   CancelAuctionResult,
   CloseAuctionByBuyNowCommand,
@@ -35,6 +36,7 @@ import type {
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
   ListActiveAuctionsInput,
+  ListActiveSellerIdsInput,
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
@@ -57,7 +59,9 @@ import type {
   AuctionSettlementCandidate,
   AuctionSettlementCandidateReaderPort,
 } from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
+import { planCancellationReservationReleases } from '../../../application/services/CancellationReservationReleasePlanner'
 import { AuctionRuleCode, AuctionRuleViolation } from '../../../domain/errors/AuctionRuleViolation'
+import { AuctionCancellationOrigin } from '../../../domain/events/AuctionCancelledEventV1'
 import {
   Auction,
   AuctionStatus,
@@ -1018,6 +1022,114 @@ export class InMemoryAuctionRepository
     })
 
     return Promise.resolve({ auction: cancelled, replayed: false })
+  }
+
+  /** HU-90, CA-05: ver el comentario de la version Postgres. */
+  cancelAuctionAutomatically(
+    command: CancelAuctionAutomaticallyCommand,
+  ): Promise<CancelAuctionResult> {
+    const hash = createHash('sha256')
+      .update(
+        JSON.stringify([
+          command.auctionId,
+          AuctionCancellationOrigin.TermsViolation,
+          command.triggerReferenceId,
+        ]),
+        'utf8',
+      )
+      .digest('hex')
+    const previous = this.cancellationOperations.get(command.operationId)
+
+    if (previous !== undefined) {
+      if (previous.hash !== hash) {
+        return Promise.reject(new IdempotencyConflictError())
+      }
+      const auction = this.auctions.get(previous.auctionId)
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+      return Promise.resolve({ auction, replayed: true })
+    }
+
+    const auction = this.auctions.get(command.auctionId)
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+    if (auction.status !== AuctionStatus.Active) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        ),
+      )
+    }
+    const inventoryCommitmentId = this.inventoryCommitmentIds.get(command.auctionId)
+    if (inventoryCommitmentId === undefined) {
+      return Promise.reject(
+        new Error(`La subasta ${command.auctionId} no tiene un inventoryCommitmentId durable.`),
+      )
+    }
+
+    const reservationReleases = planCancellationReservationReleases(
+      command.auctionId,
+      [...this.bids.values()]
+        .filter((stored) => stored.snapshot.auctionId === command.auctionId)
+        .map((stored) => ({ creditReservationId: stored.creditReservationId })),
+      [...this.bidCreditOperations.values()].filter(
+        (operation) => operation.auctionId === command.auctionId,
+      ),
+    )
+
+    const cancelled: AuctionSnapshot = {
+      ...auction,
+      status: AuctionStatus.Cancelled,
+      cancelledAt: new Date(command.cancelledAt),
+    }
+    this.auctions.set(cancelled.id, cancelled)
+    this.cancellationOperations.set(command.operationId, {
+      hash,
+      auctionId: command.auctionId,
+    })
+    this.cancellations.createAutomaticIfAbsent({
+      auctionId: command.auctionId,
+      operationId: command.operationId,
+      triggerReferenceId: command.triggerReferenceId,
+      sellerId: auction.sellerId,
+      productId: auction.productId,
+      inventoryCommitmentId,
+      inventoryReleaseOperationId: command.inventoryReleaseOperationId,
+      reservationReleases,
+      cancelledAt: command.cancelledAt,
+    })
+
+    return Promise.resolve({ auction: cancelled, replayed: false })
+  }
+
+  listActiveSellerIds(input: ListActiveSellerIdsInput): Promise<readonly string[]> {
+    const after = input.afterSellerId
+    const sellerIds = [
+      ...new Set(
+        [...this.auctions.values()]
+          .filter((auction) => auction.status === AuctionStatus.Active)
+          .map((auction) => auction.sellerId),
+      ),
+    ]
+      .filter((sellerId) => after === null || sellerId > after)
+      .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+      .slice(0, input.limit)
+
+    return Promise.resolve(sellerIds)
+  }
+
+  listActiveAuctionIdsBySeller(sellerId: string): Promise<readonly string[]> {
+    return Promise.resolve(
+      [...this.auctions.values()]
+        .filter(
+          (auction) => auction.sellerId === sellerId && auction.status === AuctionStatus.Active,
+        )
+        .map((auction) => auction.id)
+        .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
+    )
   }
 
   recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {

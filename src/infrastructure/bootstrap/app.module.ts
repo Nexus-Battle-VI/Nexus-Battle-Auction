@@ -171,6 +171,7 @@ import {
 } from '../../application/ports/SellerPublicProfilePort'
 import {
   SELLER_SANCTIONS,
+  type SellerActiveSanctionsPort,
   type SellerSanctionPort,
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
@@ -210,6 +211,9 @@ import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
 import { CancelAuction } from '../../application/use-cases/CancelAuction'
 import { AuctionCancellationReconciler } from '../../application/use-cases/AuctionCancellationReconciler'
+import { AuctionCancellationEffectsResolver } from '../../application/use-cases/AuctionCancellationEffectsResolver'
+import { CancelAuctionAutomatically } from '../../application/use-cases/CancelAuctionAutomatically'
+import { CancelAuctionsForTermsViolations } from '../../application/use-cases/CancelAuctionsForTermsViolations'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
 import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
 import { BuyNowPendingClaimRegistrationService } from '../../application/services/BuyNowPendingClaimRegistrationService'
@@ -226,6 +230,7 @@ import { EarlyClosureRetryScheduler } from '../scheduling/EarlyClosureRetrySched
 import { BuyNowPendingClaimRetryScheduler } from '../scheduling/BuyNowPendingClaimRetryScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
 import { AuctionCancellationReconcilerScheduler } from '../scheduling/AuctionCancellationReconcilerScheduler'
+import { AuctionTermsViolationCancellationScheduler } from '../scheduling/AuctionTermsViolationCancellationScheduler'
 import {
   NodeSchedulerTimer,
   SCHEDULER_TIMER,
@@ -856,23 +861,89 @@ export const createWatchlistEventPublisher = (
     },
 
     {
+      // HU-90, CA-05: caso de uso interno, sin endpoint. Solo lo invocan el
+      // sondeo de sanciones y el reconciler de cancelaciones.
+      provide: CancelAuctionAutomatically,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        cancellations: AuctionCancellationRepositoryPort,
+        wallet: AuctionWalletPort,
+        inventory: ProductInventoryPort,
+        clock: ClockPort,
+      ): CancelAuctionAutomatically =>
+        new CancelAuctionAutomatically(auctions, cancellations, wallet, inventory, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        AUCTION_CANCELLATION_REPOSITORY,
+        AUCTION_WALLET,
+        PRODUCT_INVENTORY,
+        CLOCK,
+      ],
+    },
+
+    {
+      provide: CancelAuctionsForTermsViolations,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        // El cliente de SELLER_SANCTIONS implementa ambos puertos de sanciones.
+        sanctions: SellerActiveSanctionsPort,
+        cancelAutomatically: CancelAuctionAutomatically,
+        logger: Logger,
+        config: AppConfig,
+      ): CancelAuctionsForTermsViolations =>
+        new CancelAuctionsForTermsViolations(auctions, sanctions, cancelAutomatically, logger, {
+          batchSize: config.auctionTermsViolationBatchSize,
+        }),
+      inject: [
+        AUCTION_REPOSITORY,
+        SELLER_SANCTIONS,
+        CancelAuctionAutomatically,
+        LOGGER,
+        APP_CONFIG,
+      ],
+    },
+
+    {
+      provide: AuctionTermsViolationCancellationScheduler,
+      useFactory: (
+        worker: CancelAuctionsForTermsViolations,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionTermsViolationCancellationScheduler =>
+        new AuctionTermsViolationCancellationScheduler(worker, timer, logger, {
+          enabled: config.auctionTermsViolationSchedulerEnabled,
+          pollIntervalMs: config.auctionTermsViolationPollIntervalMs,
+        }),
+      inject: [CancelAuctionsForTermsViolations, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+
+    {
       provide: AuctionCancellationReconciler,
       useFactory: (
         cancellations: AuctionCancellationRepositoryPort,
         cancelAuction: CancelAuction,
+        cancelAuctionAutomatically: CancelAuctionAutomatically,
         clock: ClockPort,
         logger: Logger,
         identifiers: IdentifierGeneratorPort,
         config: AppConfig,
       ): AuctionCancellationReconciler =>
-        new AuctionCancellationReconciler(cancellations, cancelAuction, clock, logger, {
-          batchSize: config.auctionCancellationReconcilerBatchSize,
-          leaseMs: config.auctionCancellationReconcilerLeaseMs,
-          workerId: `auction-cancellation-reconciler-${identifiers.generate()}`,
-        }),
+        new AuctionCancellationReconciler(
+          cancellations,
+          new AuctionCancellationEffectsResolver(cancelAuction, cancelAuctionAutomatically),
+          clock,
+          logger,
+          {
+            batchSize: config.auctionCancellationReconcilerBatchSize,
+            leaseMs: config.auctionCancellationReconcilerLeaseMs,
+            workerId: `auction-cancellation-reconciler-${identifiers.generate()}`,
+          },
+        ),
       inject: [
         AUCTION_CANCELLATION_REPOSITORY,
         CancelAuction,
+        CancelAuctionAutomatically,
         CLOCK,
         LOGGER,
         IDENTIFIER_GENERATOR,
@@ -1013,7 +1084,11 @@ export const createWatchlistEventPublisher = (
     {
       provide: SELLER_SANCTIONS,
 
-      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): SellerSanctionPort => {
+      useFactory: (
+        config: AppConfig,
+        logger: Logger,
+        clock: ClockPort,
+      ): SellerSanctionPort & SellerActiveSanctionsPort => {
         if (config.accountBaseUrl === null || config.internalServiceAuthSecret === null) {
           return new UnavailableSellerSanctions()
         }

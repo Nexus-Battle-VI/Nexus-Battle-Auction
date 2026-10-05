@@ -8,7 +8,7 @@ export interface CaptureAuctionHoldCommand {
 export interface ReleaseAuctionHoldCommand {
   holdId: string
   operationId: string
-  reason: 'AUCTION_SETTLEMENT_LOST' | 'AUCTION_OUTBID'
+  reason: 'AUCTION_SETTLEMENT_LOST' | 'AUCTION_OUTBID' | 'AUCTION_CANCELLED'
 }
 export type WalletHoldOutcome =
   | 'SUCCESS'

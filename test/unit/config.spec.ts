@@ -607,6 +607,59 @@ describe('Configuracion del servicio', () => {
     )
   })
 
+  it('deja deshabilitado por defecto el sondeo de sanciones AUCTION_TERMS_VIOLATION (HU-90, CA-05)', () => {
+    expect(loadConfig({})).toMatchObject({
+      auctionTermsViolationSchedulerEnabled: false,
+      auctionTermsViolationPollIntervalMs: 30_000,
+      auctionTermsViolationBatchSize: 50,
+    })
+  })
+
+  it('configura fail-closed el sondeo de sanciones AUCTION_TERMS_VIOLATION (HU-90, CA-05)', () => {
+    const enabled = {
+      PERSISTENCE_DRIVER: 'postgres',
+      DATABASE_URL: 'postgres://db/auction',
+      ACCOUNT_BASE_URL: 'http://account:3001',
+      WALLET_BASE_URL: 'http://wallet:3006',
+      INVENTORY_BASE_URL: 'http://inventory:3006',
+      INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+      AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED: 'true',
+    }
+    expect(
+      loadConfig({
+        ...enabled,
+        AUCTION_TERMS_VIOLATION_POLL_INTERVAL_MS: '45000',
+        AUCTION_TERMS_VIOLATION_BATCH_SIZE: '30',
+      }),
+    ).toMatchObject({
+      auctionTermsViolationSchedulerEnabled: true,
+      auctionTermsViolationPollIntervalMs: 45_000,
+      auctionTermsViolationBatchSize: 30,
+    })
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED: 'true' })).toThrow(
+      /PERSISTENCE_DRIVER/,
+    )
+    for (const missing of ['ACCOUNT_BASE_URL', 'WALLET_BASE_URL', 'INVENTORY_BASE_URL'] as const) {
+      expect(() => loadConfig({ ...enabled, [missing]: '' })).toThrow(/ACCOUNT_BASE_URL/)
+    }
+    // Sin secreto interno ninguna URL interna es valida: la validacion previa lo rechaza.
+    expect(() => loadConfig({ ...enabled, INTERNAL_SERVICE_AUTH_SECRET: '' })).toThrow(
+      /INTERNAL_SERVICE_AUTH_SECRET/,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED: 'yes' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_POLL_INTERVAL_MS: '999' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_BATCH_SIZE: '0' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_BATCH_SIZE: '501' })).toThrow(
+      ConfigurationError,
+    )
+  })
+
   it.each(['999', '3600001', 'invalid'])(
     'rechaza poll interval de retry invalido: %s',
     (interval) => {
