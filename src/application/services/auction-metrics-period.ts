@@ -171,6 +171,21 @@ export const periodEnvelope = (
 export const roundSeconds = (value: number | null): number | null =>
   value === null ? null : Math.round(value)
 
+/**
+ * `sum / count` redondeado HALF-UP a `decimals` decimales, con aritmetica entera
+ * exacta (`BigInt`): `Math.round(x * 100) / 100` falla en casos como 1.005 (da
+ * 1 en vez de 1.01) porque 1.005 no es representable en binario. `null` sin muestra
+ * (nunca 0: un promedio de nada no es cero). Solo para `sum >= 0` y `count > 0`.
+ */
+export const averageHalfUp = (sum: number, count: number, decimals: number): number | null => {
+  if (count === 0) return null
+  const factor = 10n ** BigInt(decimals)
+  const numerator = BigInt(Math.round(sum)) * factor
+  const denominator = BigInt(count)
+  const rounded = (2n * numerator + denominator) / (2n * denominator)
+  return Number(rounded) / Number(factor)
+}
+
 /** Razon `numerador / denominador`, o `null` si no hay denominador (nunca 0). */
 export const ratioOrNull = (numerator: number, denominator: number): number | null =>
   denominator === 0 ? null : numerator / denominator

@@ -201,6 +201,7 @@ import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchli
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
+import { GetAuctionAveragePrices } from '../../application/use-cases/GetAuctionAveragePrices'
 import { GetAuctionClosingTimeAndTrends } from '../../application/use-cases/GetAuctionClosingTimeAndTrends'
 import { GetAuctionProductRankings } from '../../application/use-cases/GetAuctionProductRankings'
 import { GetAuctionVolumeAndSuccess } from '../../application/use-cases/GetAuctionVolumeAndSuccess'
@@ -721,6 +722,15 @@ export const createWatchlistEventPublisher = (
           logger,
         }),
       inject: [APP_CONFIG, LOGGER],
+    },
+
+    {
+      provide: GetAuctionAveragePrices,
+      useFactory: (
+        repository: AuctionMetricsRepositoryPort,
+        clock: ClockPort,
+      ): GetAuctionAveragePrices => new GetAuctionAveragePrices(repository, clock),
+      inject: [AUCTION_METRICS_REPOSITORY, CLOCK],
     },
 
     {
