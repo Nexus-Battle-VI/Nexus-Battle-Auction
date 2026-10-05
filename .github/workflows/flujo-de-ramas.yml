@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Descargar el repositorio con historial completo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # La punta REAL del pull request, no el commit de fusion que GitHub
           # sintetiza. Ese commit tiene a `main` por padre, asi que usarlo
