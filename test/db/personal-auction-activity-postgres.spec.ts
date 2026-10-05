@@ -19,6 +19,7 @@ describe('Actividad personal PostgreSQL HU-89', () => {
     const auctions = new PostgresAuctionRepository(db)
     for (const [auctionId, sellerId, operationId] of [
       ['auction-a', 'seller-a', 'publication-a'],
+      ['auction-a-2', 'seller-a', 'publication-a-2'],
       ['auction-b', 'seller-b', 'publication-b'],
     ] as const) {
       await auctions.publish({
@@ -67,18 +68,32 @@ describe('Actividad personal PostgreSQL HU-89', () => {
       .execute()
     await db
       .insertInto('auction_bid_credit_operations')
-      .values({
-        operation_id: 'bid-operation-a',
-        bid_id: 'bid-a',
-        auction_id: 'auction-b',
-        bidder_id: 'player-a',
-        amount_credits: 20,
-        status: 'COMPLETED',
-        reservation_id: 'hold-a',
-        previous_reservation_id: null,
-        created_at: new Date('2026-10-03T10:01:00Z'),
-        updated_at: new Date('2026-10-03T10:01:00Z'),
-      })
+      .values([
+        {
+          operation_id: 'bid-operation-a',
+          bid_id: 'bid-a',
+          auction_id: 'auction-b',
+          bidder_id: 'player-a',
+          amount_credits: 20,
+          status: 'COMPLETED',
+          reservation_id: 'hold-a',
+          previous_reservation_id: null,
+          created_at: new Date('2026-10-03T10:01:00Z'),
+          updated_at: new Date('2026-10-03T10:01:00Z'),
+        },
+        {
+          operation_id: 'bid-operation-b',
+          bid_id: 'bid-b',
+          auction_id: 'auction-b',
+          bidder_id: 'player-b',
+          amount_credits: 30,
+          status: 'COMPLETED',
+          reservation_id: 'hold-b',
+          previous_reservation_id: 'hold-a',
+          created_at: new Date('2026-10-03T10:02:00Z'),
+          updated_at: new Date('2026-10-03T10:02:00Z'),
+        },
+      ])
       .execute()
     activity = new PostgresAuctionActivityRepository(db)
   }, 120_000)
@@ -90,15 +105,36 @@ describe('Actividad personal PostgreSQL HU-89', () => {
     await container?.stop()
   })
 
-  it('aísla publicaciones, participaciones y transacciones por identidad', async () => {
-    await expect(
-      activity.listOwnedAuctions({
-        playerId: 'seller-a',
-        page: 1,
-        pageSize: 10,
-        now: new Date('2026-10-03T11:00:00Z'),
-      }),
-    ).resolves.toMatchObject({ total: 1, items: [{ auctionId: 'auction-a' }] })
+  it('aísla publicaciones por identidad antes de aplicar la paginación', async () => {
+    const firstPageA = await activity.listOwnedAuctions({
+      playerId: 'seller-a',
+      page: 1,
+      pageSize: 1,
+      now: new Date('2026-10-03T11:00:00Z'),
+    })
+    const secondPageA = await activity.listOwnedAuctions({
+      playerId: 'seller-a',
+      page: 2,
+      pageSize: 1,
+      now: new Date('2026-10-03T11:00:00Z'),
+    })
+    const pageB = await activity.listOwnedAuctions({
+      playerId: 'seller-b',
+      page: 1,
+      pageSize: 10,
+      now: new Date('2026-10-03T11:00:00Z'),
+    })
+
+    expect(firstPageA).toMatchObject({ total: 2, items: [{ auctionId: 'auction-a' }] })
+    expect(secondPageA).toMatchObject({ total: 2, items: [{ auctionId: 'auction-a-2' }] })
+    expect(pageB).toMatchObject({ total: 1, items: [{ auctionId: 'auction-b' }] })
+    for (const item of [...firstPageA.items, ...secondPageA.items, ...pageB.items]) {
+      expect(item).not.toHaveProperty('sellerId')
+      expect(item).not.toHaveProperty('bidderId')
+    }
+  })
+
+  it('aísla participaciones e historial por identidad sin exponer a terceros', async () => {
     await expect(
       activity.listBidParticipations({ playerId: 'player-a', page: 1, pageSize: 10 }),
     ).resolves.toMatchObject({
@@ -113,10 +149,37 @@ describe('Actividad personal PostgreSQL HU-89', () => {
       ],
     })
     await expect(
+      activity.listBidParticipations({ playerId: 'player-b', page: 1, pageSize: 10 }),
+    ).resolves.toMatchObject({
+      total: 1,
+      items: [
+        {
+          auctionId: 'auction-b',
+          participationStatus: 'LEADING',
+          ownLatestBidCredits: 30,
+          currentBidCredits: 30,
+        },
+      ],
+    })
+    await expect(
       activity.listTransactions({ playerId: 'player-a', page: 1, pageSize: 10 }),
     ).resolves.toMatchObject({
       total: 1,
       items: [{ id: 'bid:bid-operation-a', type: 'BID_RESERVATION' }],
     })
+    await expect(
+      activity.listTransactions({ playerId: 'player-b', page: 1, pageSize: 10 }),
+    ).resolves.toMatchObject({
+      total: 1,
+      items: [{ id: 'bid:bid-operation-b', type: 'BID_RESERVATION' }],
+    })
+
+    const response = await activity.listBidParticipations({
+      playerId: 'player-a',
+      page: 1,
+      pageSize: 10,
+    })
+    expect(response.items[0]).not.toHaveProperty('bidderId')
+    expect(response.items[0]).not.toHaveProperty('leaderBidderId')
   })
 })
