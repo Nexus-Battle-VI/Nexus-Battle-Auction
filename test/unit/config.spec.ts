@@ -29,6 +29,12 @@ describe('Configuracion del servicio', () => {
 
       notificationsTimeoutMs: 3_000,
 
+      auctionConfirmationDispatchEnabled: false,
+
+      auctionConfirmationDispatchBatchSize: 25,
+
+      auctionConfirmationDispatchPollIntervalMs: 5_000,
+
       notificationsWatchlistBaseUrl: null,
 
       auctionSettlementBatchSize: 25,
@@ -195,6 +201,40 @@ describe('Configuracion del servicio', () => {
     expect(config.notificationsBaseUrl).toBe('http://notifications:3005')
 
     expect(config.notificationsTimeoutMs).toBe(2_500)
+  })
+
+  it('exige Postgres y el transporte de Notifications al activar confirmaciones', () => {
+    expect(() =>
+      loadConfig({
+        AUCTION_CONFIRMATION_DISPATCH_ENABLED: 'true',
+      }),
+    ).toThrow(/PERSISTENCE_DRIVER/)
+
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://usuario@db/auction',
+        AUCTION_CONFIRMATION_DISPATCH_ENABLED: 'true',
+      }),
+    ).toThrow(/NOTIFICATIONS_BASE_URL/)
+  })
+
+  it('configura el despacho durable de confirmaciones', () => {
+    const config = loadConfig({
+      PERSISTENCE_DRIVER: 'postgres',
+      DATABASE_URL: 'postgres://usuario@db/auction',
+      INTERNAL_SERVICE_AUTH_SECRET: 'shared-secret',
+      NOTIFICATIONS_BASE_URL: 'http://notifications:3005',
+      AUCTION_CONFIRMATION_DISPATCH_ENABLED: 'true',
+      AUCTION_CONFIRMATION_DISPATCH_BATCH_SIZE: '10',
+      AUCTION_CONFIRMATION_DISPATCH_POLL_INTERVAL_MS: '10000',
+    })
+
+    expect(config).toMatchObject({
+      auctionConfirmationDispatchEnabled: true,
+      auctionConfirmationDispatchBatchSize: 10,
+      auctionConfirmationDispatchPollIntervalMs: 10_000,
+    })
   })
 
   /**
@@ -521,6 +561,101 @@ describe('Configuracion del servicio', () => {
       loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_POLL_INTERVAL_MS: '999' }),
     ).toThrow(ConfigurationError)
     expect(() => loadConfig({ AUCTION_BUY_NOW_PENDING_CLAIM_RETRY_BATCH_SIZE: '501' })).toThrow(
+      ConfigurationError,
+    )
+  })
+
+  it('configura fail-closed el reconciler de cancelaciones (HU-90)', () => {
+    expect(
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        WALLET_BASE_URL: 'http://wallet:3006',
+        INVENTORY_BASE_URL: 'http://inventory:3006',
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED: 'true',
+        AUCTION_CANCELLATION_RECONCILER_POLL_INTERVAL_MS: '45000',
+        AUCTION_CANCELLATION_RECONCILER_BATCH_SIZE: '30',
+        AUCTION_CANCELLATION_RECONCILER_LEASE_MS: '120000',
+      }),
+    ).toMatchObject({
+      auctionCancellationReconcilerSchedulerEnabled: true,
+      auctionCancellationReconcilerPollIntervalMs: 45_000,
+      auctionCancellationReconcilerBatchSize: 30,
+      auctionCancellationReconcilerLeaseMs: 120_000,
+    })
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED: 'true' })).toThrow(
+      /PERSISTENCE_DRIVER/,
+    )
+    expect(() =>
+      loadConfig({
+        PERSISTENCE_DRIVER: 'postgres',
+        DATABASE_URL: 'postgres://db/auction',
+        INVENTORY_BASE_URL: 'http://inventory:3006',
+        INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+        AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED: 'true',
+      }),
+    ).toThrow(/WALLET_BASE_URL/)
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_POLL_INTERVAL_MS: '999' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_BATCH_SIZE: '501' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_CANCELLATION_RECONCILER_LEASE_MS: '999' })).toThrow(
+      ConfigurationError,
+    )
+  })
+
+  it('deja deshabilitado por defecto el sondeo de sanciones AUCTION_TERMS_VIOLATION (HU-90, CA-05)', () => {
+    expect(loadConfig({})).toMatchObject({
+      auctionTermsViolationSchedulerEnabled: false,
+      auctionTermsViolationPollIntervalMs: 30_000,
+      auctionTermsViolationBatchSize: 50,
+    })
+  })
+
+  it('configura fail-closed el sondeo de sanciones AUCTION_TERMS_VIOLATION (HU-90, CA-05)', () => {
+    const enabled = {
+      PERSISTENCE_DRIVER: 'postgres',
+      DATABASE_URL: 'postgres://db/auction',
+      ACCOUNT_BASE_URL: 'http://account:3001',
+      WALLET_BASE_URL: 'http://wallet:3006',
+      INVENTORY_BASE_URL: 'http://inventory:3006',
+      INTERNAL_SERVICE_AUTH_SECRET: 'secret',
+      AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED: 'true',
+    }
+    expect(
+      loadConfig({
+        ...enabled,
+        AUCTION_TERMS_VIOLATION_POLL_INTERVAL_MS: '45000',
+        AUCTION_TERMS_VIOLATION_BATCH_SIZE: '30',
+      }),
+    ).toMatchObject({
+      auctionTermsViolationSchedulerEnabled: true,
+      auctionTermsViolationPollIntervalMs: 45_000,
+      auctionTermsViolationBatchSize: 30,
+    })
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED: 'true' })).toThrow(
+      /PERSISTENCE_DRIVER/,
+    )
+    for (const missing of ['ACCOUNT_BASE_URL', 'WALLET_BASE_URL', 'INVENTORY_BASE_URL'] as const) {
+      expect(() => loadConfig({ ...enabled, [missing]: '' })).toThrow(/ACCOUNT_BASE_URL/)
+    }
+    // Sin secreto interno ninguna URL interna es valida: la validacion previa lo rechaza.
+    expect(() => loadConfig({ ...enabled, INTERNAL_SERVICE_AUTH_SECRET: '' })).toThrow(
+      /INTERNAL_SERVICE_AUTH_SECRET/,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED: 'yes' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_POLL_INTERVAL_MS: '999' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_BATCH_SIZE: '0' })).toThrow(
+      ConfigurationError,
+    )
+    expect(() => loadConfig({ AUCTION_TERMS_VIOLATION_BATCH_SIZE: '501' })).toThrow(
       ConfigurationError,
     )
   })

@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 
-import { sql, type Kysely, type Selectable, type Transaction } from 'kysely'
+import {
+  sql,
+  type Expression,
+  type Kysely,
+  type Selectable,
+  type SqlBool,
+  type Transaction,
+} from 'kysely'
 
 import {
   ActiveAuctionLimitExceededError,
@@ -16,15 +23,23 @@ import {
 import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
+  AuctionDetailSnapshot,
   BidCreditOperationSnapshot,
   BidCreditOperationStatus,
+  BidHistoryPage,
+  BidHistoryPageInput,
   BuyNowOperationRecord,
+  CancelAuctionAutomaticallyCommand,
+  CancelAuctionCommand,
+  CancelAuctionResult,
   CloseAuctionByBuyNowCommand,
   CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
+  ActiveAuctionUniverseInput,
   ListActiveAuctionsInput,
+  ListActiveSellerIdsInput,
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
@@ -34,6 +49,13 @@ import type {
   RecordPublicationFailureCommand,
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
+import { AuctionCancellationEffectStatus } from '../../../application/ports/AuctionCancellationRepositoryPort'
+import { planCancellationReservationReleases } from '../../../application/services/CancellationReservationReleasePlanner'
+import {
+  AuctionCancellationOrigin,
+  createAuctionCancelledEventV1,
+} from '../../../domain/events/AuctionCancelledEventV1'
+import { AuctionRuleCode, AuctionRuleViolation } from '../../../domain/errors/AuctionRuleViolation'
 import type {
   AuctionSettlementCandidate,
   AuctionSettlementCandidateReaderPort,
@@ -42,6 +64,7 @@ import type { AuctionClosingOutcome } from '../../../domain/entities/Auction'
 import {
   Auction,
   AuctionStatus,
+  CANCELLATION_WINDOW_MS,
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
@@ -52,6 +75,7 @@ import {
   AuctionPublisherType,
   type OfficialAuctionSnapshot,
 } from '../../../domain/entities/OfficialAuction'
+import type { AuctionBidAcceptedEventV1 } from '../../../domain/events/AuctionBidAcceptedEventV1'
 import type { Database } from './schema'
 
 type AuctionRow = Selectable<Database['auctions']>
@@ -117,6 +141,7 @@ const toSnapshot = (row: AuctionRow): AuctionSnapshot | null => {
     status: row.status as AuctionStatus,
     publishedAt: new Date(row.published_at),
     closesAt: new Date(row.closes_at),
+    cancelledAt: row.cancelled_at === null ? null : new Date(row.cancelled_at),
   }
 }
 
@@ -146,6 +171,61 @@ const toOfficialSnapshot = (row: AuctionRow): OfficialAuctionSnapshot | null => 
     publishedAt: new Date(row.published_at),
     closesAt: new Date(row.closes_at),
   }
+}
+
+/**
+ * HU-88: unifica ambas ramas de precio para el detalle, mismo vocabulario que
+ * el mapeo de fila a item de `listActive` (sin `currentBidAmount`/`bidCount`,
+ * que el detalle resuelve por separado). `null` solo si la fila no cumple los
+ * invariantes de ninguna rama -no deberia ocurrir con datos consistentes-.
+ */
+const toDetailSnapshot = (row: AuctionRow): AuctionDetailSnapshot | null => {
+  const base = {
+    id: row.id,
+    sellerId: row.seller_id,
+    productId: row.product_id,
+    durationHours: row.duration_hours as 24 | 48,
+    publicationFeeCredits: row.publication_fee_credits,
+    status: row.status as AuctionStatus,
+    publishedAt: new Date(row.published_at),
+    closesAt: new Date(row.closes_at),
+    cancelledAt: row.cancelled_at === null ? null : new Date(row.cancelled_at),
+  }
+
+  if (row.price_kind === 'CREDITS' && row.minimum_bid_credits !== null) {
+    return {
+      ...base,
+      publisherType: 'PLAYER',
+      priceKind: 'CREDITS',
+      minimumBidCredits: row.minimum_bid_credits,
+      buyNowCredits: row.buy_now_credits,
+      currency: null,
+      minimumBidAmountMinor: null,
+      buyNowAmountMinor: null,
+      officialMark: null,
+    }
+  }
+
+  if (
+    row.price_kind === 'REAL_MONEY' &&
+    row.currency !== null &&
+    row.minimum_bid_amount_minor !== null &&
+    (row.official_mark === 'OFFICIAL' || row.official_mark === 'PREMIUM')
+  ) {
+    return {
+      ...base,
+      publisherType: 'GAME_MASTER',
+      priceKind: 'REAL_MONEY',
+      minimumBidCredits: null,
+      buyNowCredits: null,
+      currency: row.currency,
+      minimumBidAmountMinor: row.minimum_bid_amount_minor,
+      buyNowAmountMinor: row.buy_now_amount_minor,
+      officialMark: row.official_mark,
+    }
+  }
+
+  return null
 }
 
 /** Solo se llama con filas CREDITS; una fila REAL_MONEY aqui es un error del llamador. */
@@ -235,6 +315,28 @@ const buyNowRequestHash = (command: CloseAuctionByBuyNowCommand): string =>
     .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]), 'utf8')
     .digest('hex')
 
+/** HU-90: el `sellerId` identifica al solicitante; no hace falta mas para detectar un payload distinto. */
+const cancellationRequestHash = (command: CancelAuctionCommand): string =>
+  createHash('sha256')
+    .update(JSON.stringify([command.auctionId, command.sellerId]), 'utf8')
+    .digest('hex')
+
+/** HU-90, CA-05: la sancion forma parte de la solicitud; otra sancion es otra operacion. */
+const automaticCancellationRequestHash = (command: CancelAuctionAutomaticallyCommand): string =>
+  createHash('sha256')
+    .update(
+      JSON.stringify([
+        command.auctionId,
+        AuctionCancellationOrigin.TermsViolation,
+        command.triggerReferenceId,
+      ]),
+      'utf8',
+    )
+    .digest('hex')
+
+/** Actor de auditoria de una cancelacion sin usuario: la ejecuta el propio servicio. */
+const AUTOMATIC_CANCELLATION_ACTOR = 'system:auction-terms-violation'
+
 const findOfficialAuction = async (
   db: AuctionDatabase,
   auctionId: string,
@@ -288,16 +390,16 @@ export class PostgresAuctionRepository
   }
 
   /**
-   * Marketplace (HU-62 + HU-66): publicaciones de jugador y oficiales activas y
-   * no vencidas. Los filtros se aplican una sola vez sobre `base`, de la que
-   * derivan tanto la pagina como el `count(*)`: el total no puede divergir de
-   * los items. Sin `sort` se conserva el orden historico.
+   * Base unica del marketplace: activas no vencidas, filtros y, si hay busqueda,
+   * los productos ya resueltos contra Catalog. De ella derivan la pagina, el
+   * `count(*)` y el universo de productos: no pueden divergir.
    */
-  async listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
-    const offset = (input.page - 1) * input.pageSize
+  private activeAuctionsBase(
+    input: ActiveAuctionUniverseInput & Pick<ListActiveAuctionsInput, 'productIds'>,
+  ) {
     const filters = input.filters ?? {}
-    const base = this.db.selectFrom('auctions').where((eb) => {
-      const conditions = [
+    return this.db.selectFrom('auctions').where((eb) => {
+      const conditions: Expression<SqlBool>[] = [
         eb('auctions.status', '=', AuctionStatus.Active),
         eb('auctions.closes_at', '>', input.now),
       ]
@@ -323,8 +425,29 @@ export class PostgresAuctionRepository
           ]),
         )
       }
+      if (input.productIds !== undefined) {
+        // Un unico parametro array (`= any`), no un IN con un parametro por id:
+        // sin limite de parametros y valido tambien con la lista vacia.
+        conditions.push(sql<SqlBool>`auctions.product_id = any(${[...input.productIds]}::text[])`)
+      }
       return eb.and(conditions)
     })
+  }
+
+  async listActiveProductIds(input: ActiveAuctionUniverseInput): Promise<readonly string[]> {
+    const rows = await this.activeAuctionsBase(input).select('auctions.product_id').execute()
+    return rows.map((row) => row.product_id)
+  }
+
+  /**
+   * Marketplace (HU-62 + HU-66): publicaciones de jugador y oficiales activas y
+   * no vencidas. Los filtros se aplican una sola vez sobre `base`, de la que
+   * derivan tanto la pagina como el `count(*)`: el total no puede divergir de
+   * los items. Sin `sort` se conserva el orden historico.
+   */
+  async listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
+    const offset = (input.page - 1) * input.pageSize
+    const base = this.activeAuctionsBase(input)
 
     const joined = base
       .leftJoin('auction_bids as leader', (join) =>
@@ -750,20 +873,96 @@ export class PostgresAuctionRepository
   }
 
   async updateBidCreditOperation(command: UpdateBidCreditOperationCommand): Promise<void> {
-    const result = await this.db
-      .updateTable('auction_bid_credit_operations')
-      .set({
-        status: command.status,
-        reservation_id: command.reservationId,
-        previous_reservation_id: command.previousReservationId,
-        updated_at: command.updatedAt,
-      })
-      .where('operation_id', '=', command.operationId)
-      .executeTakeFirst()
+    await this.db.transaction().execute(async (transaction) => {
+      const operation = await transaction
+        .selectFrom('auction_bid_credit_operations')
+        .selectAll()
+        .where('operation_id', '=', command.operationId)
+        .forUpdate()
+        .executeTakeFirst()
 
-    if (result.numUpdatedRows === 0n) {
-      throw new Error(`La operacion de creditos ${command.operationId} no existe.`)
-    }
+      if (operation === undefined) {
+        throw new Error(`La operacion de creditos ${command.operationId} no existe.`)
+      }
+
+      if (command.status === 'COMPLETED' && operation.status === 'BID_PERSISTED') {
+        if (
+          operation.reservation_id !== command.reservationId ||
+          operation.previous_reservation_id !== command.previousReservationId
+        ) {
+          throw new IdempotencyConflictError()
+        }
+
+        if (operation.reservation_id === null) {
+          throw new Error('Solo una puja persistida con reserva puede completarse.')
+        }
+
+        const auction = await transaction
+          .selectFrom('auctions')
+          .select(['seller_id', 'product_id'])
+          .where('id', '=', operation.auction_id)
+          .executeTakeFirst()
+
+        const bid = await transaction
+          .selectFrom('auction_bids')
+          .select(['id', 'auction_id', 'bidder_id', 'amount_credits'])
+          .where('id', '=', operation.bid_id)
+          .executeTakeFirst()
+
+        if (
+          auction === undefined ||
+          bid?.auction_id !== operation.auction_id ||
+          bid.bidder_id !== operation.bidder_id ||
+          bid.amount_credits !== operation.amount_credits
+        ) {
+          throw new Error('La operacion no coincide con una puja persistida.')
+        }
+
+        const acceptedAt = command.updatedAt.toISOString()
+        const event: AuctionBidAcceptedEventV1 = {
+          eventId: `${command.operationId}:bid-accepted`,
+          eventType: 'auction.bid.accepted',
+          eventVersion: 1,
+          aggregateId: operation.auction_id,
+          occurredAt: acceptedAt,
+          producer: 'auction',
+          correlationId: command.operationId,
+          data: {
+            operationId: command.operationId,
+            auctionId: operation.auction_id,
+            productId: auction.product_id,
+            sellerId: auction.seller_id,
+            bidderId: operation.bidder_id,
+            bidId: operation.bid_id,
+            amountCredits: operation.amount_credits,
+            acceptedAt,
+          },
+        }
+
+        await transaction
+          .insertInto('outbox_events')
+          .values({
+            id: event.eventId,
+            aggregate_id: event.aggregateId,
+            event_type: 'auction.bid.accepted.v1',
+            payload: event,
+            occurred_at: command.updatedAt,
+            published_at: null,
+          })
+          .execute()
+      }
+
+      await transaction
+        .updateTable('auction_bid_credit_operations')
+        .set({
+          status: command.status,
+          reservation_id: command.reservationId,
+          previous_reservation_id: command.previousReservationId,
+          updated_at: command.updatedAt,
+        })
+        .where('operation_id', '=', command.operationId)
+        .executeTakeFirstOrThrow()
+    })
   }
 
   async findBidCreditOperation(operationId: string): Promise<BidCreditOperationSnapshot | null> {
@@ -806,7 +1005,7 @@ export class PostgresAuctionRepository
 
       const auction = await transaction
         .selectFrom('auctions')
-        .select(['id', 'minimum_bid_credits'])
+        .select(['id', 'minimum_bid_credits', 'status'])
         .where('id', '=', snapshot.auctionId)
         .where('price_kind', '=', 'CREDITS')
         .executeTakeFirst()
@@ -815,6 +1014,21 @@ export class PostgresAuctionRepository
       // para persistBid es como si la subasta no existiera.
       if (auction?.minimum_bid_credits === undefined || auction.minimum_bid_credits === null) {
         throw new PersistedAuctionNotFoundError(snapshot.auctionId)
+      }
+
+      /*
+       * HU-90: la validacion de dominio (AUCTION_NOT_ACTIVE) ocurrio antes de
+       * llegar aqui, contra una lectura que pudo quedar vieja mientras se
+       * esperaba este mismo lock -exactamente el motivo por el que, mas
+       * abajo, se revalida contra el lider real-. Sin esto, una cancelacion
+       * que tomo el lock primero y ya confirmo ACTIVE -> CANCELLED dejaria
+       * pasar esta puja de todas formas, porque esta consulta nunca
+       * comprobaba el estado. Se reutiliza `ConcurrentBidConflictError`: el
+       * significado para quien llama es el mismo -"algo cambio mientras
+       * esperabas"-, sin inventar un error nuevo.
+       */
+      if (auction.status !== (AuctionStatus.Active as string)) {
+        throw new ConcurrentBidConflictError()
       }
 
       if (operationId !== null) {
@@ -957,6 +1171,41 @@ export class PostgresAuctionRepository
     return row.total
   }
 
+  /**
+   * HU-88. Paginacion y `count(*)` en la base de datos -nunca carga el
+   * historico completo-. Selecciona solo `id`/`amount_credits`/`placed_at`:
+   * `bidder_id` ni siquiera viaja fuera de Postgres para esta consulta.
+   */
+  async listBidHistoryPage(input: BidHistoryPageInput): Promise<BidHistoryPage> {
+    const offset = (input.page - 1) * input.pageSize
+
+    const [rows, count] = await Promise.all([
+      this.db
+        .selectFrom('auction_bids')
+        .select(['id', 'amount_credits', 'placed_at'])
+        .where('auction_id', '=', input.auctionId)
+        .orderBy('placed_at', 'asc')
+        .orderBy('id', 'asc')
+        .limit(input.pageSize)
+        .offset(offset)
+        .execute(),
+      this.db
+        .selectFrom('auction_bids')
+        .select(sql<number>`count(*)::integer`.as('total'))
+        .where('auction_id', '=', input.auctionId)
+        .executeTakeFirstOrThrow(),
+    ])
+
+    return {
+      total: count.total,
+      items: rows.map((row) => ({
+        id: row.id,
+        amountCredits: row.amount_credits,
+        placedAt: new Date(row.placed_at),
+      })),
+    }
+  }
+
   async findLastBidByBidder(bidderId: string): Promise<BidSnapshot | null> {
     const row = await this.db
       .selectFrom('auction_bids')
@@ -994,6 +1243,16 @@ export class PostgresAuctionRepository
     return findOfficialAuction(this.db, auctionId)
   }
 
+  async findDetailById(auctionId: string): Promise<AuctionDetailSnapshot | null> {
+    const row = await this.db
+      .selectFrom('auctions')
+      .selectAll()
+      .where('id', '=', auctionId)
+      .executeTakeFirst()
+
+    return row === undefined ? null : toDetailSnapshot(row)
+  }
+
   /** Solo CREDITS: la liquidacion en dinero real de una publicacion oficial no existe todavia. */
   async findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
     const rows = await this.db
@@ -1025,6 +1284,16 @@ export class PostgresAuctionRepository
       .executeTakeFirst()
 
     return row?.inventory_commitment_id ?? null
+  }
+
+  async findFeeChargeId(auctionId: string): Promise<string | null> {
+    const row = await this.db
+      .selectFrom('auctions')
+      .select('fee_charge_id')
+      .where('id', '=', auctionId)
+      .executeTakeFirst()
+
+    return row?.fee_charge_id ?? null
   }
 
   async recordFailure(command: RecordPublicationFailureCommand): Promise<void> {
@@ -1301,6 +1570,431 @@ export class PostgresAuctionRepository
         replayed: false,
       }
     })
+  }
+
+  /**
+   * HU-90. Mismo esqueleto que `closeByBuyNow`: lock por `operationId` para
+   * reintentos, tabla de idempotencia propia, lock por `auctionId` -LA MISMA
+   * clave que `persistBid`/`closeByBuyNow`, nunca un namespace nuevo- antes
+   * de revalidar y, solo entonces, el CAS `ACTIVE -> CANCELLED` + outbox +
+   * auditoria en la misma transaccion.
+   *
+   * La revalidacion bajo el lock (ACTIVE, sin pujas, ventana de 6h) es
+   * deliberadamente redundante con `Auction.cancel()`: el caso de uso ya la
+   * corrio contra una lectura que pudo quedar vieja mientras esperaba este
+   * lock (igual que el comentario de `persistBid` sobre el lider real).
+   */
+  cancelAuction(command: CancelAuctionCommand): Promise<CancelAuctionResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const hash = cancellationRequestHash(command)
+
+      await sql`
+        select pg_advisory_xact_lock(
+          hashtext(${command.operationId})
+        )
+      `.execute(transaction)
+
+      const previousOperation = await transaction
+        .selectFrom('auction_cancellation_operations')
+        .select(['request_hash', 'auction_id'])
+        .where('operation_id', '=', command.operationId)
+        .executeTakeFirst()
+
+      if (previousOperation !== undefined) {
+        if (previousOperation.request_hash !== hash) {
+          throw new IdempotencyConflictError()
+        }
+
+        const auction = await findAuction(transaction, previousOperation.auction_id)
+
+        if (auction === null) {
+          throw new PersistedAuctionNotFoundError(previousOperation.auction_id)
+        }
+
+        return { auction, replayed: true }
+      }
+
+      // Serializa contra cualquier puja, compra inmediata o cierre que
+      // compita por la MISMA subasta.
+      await sql`
+        select pg_advisory_xact_lock(
+          hashtext(${command.auctionId})
+        )
+      `.execute(transaction)
+
+      const auctionRow = await transaction
+        .selectFrom('auctions')
+        .selectAll()
+        .where('id', '=', command.auctionId)
+        .executeTakeFirst()
+
+      if (auctionRow === undefined) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      if (auctionRow.status !== (AuctionStatus.Active as string)) {
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        )
+      }
+
+      const bidCount = await transaction
+        .selectFrom('auction_bids')
+        .select(sql<number>`count(*)::integer`.as('total'))
+        .where('auction_id', '=', command.auctionId)
+        .executeTakeFirstOrThrow()
+
+      if (bidCount.total > 0) {
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.AuctionHasBids,
+          'Una subasta con pujas registradas no puede cancelarse manualmente.',
+        )
+      }
+
+      if (
+        new Date(auctionRow.closes_at).getTime() - command.cancelledAt.getTime() <=
+        CANCELLATION_WINDOW_MS
+      ) {
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.AuctionCancellationWindowClosed,
+          'No se puede cancelar una subasta con 6 horas o menos para su cierre.',
+        )
+      }
+
+      const updated = await transaction
+        .updateTable('auctions')
+        .set({ status: AuctionStatus.Cancelled, cancelled_at: command.cancelledAt })
+        .where('id', '=', command.auctionId)
+        .where('status', '=', AuctionStatus.Active)
+        .executeTakeFirst()
+
+      if (updated.numUpdatedRows === 0n) {
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        )
+      }
+
+      await transaction
+        .insertInto('auction_cancellation_operations')
+        .values({
+          operation_id: command.operationId,
+          request_hash: hash,
+          auction_id: command.auctionId,
+          completed_at: command.cancelledAt,
+        })
+        .execute()
+
+      await transaction
+        .insertInto('auction_cancellations')
+        .values({
+          auction_id: command.auctionId,
+          operation_id: command.operationId,
+          origin: AuctionCancellationOrigin.Manual,
+          trigger_reference_id: null,
+          seller_id: command.sellerId,
+          product_id: command.productId,
+          inventory_commitment_id: command.inventoryCommitmentId,
+          fee_charge_id: command.feeChargeId,
+          refund_amount_credits: command.refundAmountCredits,
+          wallet_refund_operation_id: command.walletRefundOperationId,
+          wallet_refund_status: AuctionCancellationEffectStatus.Pending,
+          wallet_refund_last_error: null,
+          inventory_release_operation_id: command.inventoryReleaseOperationId,
+          inventory_release_status: AuctionCancellationEffectStatus.Pending,
+          inventory_release_last_error: null,
+          cancelled_at: command.cancelledAt,
+          created_at: command.cancelledAt,
+          updated_at: command.cancelledAt,
+        })
+        .execute()
+
+      await transaction
+        .insertInto('auction_audit_log')
+        .values({
+          auction_id: command.auctionId,
+          operation_id: command.operationId,
+          action: 'AUCTION_CANCELLED',
+          actor_id: command.sellerId,
+          occurred_at: command.cancelledAt,
+          details: { refundAmountCredits: command.refundAmountCredits },
+        })
+        .execute()
+
+      const event = createAuctionCancelledEventV1({
+        auctionId: command.auctionId,
+        sellerId: command.sellerId,
+        productId: command.productId,
+        cancelledAt: command.cancelledAt,
+        origin: AuctionCancellationOrigin.Manual,
+        triggerReferenceId: null,
+      })
+
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: event.eventId,
+          aggregate_id: command.auctionId,
+          event_type: 'auction.cancelled.v1',
+          payload: event,
+          occurred_at: command.cancelledAt,
+          published_at: null,
+        })
+        .execute()
+
+      const auction = await findAuction(transaction, command.auctionId)
+
+      if (auction === null) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      return { auction, replayed: false }
+    })
+  }
+
+  /**
+   * HU-90, CA-05. Mismo esqueleto que `cancelAuction` -idempotencia por
+   * `operationId`, despues el lock por `auctionId` que comparten
+   * `persistBid`/`closeByBuyNow`/`cancelAuction`, y solo entonces el CAS-,
+   * con las reglas de la automatica: bajo el lock unicamente se revalida
+   * ACTIVE. Ni el numero de pujas ni la ventana de 6h la impiden.
+   *
+   * Las reservas a liberar se calculan AQUI, con las pujas y las operaciones
+   * de creditos leidas bajo el lock: `persistBid` escribe ambas dentro de
+   * este mismo lock, asi que ninguna puja puede colarse entre la lectura y
+   * el CAS y quedar con su reserva sin seguimiento.
+   */
+  cancelAuctionAutomatically(
+    command: CancelAuctionAutomaticallyCommand,
+  ): Promise<CancelAuctionResult> {
+    return this.db.transaction().execute(async (transaction) => {
+      const hash = automaticCancellationRequestHash(command)
+
+      await sql`
+        select pg_advisory_xact_lock(
+          hashtext(${command.operationId})
+        )
+      `.execute(transaction)
+
+      const previousOperation = await transaction
+        .selectFrom('auction_cancellation_operations')
+        .select(['request_hash', 'auction_id'])
+        .where('operation_id', '=', command.operationId)
+        .executeTakeFirst()
+
+      if (previousOperation !== undefined) {
+        if (previousOperation.request_hash !== hash) {
+          throw new IdempotencyConflictError()
+        }
+
+        const auction = await findAuction(transaction, previousOperation.auction_id)
+
+        if (auction === null) {
+          throw new PersistedAuctionNotFoundError(previousOperation.auction_id)
+        }
+
+        return { auction, replayed: true }
+      }
+
+      await sql`
+        select pg_advisory_xact_lock(
+          hashtext(${command.auctionId})
+        )
+      `.execute(transaction)
+
+      const auctionRow = await transaction
+        .selectFrom('auctions')
+        .selectAll()
+        .where('id', '=', command.auctionId)
+        .where('price_kind', '=', 'CREDITS')
+        .executeTakeFirst()
+
+      if (auctionRow === undefined) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      if (auctionRow.status !== (AuctionStatus.Active as string)) {
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        )
+      }
+
+      if (auctionRow.inventory_commitment_id === null) {
+        throw new Error(
+          `La subasta ${command.auctionId} no tiene un inventoryCommitmentId durable.`,
+        )
+      }
+
+      const bidRows = await transaction
+        .selectFrom('auction_bids')
+        .select('credit_reservation_id')
+        .where('auction_id', '=', command.auctionId)
+        .execute()
+
+      const operationRows = await transaction
+        .selectFrom('auction_bid_credit_operations')
+        .select(['status', 'reservation_id', 'previous_reservation_id'])
+        .where('auction_id', '=', command.auctionId)
+        .execute()
+
+      const reservationReleases = planCancellationReservationReleases(
+        command.auctionId,
+        bidRows.map((row) => ({ creditReservationId: row.credit_reservation_id })),
+        operationRows.map((row) => ({
+          status: row.status as BidCreditOperationStatus,
+          reservationId: row.reservation_id,
+          previousReservationId: row.previous_reservation_id,
+        })),
+      )
+
+      const updated = await transaction
+        .updateTable('auctions')
+        .set({ status: AuctionStatus.Cancelled, cancelled_at: command.cancelledAt })
+        .where('id', '=', command.auctionId)
+        .where('status', '=', AuctionStatus.Active)
+        .executeTakeFirst()
+
+      if (updated.numUpdatedRows === 0n) {
+        throw new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        )
+      }
+
+      await transaction
+        .insertInto('auction_cancellation_operations')
+        .values({
+          operation_id: command.operationId,
+          request_hash: hash,
+          auction_id: command.auctionId,
+          completed_at: command.cancelledAt,
+        })
+        .execute()
+
+      // Sin refund: la comision de publicacion se retiene entera.
+      await transaction
+        .insertInto('auction_cancellations')
+        .values({
+          auction_id: command.auctionId,
+          operation_id: command.operationId,
+          origin: AuctionCancellationOrigin.TermsViolation,
+          trigger_reference_id: command.triggerReferenceId,
+          seller_id: auctionRow.seller_id,
+          product_id: auctionRow.product_id,
+          inventory_commitment_id: auctionRow.inventory_commitment_id,
+          fee_charge_id: null,
+          refund_amount_credits: 0,
+          wallet_refund_operation_id: null,
+          wallet_refund_status: AuctionCancellationEffectStatus.NotRequired,
+          wallet_refund_last_error: null,
+          inventory_release_operation_id: command.inventoryReleaseOperationId,
+          inventory_release_status: AuctionCancellationEffectStatus.Pending,
+          inventory_release_last_error: null,
+          cancelled_at: command.cancelledAt,
+          created_at: command.cancelledAt,
+          updated_at: command.cancelledAt,
+        })
+        .execute()
+
+      if (reservationReleases.length > 0) {
+        await transaction
+          .insertInto('auction_cancellation_reservation_releases')
+          .values(
+            reservationReleases.map((release) => ({
+              auction_id: command.auctionId,
+              reservation_id: release.reservationId,
+              operation_id: release.operationId,
+              status: AuctionCancellationEffectStatus.Pending,
+              last_error: null,
+              created_at: command.cancelledAt,
+              updated_at: command.cancelledAt,
+            })),
+          )
+          .execute()
+      }
+
+      await transaction
+        .insertInto('auction_audit_log')
+        .values({
+          auction_id: command.auctionId,
+          operation_id: command.operationId,
+          action: 'AUCTION_CANCELLED',
+          actor_id: AUTOMATIC_CANCELLATION_ACTOR,
+          occurred_at: command.cancelledAt,
+          details: {
+            origin: AuctionCancellationOrigin.TermsViolation,
+            triggerReferenceId: command.triggerReferenceId,
+            reservationReleases: reservationReleases.length,
+          },
+        })
+        .execute()
+
+      const event = createAuctionCancelledEventV1({
+        auctionId: command.auctionId,
+        sellerId: auctionRow.seller_id,
+        productId: auctionRow.product_id,
+        cancelledAt: command.cancelledAt,
+        origin: AuctionCancellationOrigin.TermsViolation,
+        triggerReferenceId: command.triggerReferenceId,
+      })
+
+      await transaction
+        .insertInto('outbox_events')
+        .values({
+          id: event.eventId,
+          aggregate_id: command.auctionId,
+          event_type: 'auction.cancelled.v1',
+          payload: event,
+          occurred_at: command.cancelledAt,
+          published_at: null,
+        })
+        .execute()
+
+      const auction = await findAuction(transaction, command.auctionId)
+
+      if (auction === null) {
+        throw new PersistedAuctionNotFoundError(command.auctionId)
+      }
+
+      return { auction, replayed: false }
+    })
+  }
+
+  /**
+   * `auctions_active_seller_idx (seller_id, status)` cubre el filtro y el
+   * orden. Solo CREDITS: una publicacion oficial (GAME_MASTER) no es de un
+   * jugador sancionable ni tiene reservas o inventario que liberar.
+   */
+  async listActiveSellerIds(input: ListActiveSellerIdsInput): Promise<readonly string[]> {
+    let query = this.db
+      .selectFrom('auctions')
+      .select('seller_id')
+      .distinct()
+      .where('status', '=', AuctionStatus.Active)
+      .where('price_kind', '=', 'CREDITS')
+
+    if (input.afterSellerId !== null) {
+      query = query.where('seller_id', '>', input.afterSellerId)
+    }
+
+    const rows = await query.orderBy('seller_id', 'asc').limit(input.limit).execute()
+
+    return rows.map((row) => row.seller_id)
+  }
+
+  async listActiveAuctionIdsBySeller(sellerId: string): Promise<readonly string[]> {
+    const rows = await this.db
+      .selectFrom('auctions')
+      .select('id')
+      .where('seller_id', '=', sellerId)
+      .where('status', '=', AuctionStatus.Active)
+      .where('price_kind', '=', 'CREDITS')
+      .orderBy('id', 'asc')
+      .execute()
+
+    return rows.map((row) => row.id)
   }
 
   async recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {

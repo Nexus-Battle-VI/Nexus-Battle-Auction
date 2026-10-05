@@ -30,7 +30,15 @@ import type {
   NotificationPort,
   NotifyAuctionClosedEarlyCommand,
 } from '../../../application/ports/NotificationPort'
-import type { SellerSanctionPort } from '../../../application/ports/SellerSanctionPort'
+import type {
+  SellerPublicProfile,
+  SellerPublicProfilePort,
+} from '../../../application/ports/SellerPublicProfilePort'
+import type {
+  ActiveSanctionStatus,
+  SellerActiveSanctionsPort,
+  SellerSanctionPort,
+} from '../../../application/ports/SellerSanctionPort'
 import type {
   BuyNowCreditTransfer,
   BuyNowCreditTransferCommand,
@@ -94,16 +102,29 @@ export class UnavailablePublicationFee implements PublicationFeePort {
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
   }
 
-  refund(operationId: string, chargeId: string): Promise<void> {
+  refund(operationId: string, chargeId: string, amount: number): Promise<void> {
     void operationId
     void chargeId
+    void amount
     return Promise.reject(new ExternalDependencyUnavailableError('wallet'))
   }
 }
 
-export class UnavailableSellerSanctions implements SellerSanctionPort {
+export class UnavailableSellerSanctions implements SellerSanctionPort, SellerActiveSanctionsPort {
   hasActiveSanctions(sellerId: string): Promise<boolean> {
     void sellerId
+    return Promise.reject(new ExternalDependencyUnavailableError('account'))
+  }
+
+  getActiveSanctions(subject: string): Promise<ActiveSanctionStatus> {
+    void subject
+    return Promise.reject(new ExternalDependencyUnavailableError('account'))
+  }
+}
+
+export class UnavailableSellerPublicProfile implements SellerPublicProfilePort {
+  getPublicProfile(subject: string): Promise<SellerPublicProfile> {
+    void subject
     return Promise.reject(new ExternalDependencyUnavailableError('account'))
   }
 }

@@ -15,7 +15,16 @@ export enum AuctionStatus {
   Finished = 'FINISHED',
   /** Cerrada de forma anticipada por una compra inmediata ejecutada (HU-64). */
   SoldByBuyNow = 'SOLD',
+  /**
+   * Cancelada (HU-90), terminal: manualmente por el vendedor propietario o
+   * automaticamente por una sancion AUCTION_TERMS_VIOLATION (CA-05). Nunca
+   * vuelve a ACTIVE, aunque la sancion expire o sea apelada.
+   */
+  Cancelled = 'CANCELLED',
 }
+
+/** `7.7.10`: no se puede cancelar con 6 horas o menos restantes hasta el cierre. */
+export const CANCELLATION_WINDOW_MS = 6 * 60 * 60 * 1000
 
 export const MAX_ACTIVE_AUCTIONS_PER_SELLER = 10
 
@@ -51,6 +60,8 @@ export interface AuctionSnapshot {
   publishedAt: Date
   closesAt: Date
   completion?: AuctionClosingResultSnapshot
+  /** No nulo si y solo si `status === AuctionStatus.Cancelled` (HU-90). */
+  cancelledAt?: Date | null
 }
 
 export interface LeadingBidForClosing {
@@ -67,6 +78,26 @@ export interface FinishAuctionInput {
 export interface RehydrateAuctionInput extends AuctionSnapshot {
   readonly finishedAt: Date | null
   readonly closingResult: AuctionClosingResultSnapshot | null
+  /** No nulo si y solo si `status === AuctionStatus.Cancelled`. */
+  readonly cancelledAt?: Date | null
+}
+
+/**
+ * HU-90, `7.7.10`. `bidCount` y `now` llegan ya resueltos por el llamador
+ * (repositorio/ClockPort respectivamente): el dominio no conoce persistencia
+ * ni reloj de sistema, solo evalua la regla con lo que recibe.
+ */
+export interface CancelAuctionInput {
+  readonly now: Date
+  readonly bidCount: number
+}
+
+/**
+ * HU-90, CA-05. La cancelacion automatica no depende de pujas ni de la
+ * ventana de 6 horas, asi que solo necesita el instante en que ocurre.
+ */
+export interface CancelAuctionAutomaticallyInput {
+  readonly now: Date
 }
 
 export class Auction {
@@ -80,6 +111,7 @@ export class Auction {
     readonly publishedAt: Date,
     readonly closesAt: Date,
     private completion: AuctionClosingResult | null = null,
+    private cancellation: Date | null = null,
   ) {}
 
   get status(): AuctionStatus {
@@ -91,13 +123,28 @@ export class Auction {
   get closingResult(): AuctionClosingResultSnapshot | null {
     return this.completion === null ? null : this.completion.snapshot()
   }
+  get cancelledAt(): Date | null {
+    return this.cancellation === null ? null : new Date(this.cancellation)
+  }
 
   static rehydrate(input: RehydrateAuctionInput): Auction {
-    const active = input.status === AuctionStatus.Active
-    if (
-      (active && (input.finishedAt !== null || input.closingResult !== null)) ||
-      (!active && (input.finishedAt === null || input.closingResult === null))
-    )
+    const cancelledAt = input.cancelledAt ?? null
+    const cancelled = input.status === AuctionStatus.Cancelled
+    if (cancelled !== (cancelledAt !== null))
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.InvalidFinalizationDate,
+        'Estado persistido de cancelacion incoherente.',
+      )
+    // Solo FINISHED (HU-65) persiste un cierre de liquidacion. ACTIVE, SOLD
+    // (HU-64, compra inmediata) y CANCELLED (HU-90) nunca lo tienen -SOLD no
+    // tenia este chequeo explicito hasta HU-90 porque ninguna ruta llamaba
+    // `rehydrate()` con una fila SOLD; `CancelAuction` es la primera en
+    // hacerlo (via `findAuctionAggregate`), asi que el hueco quedaria
+    // alcanzable en produccion si no se corrige aqui.
+    const hasFinishedAt = input.finishedAt !== null
+    const hasClosingResult = input.closingResult !== null
+    const requiresClosingResult = input.status === AuctionStatus.Finished
+    if (hasFinishedAt !== hasClosingResult || requiresClosingResult !== hasFinishedAt)
       throw new AuctionRuleViolation(
         AuctionRuleCode.InvalidFinalizationDate,
         'Estado persistido de cierre incoherente.',
@@ -161,6 +208,7 @@ export class Auction {
       new Date(input.publishedAt),
       new Date(input.closesAt),
       completion,
+      cancelledAt === null ? null : new Date(cancelledAt),
     )
   }
 
@@ -199,6 +247,7 @@ export class Auction {
       status: this.currentStatus,
       publishedAt: new Date(this.publishedAt),
       closesAt: new Date(this.closesAt),
+      cancelledAt: this.cancelledAt,
     }
 
     return this.completion === null
@@ -244,6 +293,63 @@ export class Auction {
     this.completion = completion
 
     return completion
+  }
+
+  /**
+   * Cancelacion manual del vendedor (HU-90, `7.7.10`). `bidCount` y `now`
+   * llegan resueltos por el llamador (ver `CancelAuctionInput`): el agregado
+   * solo evalua la regla, nunca decide como se obtuvieron.
+   *
+   * Ownership NO se valida aqui: el constructor privado no recibe un actor,
+   * igual que `publish`/`finish`, asi que compararlo con quien solicita la
+   * cancelacion es responsabilidad de la capa de aplicacion (como ya ocurre
+   * con `PendingClaimOwnershipError` para los reclamos).
+   */
+  cancel(input: CancelAuctionInput): Date {
+    this.assertActiveForCancellation()
+    if (input.bidCount > 0) {
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.AuctionHasBids,
+        'Una subasta con pujas registradas no puede cancelarse manualmente.',
+      )
+    }
+    if (this.closesAt.getTime() - input.now.getTime() <= CANCELLATION_WINDOW_MS) {
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.AuctionCancellationWindowClosed,
+        'No se puede cancelar una subasta con 6 horas o menos para su cierre.',
+      )
+    }
+
+    return this.transitionToCancelled(input.now)
+  }
+
+  /**
+   * Cancelacion automatica por sancion AUCTION_TERMS_VIOLATION (HU-90,
+   * CA-05). Operacion de sistema: no hay propietario que validar, y ni las
+   * pujas registradas ni la ventana de 6 horas la impiden -esas dos reglas
+   * son exclusivas de `cancel()`-. Solo exige que la subasta siga ACTIVE.
+   */
+  cancelAutomatically(input: CancelAuctionAutomaticallyInput): Date {
+    this.assertActiveForCancellation()
+
+    return this.transitionToCancelled(input.now)
+  }
+
+  private assertActiveForCancellation(): void {
+    if (this.currentStatus !== AuctionStatus.Active) {
+      throw new AuctionRuleViolation(
+        AuctionRuleCode.AuctionNotActive,
+        'Solo una subasta activa puede cancelarse.',
+      )
+    }
+  }
+
+  /** Unica transicion a CANCELLED: la comparten `cancel()` y `cancelAutomatically()`. */
+  private transitionToCancelled(now: Date): Date {
+    this.currentStatus = AuctionStatus.Cancelled
+    this.cancellation = new Date(now)
+
+    return this.cancellation
   }
 
   private static assertPublicationDate(publishedAt: Date): void {

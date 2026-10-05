@@ -80,6 +80,9 @@ export interface AppConfig {
   readonly notificationsBaseUrl: string | null
 
   readonly notificationsTimeoutMs: number
+  readonly auctionConfirmationDispatchEnabled: boolean
+  readonly auctionConfirmationDispatchBatchSize: number
+  readonly auctionConfirmationDispatchPollIntervalMs: number
 
   /**
    * URL interna del servidor de Notifications que recibe los eventos de
@@ -135,6 +138,20 @@ export interface AppConfig {
   readonly auctionBuyNowPendingClaimRetrySchedulerEnabled: boolean
   readonly auctionBuyNowPendingClaimRetryPollIntervalMs: number
   readonly auctionBuyNowPendingClaimRetryBatchSize: number
+
+  readonly auctionCancellationReconcilerSchedulerEnabled: boolean
+  readonly auctionCancellationReconcilerPollIntervalMs: number
+  readonly auctionCancellationReconcilerBatchSize: number
+  readonly auctionCancellationReconcilerLeaseMs: number
+
+  /**
+   * HU-90, CA-05. Sondeo de sanciones AUCTION_TERMS_VIOLATION contra Account
+   * para cancelar automaticamente las subastas del vendedor sancionado.
+   * Deshabilitado por defecto.
+   */
+  readonly auctionTermsViolationSchedulerEnabled: boolean
+  readonly auctionTermsViolationPollIntervalMs: number
+  readonly auctionTermsViolationBatchSize: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -272,6 +289,38 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   const notificationsBaseUrl = readString(env, 'NOTIFICATIONS_BASE_URL', '')
 
   const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  const auctionConfirmationDispatchEnabled = readBoolean(
+    env,
+    'AUCTION_CONFIRMATION_DISPATCH_ENABLED',
+    false,
+  )
+  const auctionConfirmationDispatchBatchSize = readInteger(
+    env,
+    'AUCTION_CONFIRMATION_DISPATCH_BATCH_SIZE',
+    25,
+    1,
+    100,
+  )
+  const auctionConfirmationDispatchPollIntervalMs = readInteger(
+    env,
+    'AUCTION_CONFIRMATION_DISPATCH_POLL_INTERVAL_MS',
+    5_000,
+    1_000,
+    3_600_000,
+  )
+  if (auctionConfirmationDispatchEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser postgres cuando AUCTION_CONFIRMATION_DISPATCH_ENABLED=true.',
+      )
+    }
+    if (notificationsBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'NOTIFICATIONS_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_CONFIRMATION_DISPATCH_ENABLED=true.',
+      )
+    }
+  }
 
   const notificationsWatchlistBaseUrl = readString(env, 'NOTIFICATIONS_WATCHLIST_BASE_URL', '')
 
@@ -518,6 +567,84 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  const auctionCancellationReconcilerSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionCancellationReconcilerPollIntervalMs = readInteger(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionCancellationReconcilerBatchSize = readInteger(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_BATCH_SIZE',
+    50,
+    1,
+    500,
+  )
+  const auctionCancellationReconcilerLeaseMs = readInteger(
+    env,
+    'AUCTION_CANCELLATION_RECONCILER_LEASE_MS',
+    60_000,
+    1_000,
+    600_000,
+  )
+  if (auctionCancellationReconcilerSchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED=true.',
+      )
+    }
+    if (walletBaseUrl === '' || inventoryBaseUrl === '' || internalServiceAuthSecret === '') {
+      throw new ConfigurationError(
+        'WALLET_BASE_URL, INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_CANCELLATION_RECONCILER_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
+  const auctionTermsViolationSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionTermsViolationPollIntervalMs = readInteger(
+    env,
+    'AUCTION_TERMS_VIOLATION_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionTermsViolationBatchSize = readInteger(
+    env,
+    'AUCTION_TERMS_VIOLATION_BATCH_SIZE',
+    50,
+    1,
+    500,
+  )
+  if (auctionTermsViolationSchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED=true.',
+      )
+    }
+    // Account decide si hay sancion; Wallet e Inventory reciben los releases
+    // de reservas y de inventario que la cancelacion dispara en el momento.
+    if (
+      accountBaseUrl === '' ||
+      walletBaseUrl === '' ||
+      inventoryBaseUrl === '' ||
+      internalServiceAuthSecret === ''
+    ) {
+      throw new ConfigurationError(
+        'ACCOUNT_BASE_URL, WALLET_BASE_URL, INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
   return {
     nodeEnv,
 
@@ -555,6 +682,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
 
     notificationsTimeoutMs,
+    auctionConfirmationDispatchEnabled,
+    auctionConfirmationDispatchBatchSize,
+    auctionConfirmationDispatchPollIntervalMs,
 
     notificationsWatchlistBaseUrl:
       notificationsWatchlistBaseUrl === '' ? null : notificationsWatchlistBaseUrl,
@@ -602,5 +732,14 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionBuyNowPendingClaimRetrySchedulerEnabled,
     auctionBuyNowPendingClaimRetryPollIntervalMs,
     auctionBuyNowPendingClaimRetryBatchSize,
+
+    auctionCancellationReconcilerSchedulerEnabled,
+    auctionCancellationReconcilerPollIntervalMs,
+    auctionCancellationReconcilerBatchSize,
+    auctionCancellationReconcilerLeaseMs,
+
+    auctionTermsViolationSchedulerEnabled,
+    auctionTermsViolationPollIntervalMs,
+    auctionTermsViolationBatchSize,
   }
 }

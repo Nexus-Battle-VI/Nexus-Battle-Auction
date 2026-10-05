@@ -17,7 +17,7 @@ export interface ReleaseInventoryProductCommand {
   readonly auctionId: string
   readonly ownerId: string
   readonly productId: string
-  readonly reason: 'AUCTION_WITHOUT_BIDS'
+  readonly reason: 'AUCTION_WITHOUT_BIDS' | 'AUCTION_CANCELLED'
 }
 
 export interface MarkInventoryProductPendingClaimCommand {
@@ -91,5 +91,16 @@ export const inventoryPendingClaimOperationId = (auctionId: string): string =>
 
 export const inventoryClaimOperationId = (auctionId: string): string =>
   `auction:${auctionId}:inventory:claim`
+
+/**
+ * HU-90. Lo comparten la cancelacion manual y la automatica (CA-05): una
+ * subasta se cancela una sola vez, asi que la clave es unica por subasta.
+ * Namespace propio (`cancellation`, no `inventory:release`): esa
+ * operationId ya es la de `inventoryReleaseOperationId` para `AUCTION_WITHOUT_BIDS`
+ * en settlement, y ambos flujos son mutuamente excluyentes pero conviene que
+ * cada uno tenga su propia clave determinista sin ambiguedad.
+ */
+export const inventoryCancellationReleaseOperationId = (auctionId: string): string =>
+  `auction:${auctionId}:cancellation:inventory-release`
 
 export const PRODUCT_INVENTORY = Symbol('ProductInventoryPort')

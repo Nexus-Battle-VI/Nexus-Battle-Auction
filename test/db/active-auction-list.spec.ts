@@ -326,6 +326,97 @@ describe('PostgreSQL active auction marketplace', () => {
     })
   })
 
+  describe('productIds de la busqueda global', () => {
+    it('restringe antes de paginar y count, tambien con una lista vacia', async () => {
+      await publish('first', new Date(now.getTime() + 1_000))
+      await publish('second', new Date(now.getTime() + 2_000))
+      await publish('match', new Date(now.getTime() + 3_000))
+
+      await expect(
+        repository.listActive({ now, page: 1, pageSize: 1, productIds: ['product-match'] }),
+      ).resolves.toMatchObject({ total: 1, items: [{ id: 'match' }] })
+      await expect(
+        repository.listActive({ now, page: 1, pageSize: 16, productIds: [] }),
+      ).resolves.toEqual({ total: 0, items: [] })
+    })
+
+    it('combina productIds con publisherType, priceKind, hasBuyNow y cada sort', async () => {
+      const at = (hours: number): Date => new Date(now.getTime() + hours * 60 * 60 * 1000)
+      await publishOfficial('official-match', at(4))
+      await publishOfficial('official-excluded', at(5), OfficialAuctionMark.Premium, null)
+      await publish('player-match', at(1), { minimumBidCredits: 10, buyNowCredits: 20 })
+      await publish('player-excluded', at(2), { minimumBidCredits: 20 })
+      await placeBid('player-match', 'player-match-bid', 30)
+
+      const productIds = ['product-official-match', 'product-player-match']
+      await expect(
+        repository.listActive({
+          now,
+          page: 1,
+          pageSize: 16,
+          productIds,
+          filters: { publisherType: 'PLAYER', priceKind: 'CREDITS', hasBuyNow: true },
+          sort: 'closingSoon',
+        }),
+      ).resolves.toMatchObject({ total: 1, items: [{ id: 'player-match' }] })
+
+      for (const sort of ['closingSoon', 'mostBids'] as const) {
+        const result = await repository.listActive({ now, page: 1, pageSize: 16, productIds, sort })
+        expect(result.total).toBe(2)
+        expect(result.items.map((item) => item.id)).toEqual(
+          sort === 'closingSoon'
+            ? ['player-match', 'official-match']
+            : ['player-match', 'official-match'],
+        )
+      }
+    })
+  })
+
+  describe('candidatos de sugerencias (listActiveProductIds, HU-87.2)', () => {
+    const at = (hours: number): Date => new Date(now.getTime() + hours * 60 * 60 * 1000)
+    const productIds = async (input: Omit<ListActiveAuctionsInput, 'now' | 'page' | 'pageSize'>) =>
+      [...(await repository.listActiveProductIds({ now, filters: input.filters }))].sort()
+
+    it('solo incluye activas y excluye vencidas', async () => {
+      await publish('active', at(1))
+      await publish('expired', now)
+      await repository.finishAuction({
+        auctionId: 'active',
+        finishedAt: now,
+        closingResult: AuctionClosingResult.withoutBids(now),
+      })
+      await publish('still-active', at(2))
+
+      await expect(productIds({})).resolves.toEqual(['product-still-active'])
+    })
+
+    it.each([
+      [{ publisherType: 'PLAYER' as const }, ['product-p-a', 'product-p-b', 'product-p-c']],
+      [{ publisherType: 'GAME_MASTER' as const }, ['product-o-a', 'product-o-b']],
+      [{ priceKind: 'CREDITS' as const }, ['product-p-a', 'product-p-b', 'product-p-c']],
+      [{ priceKind: 'REAL_MONEY' as const }, ['product-o-a', 'product-o-b']],
+      [{ hasBuyNow: true }, ['product-o-a', 'product-p-a', 'product-p-c']],
+      [{ hasBuyNow: false }, ['product-o-b', 'product-p-b']],
+      [{ publisherType: 'PLAYER' as const, hasBuyNow: true }, ['product-p-a', 'product-p-c']],
+      [{ publisherType: 'PLAYER' as const, priceKind: 'REAL_MONEY' as const }, []],
+    ])(
+      'universo correcto con filtros %j (antes de consultar Catalog)',
+      async (filters, expected) => {
+        await publishOfficial('o-a', at(4))
+        await publishOfficial('o-b', at(5), OfficialAuctionMark.Premium, null)
+        await publish('p-c', at(1), { durationHours: 48, minimumBidCredits: 5, buyNowCredits: 8 })
+        await publish('p-a', at(2), { minimumBidCredits: 10, buyNowCredits: 100 })
+        await publish('p-b', at(3), { durationHours: 48, minimumBidCredits: 30 })
+
+        await expect(productIds({ filters })).resolves.toEqual(expected)
+      },
+    )
+
+    it('una lista vacia de activas responde universo vacio', async () => {
+      await expect(productIds({})).resolves.toEqual([])
+    })
+  })
+
   it('desempata por id cuando precio, pujas o cierre coinciden', async () => {
     const closesAt = new Date(now.getTime() + 60 * 60 * 1000)
     await publish('tie-b', closesAt)

@@ -8,6 +8,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Length,
   Max,
   MaxLength,
   Min,
@@ -114,6 +115,10 @@ export const MARKETPLACE_SORTS = [
 const strictBooleanQuery = ({ value }: { value: unknown }): unknown =>
   value === 'true' ? true : value === 'false' ? false : value
 
+/** Recorta solo textos; cualquier otro valor (p. ej. parametro repetido) llega tal cual a `@IsString`. */
+const trimmedQuery = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.trim() : value
+
 export class ListActiveAuctionsQueryDto {
   @ApiPropertyOptional({ default: 1, minimum: 1 })
   @IsOptional()
@@ -157,6 +162,78 @@ export class ListActiveAuctionsQueryDto {
   @IsOptional()
   @IsIn(MARKETPLACE_SORTS)
   sort?: (typeof MARKETPLACE_SORTS)[number]
+
+  @ApiPropertyOptional({
+    minLength: 1,
+    maxLength: 80,
+    description:
+      'Subcadena del nombre del producto (Catalog). Se recorta; vacio o solo espacios responde 400.',
+  })
+  @IsOptional()
+  @Transform(trimmedQuery)
+  @IsString()
+  @Length(1, 80)
+  search?: string
+}
+
+/**
+ * HU-87.2: autocomplete del marketplace. Mismos filtros que el listado
+ * (publisherType/priceKind/hasBuyNow) para que las sugerencias respeten el
+ * mismo universo visible; deliberadamente SIN sort/page/pageSize, que no
+ * aplican a una lista de sugerencias.
+ */
+export class AuctionSuggestionsQueryDto {
+  @ApiProperty({
+    minLength: 3,
+    maxLength: 80,
+    description:
+      'Texto de busqueda del autocomplete. Se recorta; menos de 3 caracteres responde 400.',
+  })
+  @Transform(trimmedQuery)
+  @IsString()
+  @Length(3, 80)
+  q!: string
+
+  @ApiPropertyOptional({ default: 8, minimum: 1, maximum: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  limit?: number
+
+  @ApiPropertyOptional({ enum: MARKETPLACE_PUBLISHER_TYPES })
+  @IsOptional()
+  @IsIn(MARKETPLACE_PUBLISHER_TYPES)
+  publisherType?: (typeof MARKETPLACE_PUBLISHER_TYPES)[number]
+
+  @ApiPropertyOptional({ enum: MARKETPLACE_PRICE_KINDS })
+  @IsOptional()
+  @IsIn(MARKETPLACE_PRICE_KINDS)
+  priceKind?: (typeof MARKETPLACE_PRICE_KINDS)[number]
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description: 'true: con precio de compra inmediata configurado; false: sin el.',
+  })
+  @IsOptional()
+  @Transform(strictBooleanQuery)
+  @IsBoolean()
+  hasBuyNow?: boolean
+}
+
+export class AuctionSuggestionItemResponseDto {
+  @ApiProperty({ example: 'inventory-product-123' })
+  productId!: string
+  @ApiProperty({ example: 'Espada de dragon' })
+  name!: string
+  @ApiProperty({ example: 'ARMA' })
+  type!: string
+}
+
+export class AuctionSuggestionListResponseDto {
+  @ApiProperty({ type: [AuctionSuggestionItemResponseDto] })
+  items!: AuctionSuggestionItemResponseDto[]
 }
 
 export class ActiveAuctionSummaryResponseDto {
@@ -246,19 +323,163 @@ export class BidResponseDto {
 }
 
 /**
- * Respuesta utilizada por la Web para HU-63.6.
+ * Respuesta utilizada por la Web para HU-63.6 y extendida por HU-88.
  *
- * La oferta lider puede ser null cuando aun nadie
- * ha realizado una puja.
+ * NO extiende `AuctionResponseDto` -ese sigue siendo la respuesta de
+ * publicacion (`POST /v1/auctions`), solo PLAYER/CREDITS- porque aqui
+ * `minimumBidCredits`/`buyNowCredits` deben admitir `null` (una subasta
+ * oficial no los tiene). Mismo vocabulario que `ActiveAuctionSummaryResponseDto`
+ * del listado -no se inventan nombres nuevos para los mismos conceptos-.
+ *
+ * La oferta lider (`currentBid`) puede ser null cuando aun nadie ha
+ * realizado una puja, o cuando la subasta es oficial (REAL_MONEY): esas no
+ * admiten pujas, solo compra inmediata.
  */
-export class AuctionDetailResponseDto extends AuctionResponseDto {
+export class AuctionDetailResponseDto {
+  @ApiProperty()
+  id!: string
+
+  @ApiProperty()
+  sellerId!: string
+
+  @ApiProperty()
+  productId!: string
+
+  @ApiProperty({ enum: ['PLAYER', 'GAME_MASTER'] })
+  publisherType!: 'PLAYER' | 'GAME_MASTER'
+
+  @ApiProperty({ enum: ['CREDITS', 'REAL_MONEY'] })
+  priceKind!: 'CREDITS' | 'REAL_MONEY'
+
+  @ApiProperty({
+    enum: [24, 48],
+  })
+  durationHours!: number
+
+  @ApiProperty()
+  publicationFeeCredits!: number
+
+  @ApiPropertyOptional({ nullable: true })
+  minimumBidCredits!: number | null
+
+  @ApiPropertyOptional({ nullable: true })
+  buyNowCredits!: number | null
+
+  @ApiPropertyOptional({ nullable: true, example: 'COP' })
+  currency!: string | null
+
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  minimumBidAmountMinor!: number | null
+
+  @ApiPropertyOptional({ nullable: true, minimum: 1 })
+  buyNowAmountMinor!: number | null
+
+  @ApiPropertyOptional({ nullable: true, enum: ['OFFICIAL', 'PREMIUM'] })
+  officialMark!: 'OFFICIAL' | 'PREMIUM' | null
+
+  @ApiProperty({
+    enum: ['ACTIVE', 'FINISHED', 'SOLD', 'CANCELLED'],
+  })
+  status!: string
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  publishedAt!: Date
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  closesAt!: Date
+
+  @ApiPropertyOptional({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'HU-90: no nulo si y solo si status es CANCELLED.',
+  })
+  cancelledAt!: Date | null
+
   @ApiPropertyOptional({
     type: BidResponseDto,
     nullable: true,
   })
   currentBid!: BidResponseDto | null
+
   @ApiProperty({ minimum: 0, description: 'Total de pujas persistidas de la subasta.' })
   bidCount!: number
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'Ana Ramirez',
+    description:
+      'Apodo publico del vendedor (sellerId), resuelto contra Account. Null si Account no lo resuelve.',
+  })
+  sellerDisplayName!: string | null
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Avatar publico del vendedor (sellerId), resuelto contra Account. Null si Account no lo resuelve.',
+  })
+  sellerAvatarUrl!: string | null
+}
+
+export class AuctionBidHistoryQueryDto {
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number
+
+  @ApiPropertyOptional({ default: 20, minimum: 1, maximum: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  pageSize?: number
+}
+
+/**
+ * Item publico del historial de pujas (HU-88).
+ *
+ * Deliberadamente NO incluye `bidderId`: la HU exige anonimizar cuando
+ * corresponda, pero no existe todavia una regla aprobada. Mientras eso no se
+ * decida, el minimo dato necesario para mostrar el historial es el monto y
+ * el momento de cada puja -nunca quien la hizo-.
+ */
+export class AuctionBidHistoryItemResponseDto {
+  @ApiProperty({
+    example: 'bid-123',
+  })
+  id!: string
+
+  @ApiProperty({
+    example: 25,
+    minimum: 1,
+  })
+  amountCredits!: number
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  placedAt!: Date
+}
+
+export class AuctionBidHistoryPageResponseDto {
+  @ApiProperty({ type: [AuctionBidHistoryItemResponseDto] })
+  items!: AuctionBidHistoryItemResponseDto[]
+  @ApiProperty({ minimum: 1 })
+  page!: number
+  @ApiProperty({ minimum: 1, maximum: 100 })
+  pageSize!: number
+  @ApiProperty({ minimum: 0 })
+  total!: number
 }
 
 export class ConfigureAutoBidRequestDto {
@@ -433,6 +654,158 @@ export class ClaimPendingProductsBatchResponseDto {
     isArray: true,
   })
   results!: ClaimPendingProductsBatchItemResponseDto[]
+}
+
+/** HU-90. */
+export class AuctionCancellationResponseDto {
+  @ApiProperty()
+  auctionId!: string
+
+  @ApiProperty({ enum: ['CANCELLED'] })
+  status!: string
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+  })
+  cancelledAt!: Date
+
+  @ApiProperty({
+    description: '50% de publicationFeeCredits (7.7.10): 1 -> 0.5; 3 -> 1.5.',
+  })
+  refundAmountCredits!: number
+
+  @ApiProperty({
+    enum: ['PENDING', 'CONFIRMED', 'RETRYABLE', 'TERMINAL_ERROR'],
+    description:
+      'Progreso del refund parcial en Wallet. PENDING/RETRYABLE: reintente la misma Idempotency-Key.',
+  })
+  walletRefundStatus!: string
+
+  @ApiProperty({
+    enum: ['PENDING', 'CONFIRMED', 'RETRYABLE', 'TERMINAL_ERROR'],
+    description:
+      'Progreso del release del producto en Player-Inventory. PENDING/RETRYABLE: reintente la misma Idempotency-Key.',
+  })
+  inventoryReleaseStatus!: string
+
+  @ApiProperty({
+    description: 'true si esta respuesta es el replay de una cancelacion ya confirmada.',
+  })
+  replayed!: boolean
+}
+
+/** Paginacion comun de las consultas privadas de HU-89. */
+export class PersonalAuctionActivityQueryDto {
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number
+
+  @ApiPropertyOptional({ default: 16, minimum: 1, maximum: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  pageSize?: number
+}
+
+export class PersonalAuctionActionsResponseDto {
+  @ApiProperty({ example: true }) view!: true
+  @ApiProperty({ description: 'Elegibilidad informativa; HU-90 revalida al ejecutar.' })
+  cancel!: boolean
+}
+
+export class PersonalAuctionItemResponseDto {
+  @ApiProperty() auctionId!: string
+  @ApiProperty() productId!: string
+  @ApiProperty({ enum: ['ACTIVE', 'FINISHED', 'SOLD', 'CANCELLED'] }) status!: string
+  @ApiProperty() minimumBidCredits!: number
+  @ApiPropertyOptional({ nullable: true }) buyNowCredits!: number | null
+  @ApiPropertyOptional({ nullable: true }) currentBidCredits!: number | null
+  @ApiProperty() bidCount!: number
+  @ApiProperty({ type: String, format: 'date-time' }) publishedAt!: Date
+  @ApiProperty({ type: String, format: 'date-time' }) closesAt!: Date
+  @ApiPropertyOptional({ type: String, format: 'date-time', nullable: true })
+  finishedAt!: Date | null
+  @ApiPropertyOptional({ type: String, format: 'date-time', nullable: true })
+  cancelledAt!: Date | null
+  @ApiProperty({ type: PersonalAuctionActionsResponseDto })
+  actions!: PersonalAuctionActionsResponseDto
+}
+
+export class PersonalAuctionPageResponseDto {
+  @ApiProperty({ type: PersonalAuctionItemResponseDto, isArray: true })
+  items!: PersonalAuctionItemResponseDto[]
+  @ApiProperty() total!: number
+  @ApiProperty() page!: number
+  @ApiProperty() pageSize!: number
+}
+
+export class PersonalBidItemResponseDto {
+  @ApiProperty() auctionId!: string
+  @ApiProperty() productId!: string
+  @ApiProperty({ enum: ['ACTIVE', 'FINISHED', 'SOLD', 'CANCELLED'] }) auctionStatus!: string
+  @ApiProperty({ enum: ['LEADING', 'OUTBID', 'WON', 'LOST'] }) participationStatus!: string
+  @ApiProperty() ownLatestBidCredits!: number
+  @ApiProperty({ type: String, format: 'date-time' }) ownLatestBidAt!: Date
+  @ApiPropertyOptional({ nullable: true }) currentBidCredits!: number | null
+  @ApiProperty({ type: String, format: 'date-time' }) closesAt!: Date
+}
+
+export class PersonalBidPageResponseDto {
+  @ApiProperty({ type: PersonalBidItemResponseDto, isArray: true })
+  items!: PersonalBidItemResponseDto[]
+  @ApiProperty() total!: number
+  @ApiProperty() page!: number
+  @ApiProperty() pageSize!: number
+}
+
+export class AuctionTransactionValueResponseDto {
+  @ApiProperty() amount!: number
+  @ApiProperty({ enum: ['CREDITS'] }) unit!: 'CREDITS'
+}
+
+export class PersonalTransactionItemResponseDto {
+  @ApiProperty() id!: string
+  @ApiProperty() auctionId!: string
+  @ApiProperty({
+    enum: [
+      'PUBLICATION_FEE',
+      'BID_RESERVATION',
+      'BUY_NOW_PURCHASE',
+      'SETTLEMENT_SALE',
+      'SETTLEMENT_WIN',
+      'CANCELLATION_REFUND',
+      'PRODUCT_CLAIM',
+    ],
+  })
+  type!: string
+  @ApiProperty() reference!: string
+  @ApiProperty({ type: String, format: 'date-time' }) occurredAt!: Date
+  @ApiProperty() status!: string
+  @ApiPropertyOptional({ type: AuctionTransactionValueResponseDto, nullable: true })
+  value!: AuctionTransactionValueResponseDto | null
+}
+
+export class PersonalTransactionPageResponseDto {
+  @ApiProperty({ type: PersonalTransactionItemResponseDto, isArray: true })
+  items!: PersonalTransactionItemResponseDto[]
+  @ApiProperty() total!: number
+  @ApiProperty() page!: number
+  @ApiProperty() pageSize!: number
+}
+
+export class AuctionViewStatisticsResponseDto {
+  @ApiProperty({ enum: ['UNAVAILABLE'] })
+  availability!: 'UNAVAILABLE'
+  @ApiProperty({ enum: ['AUTHORITATIVE_SOURCE_NOT_CONFIGURED'] })
+  reason!: 'AUTHORITATIVE_SOURCE_NOT_CONFIGURED'
+  @ApiProperty({ type: Object, isArray: true })
+  metrics!: readonly []
 }
 
 export const assertIdempotencyKey = (value: string | undefined): string => {

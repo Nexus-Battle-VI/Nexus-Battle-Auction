@@ -46,7 +46,61 @@ export interface AuctionTable {
   winning_bid_id: string | null
   winner_id: string | null
   final_amount_credits: string | number | null
+  /** HU-90: no nulo si y solo si `status = 'CANCELLED'`. */
+  cancelled_at: Date | null
   created_at: GeneratedTimestamp
+}
+
+/** HU-90: idempotencia del endpoint de cancelacion (mismo patron que `auction_buy_now_operations`). */
+export interface AuctionCancellationOperationTable {
+  operation_id: string
+  request_hash: string
+  auction_id: string
+  completed_at: Timestamp
+}
+
+/**
+ * HU-90: progreso de los efectos externos de una cancelacion confirmada
+ * (refund parcial en Wallet, release en Player-Inventory). Una fila por
+ * subasta, igual que `auction_settlements`/`auction_inventory_settlement_intents`.
+ * Una automatica (CA-05, `origin = 'TERMS_VIOLATION'`) no tiene refund y
+ * sus releases de reservas viven en `auction_cancellation_reservation_releases`.
+ */
+export interface AuctionCancellationTable {
+  auction_id: string
+  operation_id: string
+  /** Default `MANUAL` en la base: las inserciones manuales pueden omitirlo. */
+  origin: Generated<'MANUAL' | 'TERMS_VIOLATION'>
+  /** Id de la sancion que disparo una automatica; nulo en una manual. */
+  trigger_reference_id: string | null
+  seller_id: string
+  product_id: string
+  inventory_commitment_id: string
+  fee_charge_id: string | null
+  refund_amount_credits: string | number
+  /** Nulo si y solo si `wallet_refund_status = 'NOT_REQUIRED'`. */
+  wallet_refund_operation_id: string | null
+  wallet_refund_status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR' | 'NOT_REQUIRED'
+  wallet_refund_last_error: string | null
+  inventory_release_operation_id: string
+  inventory_release_status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR'
+  inventory_release_last_error: string | null
+  cancelled_at: Timestamp
+  created_at: Timestamp
+  updated_at: Timestamp
+  lease_owner: string | null
+  lease_until: Timestamp | null
+}
+
+/** HU-90, CA-05: release en Wallet de una reserva de puja, una fila por reserva. */
+export interface AuctionCancellationReservationReleaseTable {
+  auction_id: string
+  reservation_id: string
+  operation_id: string
+  status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR'
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
 }
 
 export interface AuctionBidTable {
@@ -200,6 +254,9 @@ export interface Database {
   auction_pending_claims: AuctionPendingClaimTable
   auction_inventory_settlement_intents: AuctionInventorySettlementIntentTable
   auction_settlement_work: AuctionSettlementWorkTable
+  auction_cancellation_operations: AuctionCancellationOperationTable
+  auction_cancellations: AuctionCancellationTable
+  auction_cancellation_reservation_releases: AuctionCancellationReservationReleaseTable
 }
 
 export interface AuctionSettlementWorkTable {

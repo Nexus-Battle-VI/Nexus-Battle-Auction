@@ -19,6 +19,12 @@ export enum AuctionRuleCode {
   InvalidMoney = 'INVALID_MONEY',
   CurrencyMismatch = 'CURRENCY_MISMATCH',
   InvalidOfficialMark = 'INVALID_OFFICIAL_MARK',
+  /** HU-90: la subasta no esta ACTIVE (ya cancelada, finalizada o vendida). */
+  AuctionNotActive = 'AUCTION_NOT_ACTIVE',
+  /** HU-90: tiene al menos una puja registrada; no se puede cancelar manualmente. */
+  AuctionHasBids = 'AUCTION_HAS_BIDS',
+  /** HU-90, `7.7.10`: faltan 6 horas o menos para el cierre. */
+  AuctionCancellationWindowClosed = 'AUCTION_CANCELLATION_WINDOW_CLOSED',
 }
 
 export class AuctionRuleViolation extends DomainError {

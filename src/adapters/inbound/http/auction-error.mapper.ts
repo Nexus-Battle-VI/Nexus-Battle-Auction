@@ -16,6 +16,10 @@ import {
   PersistedAuctionNotFoundError,
   ProductNotEligibleForOfficialAuctionError,
 } from '../../../application/errors/AuctionPersistenceError'
+import {
+  AuctionCancellationNotFoundError,
+  AuctionCancellationOwnershipError,
+} from '../../../application/errors/AuctionCancellationError'
 import { PriceSortRequiresCreditsError } from '../../../application/errors/MarketplaceQueryError'
 import {
   PendingClaimNotFoundError,
@@ -44,7 +48,22 @@ const body = (statusCode: number, code: string, message: string) => ({
   message,
 })
 
+/** HU-90: mismo estilo que `BuyNowRuleCode.AuctionNotActive` -el estado ACTUAL del recurso impide la operacion-. */
+const CANCELLATION_CONFLICT_CODES: ReadonlySet<AuctionRuleCode> = new Set([
+  AuctionRuleCode.AuctionNotActive,
+  AuctionRuleCode.AuctionHasBids,
+  AuctionRuleCode.AuctionCancellationWindowClosed,
+])
+
 export const toAuctionHttpException = (error: unknown): HttpException => {
+  if (error instanceof AuctionCancellationNotFoundError) {
+    return new NotFoundException(body(404, 'AUCTION_NOT_FOUND', error.message))
+  }
+
+  if (error instanceof AuctionCancellationOwnershipError) {
+    return new ForbiddenException(body(403, 'AUCTION_NOT_OWNER', error.message))
+  }
+
   if (
     error instanceof ExternalDependencyUnavailableError ||
     error instanceof ExternalContractError
@@ -155,7 +174,10 @@ export const toAuctionHttpException = (error: unknown): HttpException => {
       return new ForbiddenException(body(403, error.code, error.message))
     }
 
-    if (error.code === AuctionRuleCode.ActiveAuctionLimitReached) {
+    if (
+      error.code === AuctionRuleCode.ActiveAuctionLimitReached ||
+      CANCELLATION_CONFLICT_CODES.has(error.code)
+    ) {
       return new ConflictException(body(409, error.code, error.message))
     }
 

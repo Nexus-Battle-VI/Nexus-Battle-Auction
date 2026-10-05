@@ -1,3 +1,10 @@
+import type {
+  AuctionConfirmationEvent,
+  AuctionConfirmationOutboxRepositoryPort,
+} from '../../../application/ports/AuctionConfirmationOutboxRepositoryPort'
+import type { AuctionBidAcceptedEventV1 } from '../../../domain/events/AuctionBidAcceptedEventV1'
+import type { AuctionPublishedEventV1 } from '../../../domain/events/AuctionPublishedEventV1'
+
 import { createHash } from 'node:crypto'
 
 import {
@@ -14,14 +21,22 @@ import type {
   AuctionRepositoryPort,
   ActiveAuctionList,
   ActiveAuctionSort,
+  ActiveAuctionUniverseInput,
+  AuctionDetailSnapshot,
   BidCreditOperationSnapshot,
+  BidHistoryPage,
+  BidHistoryPageInput,
   BuyNowOperationRecord,
+  CancelAuctionAutomaticallyCommand,
+  CancelAuctionCommand,
+  CancelAuctionResult,
   CloseAuctionByBuyNowCommand,
   CloseAuctionByBuyNowResult,
   CreateBidCreditOperationCommand,
   PersistAuctionPublicationCommand,
   PersistAuctionPublicationResult,
   ListActiveAuctionsInput,
+  ListActiveSellerIdsInput,
   PersistBidResult,
   FinishAuctionCommand,
   RecordBidCreditFailureCommand,
@@ -32,18 +47,32 @@ import type {
   UpdateBidCreditOperationCommand,
 } from '../../../application/ports/AuctionRepositoryPort'
 import type {
+  AuctionActivityRepositoryPort,
+  PersonalAuctionPage,
+  PersonalBidPage,
+  PersonalTransactionPage,
+  OwnedAuctionPageInput,
+  PersonalPageInput,
+  PersonalAuctionTransaction,
+} from '../../../application/ports/AuctionActivityRepositoryPort'
+import type {
   AuctionSettlementCandidate,
   AuctionSettlementCandidateReaderPort,
 } from '../../../application/ports/AuctionSettlementWorkRepositoryPort'
+import { planCancellationReservationReleases } from '../../../application/services/CancellationReservationReleasePlanner'
+import { AuctionRuleCode, AuctionRuleViolation } from '../../../domain/errors/AuctionRuleViolation'
+import { AuctionCancellationOrigin } from '../../../domain/events/AuctionCancelledEventV1'
 import {
   Auction,
   AuctionStatus,
+  CANCELLATION_WINDOW_MS,
   MAX_ACTIVE_AUCTIONS_PER_SELLER,
   type AuctionSnapshot,
 } from '../../../domain/entities/Auction'
 import type { AutoBidConfig, AutoBidConfigSnapshot } from '../../../domain/entities/AutoBidConfig'
 import type { Bid, BidSnapshot } from '../../../domain/entities/Bid'
 import type { OfficialAuctionSnapshot } from '../../../domain/entities/OfficialAuction'
+import { InMemoryAuctionCancellationRepository } from './InMemoryAuctionCancellationRepository'
 
 interface OperationRecord {
   readonly hash: string
@@ -146,6 +175,11 @@ const buyNowHashOf = (command: CloseAuctionByBuyNowCommand): string =>
     .update(JSON.stringify([command.auctionId, command.buyerId, command.priceCredits]))
     .digest('hex')
 
+const cancellationHashOf = (command: CancelAuctionCommand): string =>
+  createHash('sha256')
+    .update(JSON.stringify([command.auctionId, command.sellerId]))
+    .digest('hex')
+
 type ActiveListItem = ActiveAuctionList['items'][number]
 
 const byId = (left: ActiveListItem, right: ActiveListItem): number =>
@@ -190,11 +224,24 @@ const activeAuctionComparator = (
 }
 
 export class InMemoryAuctionRepository
-  implements AuctionRepositoryPort, AuctionSettlementCandidateReaderPort
+  implements
+    AuctionRepositoryPort,
+    AuctionActivityRepositoryPort,
+    AuctionSettlementCandidateReaderPort,
+    AuctionConfirmationOutboxRepositoryPort
 {
+  private readonly confirmationEvents = new Map<
+    string,
+    { readonly event: AuctionConfirmationEvent; publishedAt: Date | null }
+  >()
+
   private readonly auctions = new Map<string, AuctionSnapshot>()
 
   private readonly inventoryCommitmentIds = new Map<string, string>()
+
+  private readonly feeChargeIds = new Map<string, string>()
+
+  private readonly cancellationOperations = new Map<string, OperationRecord>()
 
   private readonly officialAuctions = new Map<string, OfficialAuctionSnapshot>()
 
@@ -215,6 +262,17 @@ export class InMemoryAuctionRepository
   private readonly buyNowOperations = new Map<string, BuyNowOperationEntry>()
 
   private readonly buyNowFailures = new Map<string, RecordBuyNowFailureCommand>()
+
+  /**
+   * HU-90: `cancellations` es el MISMO `InMemoryAuctionCancellationRepository`
+   * que recibe `CancelAuction` -no un almacen paralelo-, igual que
+   * `InMemoryAuctionCommitmentRepository` de Player-Inventory recibe el
+   * repositorio de inventario del que depende. Opcional para no romper a
+   * quienes construyen este repositorio sin tocar cancelacion.
+   */
+  constructor(
+    private readonly cancellations: InMemoryAuctionCancellationRepository = new InMemoryAuctionCancellationRepository(),
+  ) {}
 
   publish(command: PersistAuctionPublicationCommand): Promise<PersistAuctionPublicationResult> {
     const hash = hashOf(command)
@@ -246,11 +304,30 @@ export class InMemoryAuctionRepository
 
     this.auctions.set(snapshot.id, snapshot)
     this.inventoryCommitmentIds.set(snapshot.id, command.inventoryCommitmentId)
+    this.feeChargeIds.set(snapshot.id, command.feeChargeId)
 
     this.operations.set(command.operationId, {
       hash,
       auctionId: snapshot.id,
     })
+
+    const event: AuctionPublishedEventV1 = {
+      eventId: `${command.operationId}:published`,
+      eventType: 'auction.published',
+      eventVersion: 1,
+      aggregateId: snapshot.id,
+      occurredAt: snapshot.publishedAt.toISOString(),
+      producer: 'auction',
+      correlationId: command.operationId,
+      data: {
+        auctionId: snapshot.id,
+        sellerId: snapshot.sellerId,
+        productId: snapshot.productId,
+        publishedAt: snapshot.publishedAt.toISOString(),
+        closesAt: snapshot.closesAt.toISOString(),
+      },
+    }
+    this.confirmationEvents.set(event.eventId, { event, publishedAt: null })
 
     return Promise.resolve({
       auction: snapshot,
@@ -335,11 +412,52 @@ export class InMemoryAuctionRepository
 
   updateBidCreditOperation(command: UpdateBidCreditOperationCommand): Promise<void> {
     const previous = this.bidCreditOperations.get(command.operationId)
-
     if (previous === undefined) {
       return Promise.reject(new Error(`La operacion de creditos ${command.operationId} no existe.`))
     }
-
+    if (command.status === 'COMPLETED') {
+      if (
+        previous.reservationId !== command.reservationId ||
+        previous.previousReservationId !== command.previousReservationId
+      ) {
+        return Promise.reject(new IdempotencyConflictError())
+      }
+      if (previous.status === 'COMPLETED') return Promise.resolve()
+      if (previous.status !== 'BID_PERSISTED' || previous.reservationId === null) {
+        return Promise.reject(new Error('Solo una puja persistida con reserva puede completarse.'))
+      }
+      const auction = this.auctions.get(previous.auctionId)
+      const bid = this.bids.get(previous.bidId)?.snapshot
+      if (
+        auction === undefined ||
+        bid?.auctionId !== previous.auctionId ||
+        bid.bidderId !== previous.bidderId ||
+        bid.amountCredits !== previous.amountCredits
+      ) {
+        return Promise.reject(new Error('La operacion no coincide con una puja persistida.'))
+      }
+      const acceptedAt = command.updatedAt.toISOString()
+      const event: AuctionBidAcceptedEventV1 = {
+        eventId: `${command.operationId}:bid-accepted`,
+        eventType: 'auction.bid.accepted',
+        eventVersion: 1,
+        aggregateId: previous.auctionId,
+        occurredAt: acceptedAt,
+        producer: 'auction',
+        correlationId: command.operationId,
+        data: {
+          operationId: command.operationId,
+          auctionId: previous.auctionId,
+          productId: auction.productId,
+          sellerId: auction.sellerId,
+          bidderId: previous.bidderId,
+          bidId: previous.bidId,
+          amountCredits: previous.amountCredits,
+          acceptedAt,
+        },
+      }
+      this.confirmationEvents.set(event.eventId, { event, publishedAt: null })
+    }
     this.bidCreditOperations.set(command.operationId, {
       ...previous,
       status: command.status,
@@ -347,7 +465,6 @@ export class InMemoryAuctionRepository
       previousReservationId: command.previousReservationId,
       updatedAt: new Date(command.updatedAt),
     })
-
     return Promise.resolve()
   }
 
@@ -373,6 +490,59 @@ export class InMemoryAuctionRepository
     const auction = this.auctions.get(auctionId)
 
     return Promise.resolve(auction === undefined ? null : cloneAuction(auction))
+  }
+
+  /** HU-88: espejo de `PostgresAuctionRepository.findDetailById` sobre los dos mapas (PLAYER/GAME_MASTER). */
+  findDetailById(auctionId: string): Promise<AuctionDetailSnapshot | null> {
+    const player = this.auctions.get(auctionId)
+
+    if (player !== undefined) {
+      return Promise.resolve({
+        id: player.id,
+        sellerId: player.sellerId,
+        productId: player.productId,
+        durationHours: player.durationHours,
+        publicationFeeCredits: player.publicationFeeCredits,
+        status: player.status,
+        publishedAt: new Date(player.publishedAt),
+        closesAt: new Date(player.closesAt),
+        cancelledAt: player.cancelledAt ?? null,
+        publisherType: 'PLAYER',
+        priceKind: 'CREDITS',
+        minimumBidCredits: player.minimumBidCredits,
+        buyNowCredits: player.buyNowCredits,
+        currency: null,
+        minimumBidAmountMinor: null,
+        buyNowAmountMinor: null,
+        officialMark: null,
+      })
+    }
+
+    const official = this.officialAuctions.get(auctionId)
+
+    if (official !== undefined) {
+      return Promise.resolve({
+        id: official.id,
+        sellerId: official.publisherId,
+        productId: official.productId,
+        durationHours: official.durationHours,
+        publicationFeeCredits: official.publicationFeeCredits,
+        status: official.status,
+        publishedAt: new Date(official.publishedAt),
+        closesAt: new Date(official.closesAt),
+        cancelledAt: null,
+        publisherType: 'GAME_MASTER',
+        priceKind: 'REAL_MONEY',
+        minimumBidCredits: null,
+        buyNowCredits: null,
+        currency: official.currency,
+        minimumBidAmountMinor: official.minimumBidAmountMinor,
+        buyNowAmountMinor: official.buyNowAmountMinor,
+        officialMark: official.mark,
+      })
+    }
+
+    return Promise.resolve(null)
   }
 
   findSettlementCandidates(now: Date): Promise<readonly AuctionSettlementCandidate[]> {
@@ -418,6 +588,10 @@ export class InMemoryAuctionRepository
     return Promise.resolve(this.inventoryCommitmentIds.get(auctionId) ?? null)
   }
 
+  findFeeChargeId(auctionId: string): Promise<string | null> {
+    return Promise.resolve(this.feeChargeIds.get(auctionId) ?? null)
+  }
+
   /** Replica la ventana `(from, until]` utilizada por PostgreSQL. */
   findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]> {
     return Promise.resolve(
@@ -431,7 +605,24 @@ export class InMemoryAuctionRepository
     )
   }
 
+  listActiveProductIds(input: ActiveAuctionUniverseInput): Promise<readonly string[]> {
+    return Promise.resolve(this.activeUniverse(input).map((item) => item.productId))
+  }
+
   listActive(input: ListActiveAuctionsInput): Promise<ActiveAuctionList> {
+    const allowed = input.productIds === undefined ? null : new Set(input.productIds)
+    const active = this.activeUniverse(input)
+      .filter((item) => allowed === null || allowed.has(item.productId))
+      .sort(activeAuctionComparator(input.sort))
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({
+      total: active.length,
+      items: active.slice(offset, offset + input.pageSize),
+    })
+  }
+
+  /** Espejo de la base de Postgres: activas no vencidas que cumplen los filtros. */
+  private activeUniverse(input: ActiveAuctionUniverseInput): ActiveListItem[] {
     const playerItems: ActiveAuctionList['items'][number][] = [...this.auctions.values()]
       .filter(
         (auction) =>
@@ -485,20 +676,13 @@ export class InMemoryAuctionRepository
         bidCount: this.countStoredBids(auction.id),
       }))
     const filters = input.filters ?? {}
-    const active = [...officialItems, ...playerItems]
-      .filter(
-        (item) =>
-          (filters.publisherType === undefined || item.publisherType === filters.publisherType) &&
-          (filters.priceKind === undefined || item.priceKind === filters.priceKind) &&
-          (filters.hasBuyNow === undefined ||
-            (item.buyNowCredits !== null || item.buyNowAmountMinor !== null) === filters.hasBuyNow),
-      )
-      .sort(activeAuctionComparator(input.sort))
-    const offset = (input.page - 1) * input.pageSize
-    return Promise.resolve({
-      total: active.length,
-      items: active.slice(offset, offset + input.pageSize),
-    })
+    return [...officialItems, ...playerItems].filter(
+      (item) =>
+        (filters.publisherType === undefined || item.publisherType === filters.publisherType) &&
+        (filters.priceKind === undefined || item.priceKind === filters.priceKind) &&
+        (filters.hasBuyNow === undefined ||
+          (item.buyNowCredits !== null || item.buyNowAmountMinor !== null) === filters.hasBuyNow),
+    )
   }
 
   findOfficialById(auctionId: string): Promise<OfficialAuctionSnapshot | null> {
@@ -617,6 +801,27 @@ export class InMemoryAuctionRepository
 
   countBids(auctionId: string): Promise<number> {
     return Promise.resolve(this.countStoredBids(auctionId))
+  }
+
+  /** HU-88: mismo orden estable (`placedAt`, `id`) que la version Postgres. */
+  listBidHistoryPage(input: BidHistoryPageInput): Promise<BidHistoryPage> {
+    const all = [...this.bids.values()]
+      .filter((stored) => stored.snapshot.auctionId === input.auctionId)
+      .sort(
+        (left, right) =>
+          left.snapshot.placedAt.getTime() - right.snapshot.placedAt.getTime() ||
+          left.snapshot.id.localeCompare(right.snapshot.id),
+      )
+    const offset = (input.page - 1) * input.pageSize
+
+    return Promise.resolve({
+      total: all.length,
+      items: all.slice(offset, offset + input.pageSize).map((stored) => ({
+        id: stored.snapshot.id,
+        amountCredits: stored.snapshot.amountCredits,
+        placedAt: new Date(stored.snapshot.placedAt),
+      })),
+    })
   }
 
   private countStoredBids(auctionId: string): number {
@@ -748,6 +953,185 @@ export class InMemoryAuctionRepository
     })
   }
 
+  /** HU-90: mismo esqueleto que `closeByBuyNow`, ver el comentario de la version Postgres. */
+  cancelAuction(command: CancelAuctionCommand): Promise<CancelAuctionResult> {
+    const hash = cancellationHashOf(command)
+    const previous = this.cancellationOperations.get(command.operationId)
+
+    if (previous !== undefined) {
+      if (previous.hash !== hash) {
+        return Promise.reject(new IdempotencyConflictError())
+      }
+      const auction = this.auctions.get(previous.auctionId)
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+      return Promise.resolve({ auction, replayed: true })
+    }
+
+    const auction = this.auctions.get(command.auctionId)
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+    if (auction.status !== AuctionStatus.Active) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        ),
+      )
+    }
+    if (this.countStoredBids(command.auctionId) > 0) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionHasBids,
+          'Una subasta con pujas registradas no puede cancelarse manualmente.',
+        ),
+      )
+    }
+    if (auction.closesAt.getTime() - command.cancelledAt.getTime() <= CANCELLATION_WINDOW_MS) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionCancellationWindowClosed,
+          'No se puede cancelar una subasta con 6 horas o menos para su cierre.',
+        ),
+      )
+    }
+
+    const cancelled: AuctionSnapshot = {
+      ...auction,
+      status: AuctionStatus.Cancelled,
+      cancelledAt: new Date(command.cancelledAt),
+    }
+    this.auctions.set(cancelled.id, cancelled)
+    this.cancellationOperations.set(command.operationId, {
+      hash,
+      auctionId: command.auctionId,
+    })
+    this.cancellations.createIfAbsent({
+      auctionId: command.auctionId,
+      operationId: command.operationId,
+      sellerId: command.sellerId,
+      productId: command.productId,
+      inventoryCommitmentId: command.inventoryCommitmentId,
+      feeChargeId: command.feeChargeId,
+      refundAmountCredits: command.refundAmountCredits,
+      walletRefundOperationId: command.walletRefundOperationId,
+      inventoryReleaseOperationId: command.inventoryReleaseOperationId,
+      cancelledAt: command.cancelledAt,
+    })
+
+    return Promise.resolve({ auction: cancelled, replayed: false })
+  }
+
+  /** HU-90, CA-05: ver el comentario de la version Postgres. */
+  cancelAuctionAutomatically(
+    command: CancelAuctionAutomaticallyCommand,
+  ): Promise<CancelAuctionResult> {
+    const hash = createHash('sha256')
+      .update(
+        JSON.stringify([
+          command.auctionId,
+          AuctionCancellationOrigin.TermsViolation,
+          command.triggerReferenceId,
+        ]),
+        'utf8',
+      )
+      .digest('hex')
+    const previous = this.cancellationOperations.get(command.operationId)
+
+    if (previous !== undefined) {
+      if (previous.hash !== hash) {
+        return Promise.reject(new IdempotencyConflictError())
+      }
+      const auction = this.auctions.get(previous.auctionId)
+      if (auction === undefined) {
+        return Promise.reject(new PersistedAuctionNotFoundError(previous.auctionId))
+      }
+      return Promise.resolve({ auction, replayed: true })
+    }
+
+    const auction = this.auctions.get(command.auctionId)
+    if (auction === undefined) {
+      return Promise.reject(new PersistedAuctionNotFoundError(command.auctionId))
+    }
+    if (auction.status !== AuctionStatus.Active) {
+      return Promise.reject(
+        new AuctionRuleViolation(
+          AuctionRuleCode.AuctionNotActive,
+          'Solo una subasta activa puede cancelarse.',
+        ),
+      )
+    }
+    const inventoryCommitmentId = this.inventoryCommitmentIds.get(command.auctionId)
+    if (inventoryCommitmentId === undefined) {
+      return Promise.reject(
+        new Error(`La subasta ${command.auctionId} no tiene un inventoryCommitmentId durable.`),
+      )
+    }
+
+    const reservationReleases = planCancellationReservationReleases(
+      command.auctionId,
+      [...this.bids.values()]
+        .filter((stored) => stored.snapshot.auctionId === command.auctionId)
+        .map((stored) => ({ creditReservationId: stored.creditReservationId })),
+      [...this.bidCreditOperations.values()].filter(
+        (operation) => operation.auctionId === command.auctionId,
+      ),
+    )
+
+    const cancelled: AuctionSnapshot = {
+      ...auction,
+      status: AuctionStatus.Cancelled,
+      cancelledAt: new Date(command.cancelledAt),
+    }
+    this.auctions.set(cancelled.id, cancelled)
+    this.cancellationOperations.set(command.operationId, {
+      hash,
+      auctionId: command.auctionId,
+    })
+    this.cancellations.createAutomaticIfAbsent({
+      auctionId: command.auctionId,
+      operationId: command.operationId,
+      triggerReferenceId: command.triggerReferenceId,
+      sellerId: auction.sellerId,
+      productId: auction.productId,
+      inventoryCommitmentId,
+      inventoryReleaseOperationId: command.inventoryReleaseOperationId,
+      reservationReleases,
+      cancelledAt: command.cancelledAt,
+    })
+
+    return Promise.resolve({ auction: cancelled, replayed: false })
+  }
+
+  listActiveSellerIds(input: ListActiveSellerIdsInput): Promise<readonly string[]> {
+    const after = input.afterSellerId
+    const sellerIds = [
+      ...new Set(
+        [...this.auctions.values()]
+          .filter((auction) => auction.status === AuctionStatus.Active)
+          .map((auction) => auction.sellerId),
+      ),
+    ]
+      .filter((sellerId) => after === null || sellerId > after)
+      .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+      .slice(0, input.limit)
+
+    return Promise.resolve(sellerIds)
+  }
+
+  listActiveAuctionIdsBySeller(sellerId: string): Promise<readonly string[]> {
+    return Promise.resolve(
+      [...this.auctions.values()]
+        .filter(
+          (auction) => auction.sellerId === sellerId && auction.status === AuctionStatus.Active,
+        )
+        .map((auction) => auction.id)
+        .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
+    )
+  }
+
   recordBuyNowFailure(command: RecordBuyNowFailureCommand): Promise<void> {
     this.buyNowFailures.set(command.operationId, command)
 
@@ -785,7 +1169,162 @@ export class InMemoryAuctionRepository
     return entry === undefined ? Promise.resolve(null) : this.findBuyNowOperation(entry[0])
   }
 
+  /** Proyeccion privada de publicaciones propias para HU-89. */
+  listOwnedAuctions(input: OwnedAuctionPageInput): Promise<PersonalAuctionPage> {
+    const all = [...this.auctions.values()]
+      .filter((auction) => auction.sellerId === input.playerId)
+      .sort(
+        (left, right) =>
+          right.publishedAt.getTime() - left.publishedAt.getTime() ||
+          left.id.localeCompare(right.id),
+      )
+      .map((auction) => {
+        const bids = [...this.bids.values()].filter(
+          (entry) => entry.snapshot.auctionId === auction.id,
+        )
+        const leadingId = this.leadingBidByAuction.get(auction.id)
+        const leader = leadingId === undefined ? undefined : this.bids.get(leadingId)
+        return {
+          auctionId: auction.id,
+          productId: auction.productId,
+          status: auction.status,
+          minimumBidCredits: auction.minimumBidCredits,
+          buyNowCredits: auction.buyNowCredits,
+          currentBidCredits: leader?.snapshot.amountCredits ?? null,
+          bidCount: bids.length,
+          publishedAt: new Date(auction.publishedAt),
+          closesAt: new Date(auction.closesAt),
+          finishedAt: auction.completion?.finishedAt ?? null,
+          cancelledAt: auction.cancelledAt ?? null,
+          actions: {
+            view: true as const,
+            cancel:
+              auction.status === AuctionStatus.Active &&
+              bids.length === 0 &&
+              auction.closesAt.getTime() - input.now.getTime() > CANCELLATION_WINDOW_MS,
+          },
+        }
+      })
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({ items: all.slice(offset, offset + input.pageSize), total: all.length })
+  }
+
+  /** Una fila por subasta participada; nunca devuelve identificadores de otros pujadores. */
+  listBidParticipations(input: PersonalPageInput): Promise<PersonalBidPage> {
+    const ownBids = [...this.bids.values()]
+      .map((entry) => entry.snapshot)
+      .filter((bid) => bid.bidderId === input.playerId)
+      .sort((left, right) => right.placedAt.getTime() - left.placedAt.getTime())
+    const latestByAuction = new Map<string, BidSnapshot>()
+    for (const bid of ownBids)
+      if (!latestByAuction.has(bid.auctionId)) latestByAuction.set(bid.auctionId, bid)
+
+    const all = [...latestByAuction.values()].flatMap((bid) => {
+      const auction = this.auctions.get(bid.auctionId)
+      if (auction === undefined) return []
+      const leaderId = this.leadingBidByAuction.get(auction.id)
+      const leader = leaderId === undefined ? undefined : this.bids.get(leaderId)?.snapshot
+      const won = auction.completion?.winnerId === input.playerId
+      return [
+        {
+          auctionId: auction.id,
+          productId: auction.productId,
+          auctionStatus: auction.status,
+          participationStatus:
+            auction.status === AuctionStatus.Active
+              ? leader?.bidderId === input.playerId
+                ? ('LEADING' as const)
+                : ('OUTBID' as const)
+              : won
+                ? ('WON' as const)
+                : ('LOST' as const),
+          ownLatestBidCredits: bid.amountCredits,
+          ownLatestBidAt: new Date(bid.placedAt),
+          currentBidCredits:
+            leader?.amountCredits ?? auction.completion?.finalAmountCredits ?? null,
+          closesAt: new Date(auction.closesAt),
+        },
+      ]
+    })
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({ items: all.slice(offset, offset + input.pageSize), total: all.length })
+  }
+
+  /** Historial derivado unicamente de registros durables mantenidos por este adaptador. */
+  listTransactions(input: PersonalPageInput): Promise<PersonalTransactionPage> {
+    const records: PersonalAuctionTransaction[] = []
+    for (const [operationId, operation] of this.operations) {
+      const auction = this.auctions.get(operation.auctionId)
+      if (auction?.sellerId === input.playerId) {
+        records.push({
+          id: `publication:${operationId}`,
+          auctionId: auction.id,
+          type: 'PUBLICATION_FEE',
+          reference: operationId,
+          occurredAt: new Date(auction.publishedAt),
+          status: 'COMPLETED',
+          value: { amount: auction.publicationFeeCredits, unit: 'CREDITS' },
+        })
+      }
+    }
+    for (const operation of this.bidCreditOperations.values()) {
+      if (operation.bidderId === input.playerId)
+        records.push({
+          id: `bid:${operation.operationId}`,
+          auctionId: operation.auctionId,
+          type: 'BID_RESERVATION',
+          reference: operation.operationId,
+          occurredAt: new Date(operation.createdAt),
+          status: operation.status,
+          value: { amount: operation.amountCredits, unit: 'CREDITS' },
+        })
+    }
+    for (const [operationId, operation] of this.buyNowOperations) {
+      if (operation.buyerId === input.playerId)
+        records.push({
+          id: `buy-now:${operationId}`,
+          auctionId: operation.auctionId,
+          type: 'BUY_NOW_PURCHASE',
+          reference: operation.transactionId,
+          occurredAt: new Date(operation.completedAt),
+          status: 'COMPLETED',
+          value: { amount: operation.priceCredits, unit: 'CREDITS' },
+        })
+    }
+    records.sort(
+      (left, right) =>
+        right.occurredAt.getTime() - left.occurredAt.getTime() || left.id.localeCompare(right.id),
+    )
+    const offset = (input.page - 1) * input.pageSize
+    return Promise.resolve({
+      items: records.slice(offset, offset + input.pageSize),
+      total: records.length,
+    })
+  }
+
   private count(sellerId: string): number {
     return [...this.auctions.values()].filter((auction) => auction.sellerId === sellerId).length
+  }
+  findPending(input: { readonly limit: number }): Promise<readonly AuctionConfirmationEvent[]> {
+    const events = [...this.confirmationEvents.values()]
+      .filter((entry) => entry.publishedAt === null)
+      .map((entry) => entry.event)
+      .sort(
+        (left, right) =>
+          Date.parse(left.occurredAt) - Date.parse(right.occurredAt) ||
+          left.eventId.localeCompare(right.eventId),
+      )
+      .slice(0, input.limit)
+      .map((event) => structuredClone(event))
+    return Promise.resolve(events)
+  }
+
+  markPublished(input: { readonly eventId: string; readonly publishedAt: Date }): Promise<void> {
+    const entry = this.confirmationEvents.get(input.eventId)
+    if (entry === undefined) {
+      return Promise.reject(new Error(`El evento ${input.eventId} no existe.`))
+    }
+    entry.publishedAt ??= new Date(input.publishedAt)
+    return Promise.resolve()
   }
 }

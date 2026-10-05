@@ -3,6 +3,7 @@ import type { ClockPort } from '../../src/application/ports/ClockPort'
 import { PriceSortRequiresCreditsError } from '../../src/application/errors/MarketplaceQueryError'
 import type { ActiveAuctionList } from '../../src/application/ports/AuctionRepositoryPort'
 import { ListActiveAuctions } from '../../src/application/use-cases/ListActiveAuctions'
+import { ExternalDependencyUnavailableError } from '../../src/application/errors/ExternalDependencyError'
 import { Auction } from '../../src/domain/entities/Auction'
 import { AuctionClosingResult } from '../../src/domain/entities/AuctionClosingResult'
 import { Bid } from '../../src/domain/entities/Bid'
@@ -12,9 +13,12 @@ import {
   OfficialAuctionMark,
 } from '../../src/domain/entities/OfficialAuction'
 import { AuctionPriceKind } from '../../src/domain/value-objects/AuctionPublicationPricing'
+import { FakeCatalogProductLookup } from '../support/fake-catalog-product-lookup'
 
 const now = new Date('2026-09-23T12:00:00.000Z')
 const clock: ClockPort = { now: () => new Date(now) }
+const newList = (repository: InMemoryAuctionRepository, catalog = new FakeCatalogProductLookup()) =>
+  new ListActiveAuctions(repository, clock, catalog)
 
 interface PublishOptions {
   readonly durationHours?: 24 | 48
@@ -107,7 +111,7 @@ const publishOfficial = async (
 describe('ListActiveAuctions', () => {
   it('devuelve una pagina vacia cuando no hay activas disponibles', async () => {
     await expect(
-      new ListActiveAuctions(new InMemoryAuctionRepository(), clock).execute({
+      newList(new InMemoryAuctionRepository()).execute({
         page: 1,
         pageSize: 16,
       }),
@@ -116,7 +120,7 @@ describe('ListActiveAuctions', () => {
 
   it('filtra, ordena, pagina y expone solo el importe de la puja lider', async () => {
     const repository = new InMemoryAuctionRepository()
-    const useCase = new ListActiveAuctions(repository, clock)
+    const useCase = newList(repository)
     await publish(repository, 'same-b', new Date(now.getTime() + 2_000))
     await publish(repository, 'expired', now)
     await publish(repository, 'first', new Date(now.getTime() + 1_000))
@@ -140,7 +144,7 @@ describe('ListActiveAuctions', () => {
 
   it('prioriza GAME_MASTER y mantiene cierre e id como desempates antes de paginar', async () => {
     const repository = new InMemoryAuctionRepository()
-    const useCase = new ListActiveAuctions(repository, clock)
+    const useCase = newList(repository)
     await publish(repository, 'player-first-closing', new Date(now.getTime() + 1_000))
     await publishOfficial(repository, 'official-b', new Date(now.getTime() + 3_000))
     await publishOfficial(
@@ -186,7 +190,7 @@ describe('ListActiveAuctions', () => {
 
   it('devuelve el total real de pujas persistidas de cada subasta del listado', async () => {
     const repository = new InMemoryAuctionRepository()
-    const useCase = new ListActiveAuctions(repository, clock)
+    const useCase = newList(repository)
     await publish(repository, 'no-bids', new Date(now.getTime() + 1_000))
     await publish(repository, 'one-bid', new Date(now.getTime() + 2_000))
     await publish(repository, 'many-bids', new Date(now.getTime() + 3_000))
@@ -244,7 +248,7 @@ const seedMarketplace = async (): Promise<InMemoryAuctionRepository> => {
 
 describe('ListActiveAuctions: filtros y orden', () => {
   const list = async (input: Parameters<ListActiveAuctions['execute']>[0]) =>
-    new ListActiveAuctions(await seedMarketplace(), clock).execute(input)
+    newList(await seedMarketplace()).execute(input)
 
   it('sin filtros ni sort conserva GAME_MASTER primero, cierre e id', async () => {
     const result = await list({ page: 1, pageSize: 16 })
@@ -304,7 +308,7 @@ describe('ListActiveAuctions: filtros y orden', () => {
 
   it('desempata por id cuando precio, pujas o cierre coinciden', async () => {
     const repository = new InMemoryAuctionRepository()
-    const useCase = new ListActiveAuctions(repository, clock)
+    const useCase = newList(repository)
     await publish(repository, 'tie-b', at(1))
     await publish(repository, 'tie-a', at(1))
     await publish(repository, 'tie-c', at(1))
@@ -326,19 +330,27 @@ describe('ListActiveAuctions: filtros y orden', () => {
     ['priceAsc' as const, { priceKind: 'REAL_MONEY' as const }],
     ['priceDesc' as const, { publisherType: 'PLAYER' as const }],
   ])('%s sin priceKind=CREDITS (%j) se rechaza sin consultar', async (sort, filters) => {
-    const repository = { listActive: jest.fn() }
+    const repository = { listActive: jest.fn(), listActiveProductIds: jest.fn() }
 
     await expect(
-      new ListActiveAuctions(repository, clock).execute({ page: 1, pageSize: 16, filters, sort }),
+      new ListActiveAuctions(repository, clock, new FakeCatalogProductLookup()).execute({
+        page: 1,
+        pageSize: 16,
+        filters,
+        sort,
+      }),
     ).rejects.toBeInstanceOf(PriceSortRequiresCreditsError)
     expect(repository.listActive).not.toHaveBeenCalled()
   })
 
   it('pasa filtros, orden y el instante del reloj al repositorio', async () => {
-    const repository = { listActive: jest.fn().mockResolvedValue({ items: [], total: 0 }) }
+    const repository = {
+      listActive: jest.fn().mockResolvedValue({ items: [], total: 0 }),
+      listActiveProductIds: jest.fn(),
+    }
     const filters = { priceKind: 'CREDITS' as const, hasBuyNow: false }
 
-    await new ListActiveAuctions(repository, clock).execute({
+    await new ListActiveAuctions(repository, clock, new FakeCatalogProductLookup()).execute({
       page: 2,
       pageSize: 8,
       filters,
@@ -352,5 +364,71 @@ describe('ListActiveAuctions: filtros y orden', () => {
       sort: 'priceAsc',
       now,
     })
+  })
+})
+
+describe('ListActiveAuctions: busqueda global por Catalog', () => {
+  it('sin search conserva el listado y no consulta Catalog', async () => {
+    const repository = new InMemoryAuctionRepository()
+    const catalog = new FakeCatalogProductLookup()
+    await publish(repository, 'one', at(1))
+
+    await expect(
+      newList(repository, catalog).execute({ page: 1, pageSize: 16 }),
+    ).resolves.toMatchObject({
+      total: 1,
+      items: [{ id: 'one' }],
+    })
+    expect(catalog.calls).toEqual([])
+  })
+
+  it('resuelve el universo filtrado en Catalog y pagina solo los ids coincidentes', async () => {
+    const repository = await seedMarketplace()
+    const catalog = new FakeCatalogProductLookup()
+    catalog.matching = new Set(['product-p-a'])
+
+    await expect(
+      newList(repository, catalog).execute({
+        page: 1,
+        pageSize: 16,
+        search: ' espada ',
+        filters: { publisherType: 'PLAYER', priceKind: 'CREDITS', hasBuyNow: true },
+        sort: 'priceDesc',
+      }),
+    ).resolves.toMatchObject({ total: 1, items: [{ id: 'p-a' }] })
+    expect(catalog.calls).toEqual([
+      {
+        references: ['product-p-c', 'product-p-a'],
+        query: ' espada ',
+      },
+    ])
+  })
+
+  it('devuelve cero sin listado final cuando Catalog no encuentra coincidencias', async () => {
+    const repository = {
+      listActiveProductIds: jest.fn().mockResolvedValue(['product-1']),
+      listActive: jest.fn(),
+    }
+    const catalog = new FakeCatalogProductLookup()
+
+    await expect(
+      new ListActiveAuctions(repository, clock, catalog).execute({
+        page: 1,
+        pageSize: 16,
+        search: 'ninguno',
+      }),
+    ).resolves.toEqual({ items: [], total: 0 })
+    expect(repository.listActive).not.toHaveBeenCalled()
+  })
+
+  it('propaga la indisponibilidad de Catalog', async () => {
+    const repository = new InMemoryAuctionRepository()
+    const catalog = new FakeCatalogProductLookup()
+    catalog.error = new ExternalDependencyUnavailableError('catalog')
+    await publish(repository, 'one', at(1))
+
+    await expect(
+      newList(repository, catalog).execute({ page: 1, pageSize: 16, search: 'espada' }),
+    ).rejects.toBeInstanceOf(ExternalDependencyUnavailableError)
   })
 })

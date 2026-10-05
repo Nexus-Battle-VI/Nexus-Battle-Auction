@@ -1,8 +1,22 @@
+import {
+  AUCTION_CONFIRMATION_OUTBOX_REPOSITORY,
+  type AuctionConfirmationOutboxRepositoryPort,
+} from '../../application/ports/AuctionConfirmationOutboxRepositoryPort'
+import {
+  AUCTION_CONFIRMATION_EVENT_PUBLISHER,
+  type AuctionConfirmationEventPublisherPort,
+} from '../../application/ports/AuctionConfirmationEventPublisherPort'
+import { AuctionConfirmationOutboxDispatcher } from '../../application/use-cases/AuctionConfirmationOutboxDispatcher'
+import { PostgresAuctionConfirmationOutboxRepository } from '../../adapters/outbound/persistence/PostgresAuctionConfirmationOutboxRepository'
+import { HttpAuctionConfirmationEventPublisher } from '../../adapters/outbound/http/HttpAuctionConfirmationEventPublisher'
+import { AuctionConfirmationDispatchScheduler } from '../scheduling/AuctionConfirmationDispatchScheduler'
+
 import { Module, type CanActivate } from '@nestjs/common'
 import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
 
 import { AuctionController } from '../../adapters/inbound/http/auction.controller'
+import { AuctionMetricsController } from '../../adapters/inbound/http/auction-metrics.controller'
 import { OfficialAuctionController } from '../../adapters/inbound/http/official-auction.controller'
 import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymous.guard'
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
@@ -11,6 +25,7 @@ import { RolesGuard } from '../../adapters/inbound/http/auth/roles.guard'
 import { HealthController } from '../../adapters/inbound/http/health.controller'
 import { READINESS_CHECKS, VERSION_REPORT } from '../../adapters/inbound/http/tokens.health'
 import { WatchlistController } from '../../adapters/inbound/http/watchlist.controller'
+import { CatalogProductLookupClient } from '../../adapters/outbound/http/CatalogProductLookupClient'
 import { CatalogProductPolicyClient } from '../../adapters/outbound/http/CatalogProductPolicyClient'
 import { HttpAuctionInventoryClient } from '../../adapters/outbound/http/HttpAuctionInventoryClient'
 import { HttpBidCreditsClient } from '../../adapters/outbound/http/HttpBidCreditsClient'
@@ -19,6 +34,7 @@ import { HttpOutbidNotificationClient } from '../../adapters/outbound/http/HttpO
 import { HttpWatchlistEventPublisher } from '../../adapters/outbound/http/HttpWatchlistEventPublisher'
 import { HttpAuctionWalletClient } from '../../adapters/outbound/http/HttpAuctionWalletClient'
 import { HttpPublicationFeeClient } from '../../adapters/outbound/http/HttpPublicationFeeClient'
+import { HttpSellerPublicProfileClient } from '../../adapters/outbound/http/HttpSellerPublicProfileClient'
 import { HttpSellerSanctionClient } from '../../adapters/outbound/http/HttpSellerSanctionClient'
 import { UnavailableAuctionWalletClient } from '../../adapters/outbound/http/UnavailableAuctionWalletClient'
 import { WalletHttpClient } from '../../adapters/outbound/http/WalletHttpClient'
@@ -30,6 +46,7 @@ import {
   UnavailableOfficialAuctionEligibility,
   UnavailableProductInventory,
   UnavailablePublicationFee,
+  UnavailableSellerPublicProfile,
   UnavailableSellerSanctions,
   UnavailableWallet,
 } from '../../adapters/outbound/http/UnavailableAuctionDependencies'
@@ -45,6 +62,7 @@ import {
   type WatchlistRepositoryPort,
 } from '../../application/ports/WatchlistRepositoryPort'
 import { InMemoryAuctionRepository } from '../../adapters/outbound/persistence/InMemoryAuctionRepository'
+import { InMemoryAuctionCancellationRepository } from '../../adapters/outbound/persistence/InMemoryAuctionCancellationRepository'
 import { InMemoryAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPublicationIntentRepository'
 import { InMemoryAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/InMemoryAuctionInventorySettlementIntentRepository'
 import { InMemoryAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/InMemoryAuctionPendingClaimRepository'
@@ -54,6 +72,10 @@ import { InMemoryAuctionSettlementWorkRepository } from '../../adapters/outbound
 import { InMemoryBidCreditOperationReader } from '../../adapters/outbound/persistence/InMemoryBidCreditOperationReader'
 import { InMemoryEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/InMemoryEarlyClosureNotificationRepository'
 import { PostgresAuctionRepository } from '../../adapters/outbound/persistence/PostgresAuctionRepository'
+import { PostgresAuctionActivityRepository } from '../../adapters/outbound/persistence/PostgresAuctionActivityRepository'
+import { PostgresAuctionMetricsRepository } from '../../adapters/outbound/persistence/PostgresAuctionMetricsRepository'
+import { InMemoryAuctionMetricsRepository } from '../../adapters/outbound/persistence/InMemoryAuctionMetricsRepository'
+import { PostgresAuctionCancellationRepository } from '../../adapters/outbound/persistence/PostgresAuctionCancellationRepository'
 import { PostgresAuctionPublicationIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionPublicationIntentRepository'
 import { PostgresAuctionInventorySettlementIntentRepository } from '../../adapters/outbound/persistence/PostgresAuctionInventorySettlementIntentRepository'
 import { PostgresAuctionPendingClaimRepository } from '../../adapters/outbound/persistence/PostgresAuctionPendingClaimRepository'
@@ -69,11 +91,23 @@ import {
   AUCTION_REPOSITORY,
   type AuctionRepositoryPort,
 } from '../../application/ports/AuctionRepositoryPort'
+import {
+  AUCTION_ACTIVITY_REPOSITORY,
+  type AuctionActivityRepositoryPort,
+} from '../../application/ports/AuctionActivityRepositoryPort'
+import {
+  AUCTION_METRICS_REPOSITORY,
+  type AuctionMetricsRepositoryPort,
+} from '../../application/ports/AuctionMetricsRepositoryPort'
 import { BID_CREDITS, type BidCreditsPort } from '../../application/ports/BidCreditsPort'
 import {
   BID_CREDIT_OPERATION_READER,
   type BidCreditOperationReaderPort,
 } from '../../application/ports/BidCreditOperationReaderPort'
+import {
+  CATALOG_PRODUCT_LOOKUP,
+  type CatalogProductLookupPort,
+} from '../../application/ports/CatalogProductLookupPort'
 import {
   CATALOG_PRODUCT_POLICY,
   type CatalogProductPolicyPort,
@@ -110,6 +144,10 @@ import {
   type AuctionSettlementRepositoryPort,
 } from '../../application/ports/AuctionSettlementRepositoryPort'
 import {
+  AUCTION_CANCELLATION_REPOSITORY,
+  type AuctionCancellationRepositoryPort,
+} from '../../application/ports/AuctionCancellationRepositoryPort'
+import {
   AUCTION_SETTLEMENT_OUTBOX_REPOSITORY,
   type AuctionSettlementOutboxRepositoryPort,
 } from '../../application/ports/AuctionSettlementOutboxRepositoryPort'
@@ -135,7 +173,12 @@ import {
   type PublicationFeePort,
 } from '../../application/ports/PublicationFeePort'
 import {
+  SELLER_PUBLIC_PROFILE,
+  type SellerPublicProfilePort,
+} from '../../application/ports/SellerPublicProfilePort'
+import {
   SELLER_SANCTIONS,
+  type SellerActiveSanctionsPort,
   type SellerSanctionPort,
 } from '../../application/ports/SellerSanctionPort'
 import { TOKEN_VERIFIER, type TokenVerifierPort } from '../../application/ports/TokenVerifierPort'
@@ -144,14 +187,21 @@ import {
   type WatchlistEventPublisherPort,
 } from '../../application/ports/WatchlistEventPublisherPort'
 import { DispatchClosingSoonReminders } from '../../application/use-cases/DispatchClosingSoonReminders'
+import { GetAuctionBidHistory } from '../../application/use-cases/GetAuctionBidHistory'
 import { GetAuctionDetail } from '../../application/use-cases/GetAuctionDetail'
 import { FollowAuction } from '../../application/use-cases/FollowAuction'
 import { ListFollowedAuctions } from '../../application/use-cases/ListFollowedAuctions'
+import { GetAuctionSuggestions } from '../../application/use-cases/GetAuctionSuggestions'
 import { ListActiveAuctions } from '../../application/use-cases/ListActiveAuctions'
 import { NotifyWatchlistChange } from '../../application/use-cases/NotifyWatchlistChange'
 import { ClaimPendingProduct } from '../../application/use-cases/ClaimPendingProduct'
 import { ClaimPendingProductsBatch } from '../../application/use-cases/ClaimPendingProductsBatch'
 import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
+import { GetAuctionClosingTimeAndTrends } from '../../application/use-cases/GetAuctionClosingTimeAndTrends'
+import { GetAuctionVolumeAndSuccess } from '../../application/use-cases/GetAuctionVolumeAndSuccess'
+import { GetMyAuctionActivity } from '../../application/use-cases/GetMyAuctionActivity'
+import { GetMyAuctionTransactions } from '../../application/use-cases/GetMyAuctionTransactions'
+import { GetMyAuctionViewStatistics } from '../../application/use-cases/GetMyAuctionViewStatistics'
 import { WALLET, type WalletPort } from '../../application/ports/WalletPort'
 import { BuyNowDomainService } from '../../domain/services/BuyNowDomainService'
 import { ExecuteBuyNowUseCase } from '../../application/use-cases/ExecuteBuyNowUseCase'
@@ -168,6 +218,11 @@ import { ReactToRivalBid } from '../../application/use-cases/ReactToRivalBid'
 import { RegisterBid } from '../../application/use-cases/RegisterBid'
 import { UnfollowAuction } from '../../application/use-cases/UnfollowAuction'
 import { SettleAuction } from '../../application/use-cases/SettleAuction'
+import { CancelAuction } from '../../application/use-cases/CancelAuction'
+import { AuctionCancellationReconciler } from '../../application/use-cases/AuctionCancellationReconciler'
+import { AuctionCancellationEffectsResolver } from '../../application/use-cases/AuctionCancellationEffectsResolver'
+import { CancelAuctionAutomatically } from '../../application/use-cases/CancelAuctionAutomatically'
+import { CancelAuctionsForTermsViolations } from '../../application/use-cases/CancelAuctionsForTermsViolations'
 import { AuctionSettlementOutboxDispatcher } from '../../application/use-cases/AuctionSettlementOutboxDispatcher'
 import { EarlyClosureNotificationService } from '../../application/services/EarlyClosureNotificationService'
 import { BuyNowPendingClaimRegistrationService } from '../../application/services/BuyNowPendingClaimRegistrationService'
@@ -183,6 +238,8 @@ import { AuctionPendingClaimExpirationScheduler } from '../scheduling/AuctionPen
 import { EarlyClosureRetryScheduler } from '../scheduling/EarlyClosureRetryScheduler'
 import { BuyNowPendingClaimRetryScheduler } from '../scheduling/BuyNowPendingClaimRetryScheduler'
 import { AuctionSettlementScheduler } from '../scheduling/AuctionSettlementScheduler'
+import { AuctionCancellationReconcilerScheduler } from '../scheduling/AuctionCancellationReconcilerScheduler'
+import { AuctionTermsViolationCancellationScheduler } from '../scheduling/AuctionTermsViolationCancellationScheduler'
 import {
   NodeSchedulerTimer,
   SCHEDULER_TIMER,
@@ -261,10 +318,87 @@ export const createWatchlistEventPublisher = (
     HealthController,
     WatchlistController,
     AuctionController,
+    AuctionMetricsController,
     OfficialAuctionController,
   ],
 
   providers: [
+    {
+      provide: AUCTION_CONFIRMATION_OUTBOX_REPOSITORY,
+      useFactory: (
+        db: Kysely<Database> | null,
+        auctions: AuctionRepositoryPort,
+      ): AuctionConfirmationOutboxRepositoryPort => {
+        if (db !== null) return new PostgresAuctionConfirmationOutboxRepository(db)
+        if (!(auctions instanceof InMemoryAuctionRepository)) {
+          throw new Error('El outbox en memoria requiere la misma instancia de Auction.')
+        }
+        return auctions
+      },
+      inject: [DATABASE, AUCTION_REPOSITORY],
+    },
+    {
+      provide: AUCTION_CONFIRMATION_EVENT_PUBLISHER,
+      useFactory: (config: AppConfig, clock: ClockPort): AuctionConfirmationEventPublisherPort => {
+        if (!config.auctionConfirmationDispatchEnabled) {
+          return {
+            publish: (): Promise<void> =>
+              Promise.reject(new Error('El despacho de confirmaciones está desactivado.')),
+          }
+        }
+        if (config.notificationsBaseUrl === null || config.internalServiceAuthSecret === null) {
+          throw new Error('Notifications requiere URL y secreto para entregar confirmaciones.')
+        }
+        return new HttpAuctionConfirmationEventPublisher({
+          baseUrl: config.notificationsBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.notificationsTimeoutMs,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, CLOCK],
+    },
+    {
+      provide: AuctionConfirmationOutboxDispatcher,
+      useFactory: (
+        outbox: AuctionConfirmationOutboxRepositoryPort,
+        publisher: AuctionConfirmationEventPublisherPort,
+        clock: ClockPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionConfirmationOutboxDispatcher =>
+        new AuctionConfirmationOutboxDispatcher(
+          outbox,
+          publisher,
+          clock,
+          logger,
+          config.auctionConfirmationDispatchBatchSize,
+          config.auctionConfirmationDispatchEnabled,
+        ),
+      inject: [
+        AUCTION_CONFIRMATION_OUTBOX_REPOSITORY,
+        AUCTION_CONFIRMATION_EVENT_PUBLISHER,
+        CLOCK,
+        LOGGER,
+        APP_CONFIG,
+      ],
+    },
+    {
+      provide: AuctionConfirmationDispatchScheduler,
+      useFactory: (
+        worker: AuctionConfirmationOutboxDispatcher,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionConfirmationDispatchScheduler =>
+        new AuctionConfirmationDispatchScheduler(worker, timer, logger, {
+          enabled: config.auctionConfirmationDispatchEnabled,
+          pollIntervalMs: config.auctionConfirmationDispatchPollIntervalMs,
+        }),
+      inject: [AuctionConfirmationOutboxDispatcher, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+
     {
       provide: APP_CONFIG,
 
@@ -345,12 +479,44 @@ export const createWatchlistEventPublisher = (
     },
 
     {
-      provide: AUCTION_REPOSITORY,
+      provide: AUCTION_CANCELLATION_REPOSITORY,
 
-      useFactory: (db: Kysely<Database> | null): AuctionRepositoryPort =>
-        db === null ? new InMemoryAuctionRepository() : new PostgresAuctionRepository(db),
+      useFactory: (db: Kysely<Database> | null): AuctionCancellationRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionCancellationRepository()
+          : new PostgresAuctionCancellationRepository(db),
 
       inject: [DATABASE],
+    },
+
+    {
+      provide: AUCTION_REPOSITORY,
+
+      // HU-90: en memoria, `cancelAuction()` necesita el MISMO
+      // `InMemoryAuctionCancellationRepository` que ya resolvio
+      // AUCTION_CANCELLATION_REPOSITORY -no un almacen duplicado-. El cast es
+      // seguro: ambas factories ramifican sobre el mismo DATABASE inyectado.
+      useFactory: (
+        db: Kysely<Database> | null,
+        cancellations: AuctionCancellationRepositoryPort,
+      ): AuctionRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionRepository(cancellations as InMemoryAuctionCancellationRepository)
+          : new PostgresAuctionRepository(db),
+
+      inject: [DATABASE, AUCTION_CANCELLATION_REPOSITORY],
+    },
+
+    {
+      provide: AUCTION_ACTIVITY_REPOSITORY,
+      useFactory: (
+        db: Kysely<Database> | null,
+        auctions: AuctionRepositoryPort,
+      ): AuctionActivityRepositoryPort =>
+        db === null
+          ? (auctions as InMemoryAuctionRepository)
+          : new PostgresAuctionActivityRepository(db),
+      inject: [DATABASE, AUCTION_REPOSITORY],
     },
 
     {
@@ -510,9 +676,34 @@ export const createWatchlistEventPublisher = (
 
     {
       provide: ListActiveAuctions,
-      useFactory: (auctions: AuctionRepositoryPort, clock: ClockPort): ListActiveAuctions =>
-        new ListActiveAuctions(auctions, clock),
-      inject: [AUCTION_REPOSITORY, CLOCK],
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        clock: ClockPort,
+        catalog: CatalogProductLookupPort,
+      ): ListActiveAuctions => new ListActiveAuctions(auctions, clock, catalog),
+      inject: [AUCTION_REPOSITORY, CLOCK, CATALOG_PRODUCT_LOOKUP],
+    },
+
+    {
+      provide: GetAuctionSuggestions,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        clock: ClockPort,
+        catalog: CatalogProductLookupPort,
+      ): GetAuctionSuggestions => new GetAuctionSuggestions(auctions, clock, catalog),
+      inject: [AUCTION_REPOSITORY, CLOCK, CATALOG_PRODUCT_LOOKUP],
+    },
+
+    {
+      // Lookup publico de Catalog: no requiere secreto interno.
+      provide: CATALOG_PRODUCT_LOOKUP,
+      useFactory: (config: AppConfig, logger: Logger): CatalogProductLookupPort =>
+        new CatalogProductLookupClient({
+          baseUrl: config.catalogBaseUrl,
+          timeoutMs: 3_000,
+          logger,
+        }),
+      inject: [APP_CONFIG, LOGGER],
     },
 
     {
@@ -662,6 +853,130 @@ export const createWatchlistEventPublisher = (
     },
 
     {
+      provide: CancelAuction,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        cancellations: AuctionCancellationRepositoryPort,
+        fees: PublicationFeePort,
+        inventory: ProductInventoryPort,
+        clock: ClockPort,
+      ): CancelAuction => new CancelAuction(auctions, cancellations, fees, inventory, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        AUCTION_CANCELLATION_REPOSITORY,
+        PUBLICATION_FEE,
+        PRODUCT_INVENTORY,
+        CLOCK,
+      ],
+    },
+
+    {
+      // HU-90, CA-05: caso de uso interno, sin endpoint. Solo lo invocan el
+      // sondeo de sanciones y el reconciler de cancelaciones.
+      provide: CancelAuctionAutomatically,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        cancellations: AuctionCancellationRepositoryPort,
+        wallet: AuctionWalletPort,
+        inventory: ProductInventoryPort,
+        clock: ClockPort,
+      ): CancelAuctionAutomatically =>
+        new CancelAuctionAutomatically(auctions, cancellations, wallet, inventory, clock),
+      inject: [
+        AUCTION_REPOSITORY,
+        AUCTION_CANCELLATION_REPOSITORY,
+        AUCTION_WALLET,
+        PRODUCT_INVENTORY,
+        CLOCK,
+      ],
+    },
+
+    {
+      provide: CancelAuctionsForTermsViolations,
+      useFactory: (
+        auctions: AuctionRepositoryPort,
+        // El cliente de SELLER_SANCTIONS implementa ambos puertos de sanciones.
+        sanctions: SellerActiveSanctionsPort,
+        cancelAutomatically: CancelAuctionAutomatically,
+        logger: Logger,
+        config: AppConfig,
+      ): CancelAuctionsForTermsViolations =>
+        new CancelAuctionsForTermsViolations(auctions, sanctions, cancelAutomatically, logger, {
+          batchSize: config.auctionTermsViolationBatchSize,
+        }),
+      inject: [
+        AUCTION_REPOSITORY,
+        SELLER_SANCTIONS,
+        CancelAuctionAutomatically,
+        LOGGER,
+        APP_CONFIG,
+      ],
+    },
+
+    {
+      provide: AuctionTermsViolationCancellationScheduler,
+      useFactory: (
+        worker: CancelAuctionsForTermsViolations,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionTermsViolationCancellationScheduler =>
+        new AuctionTermsViolationCancellationScheduler(worker, timer, logger, {
+          enabled: config.auctionTermsViolationSchedulerEnabled,
+          pollIntervalMs: config.auctionTermsViolationPollIntervalMs,
+        }),
+      inject: [CancelAuctionsForTermsViolations, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+
+    {
+      provide: AuctionCancellationReconciler,
+      useFactory: (
+        cancellations: AuctionCancellationRepositoryPort,
+        cancelAuction: CancelAuction,
+        cancelAuctionAutomatically: CancelAuctionAutomatically,
+        clock: ClockPort,
+        logger: Logger,
+        identifiers: IdentifierGeneratorPort,
+        config: AppConfig,
+      ): AuctionCancellationReconciler =>
+        new AuctionCancellationReconciler(
+          cancellations,
+          new AuctionCancellationEffectsResolver(cancelAuction, cancelAuctionAutomatically),
+          clock,
+          logger,
+          {
+            batchSize: config.auctionCancellationReconcilerBatchSize,
+            leaseMs: config.auctionCancellationReconcilerLeaseMs,
+            workerId: `auction-cancellation-reconciler-${identifiers.generate()}`,
+          },
+        ),
+      inject: [
+        AUCTION_CANCELLATION_REPOSITORY,
+        CancelAuction,
+        CancelAuctionAutomatically,
+        CLOCK,
+        LOGGER,
+        IDENTIFIER_GENERATOR,
+        APP_CONFIG,
+      ],
+    },
+
+    {
+      provide: AuctionCancellationReconcilerScheduler,
+      useFactory: (
+        worker: AuctionCancellationReconciler,
+        timer: SchedulerTimerPort,
+        logger: Logger,
+        config: AppConfig,
+      ): AuctionCancellationReconcilerScheduler =>
+        new AuctionCancellationReconcilerScheduler(worker, timer, logger, {
+          enabled: config.auctionCancellationReconcilerSchedulerEnabled,
+          pollIntervalMs: config.auctionCancellationReconcilerPollIntervalMs,
+        }),
+      inject: [AuctionCancellationReconciler, SCHEDULER_TIMER, LOGGER, APP_CONFIG],
+    },
+
+    {
       provide: SettleAuction,
       useFactory: (
         auctions: AuctionRepositoryPort,
@@ -779,11 +1094,38 @@ export const createWatchlistEventPublisher = (
     {
       provide: SELLER_SANCTIONS,
 
-      useFactory: (config: AppConfig, logger: Logger, clock: ClockPort): SellerSanctionPort => {
+      useFactory: (
+        config: AppConfig,
+        logger: Logger,
+        clock: ClockPort,
+      ): SellerSanctionPort & SellerActiveSanctionsPort => {
         if (config.accountBaseUrl === null || config.internalServiceAuthSecret === null) {
           return new UnavailableSellerSanctions()
         }
         return new HttpSellerSanctionClient({
+          baseUrl: config.accountBaseUrl,
+          secret: config.internalServiceAuthSecret,
+          serviceName: 'auction',
+          timeoutMs: config.accountRequestTimeoutMs,
+          logger,
+          now: () => clock.now(),
+        })
+      },
+      inject: [APP_CONFIG, LOGGER, CLOCK],
+    },
+
+    {
+      provide: SELLER_PUBLIC_PROFILE,
+
+      useFactory: (
+        config: AppConfig,
+        logger: Logger,
+        clock: ClockPort,
+      ): SellerPublicProfilePort => {
+        if (config.accountBaseUrl === null || config.internalServiceAuthSecret === null) {
+          return new UnavailableSellerPublicProfile()
+        }
+        return new HttpSellerPublicProfileClient({
           baseUrl: config.accountBaseUrl,
           secret: config.internalServiceAuthSecret,
           serviceName: 'auction',
@@ -894,8 +1236,20 @@ export const createWatchlistEventPublisher = (
     {
       provide: GetAuctionDetail,
 
-      useFactory: (repository: AuctionRepositoryPort): GetAuctionDetail =>
-        new GetAuctionDetail(repository),
+      useFactory: (
+        repository: AuctionRepositoryPort,
+        sellerProfile: SellerPublicProfilePort,
+        logger: Logger,
+      ): GetAuctionDetail => new GetAuctionDetail(repository, sellerProfile, logger),
+
+      inject: [AUCTION_REPOSITORY, SELLER_PUBLIC_PROFILE, LOGGER],
+    },
+
+    {
+      provide: GetAuctionBidHistory,
+
+      useFactory: (repository: AuctionRepositoryPort): GetAuctionBidHistory =>
+        new GetAuctionBidHistory(repository),
 
       inject: [AUCTION_REPOSITORY],
     },
@@ -908,6 +1262,51 @@ export const createWatchlistEventPublisher = (
 
       inject: [AUCTION_PENDING_CLAIM_REPOSITORY],
     },
+
+    {
+      provide: GetMyAuctionActivity,
+      useFactory: (
+        repository: AuctionActivityRepositoryPort,
+        clock: ClockPort,
+      ): GetMyAuctionActivity => new GetMyAuctionActivity(repository, clock),
+      inject: [AUCTION_ACTIVITY_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: AUCTION_METRICS_REPOSITORY,
+      useFactory: (db: Kysely<Database> | null): AuctionMetricsRepositoryPort =>
+        db === null
+          ? new InMemoryAuctionMetricsRepository()
+          : new PostgresAuctionMetricsRepository(db),
+      inject: [DATABASE],
+    },
+
+    {
+      provide: GetAuctionVolumeAndSuccess,
+      useFactory: (
+        repository: AuctionMetricsRepositoryPort,
+        clock: ClockPort,
+      ): GetAuctionVolumeAndSuccess => new GetAuctionVolumeAndSuccess(repository, clock),
+      inject: [AUCTION_METRICS_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: GetAuctionClosingTimeAndTrends,
+      useFactory: (
+        repository: AuctionMetricsRepositoryPort,
+        clock: ClockPort,
+      ): GetAuctionClosingTimeAndTrends => new GetAuctionClosingTimeAndTrends(repository, clock),
+      inject: [AUCTION_METRICS_REPOSITORY, CLOCK],
+    },
+
+    {
+      provide: GetMyAuctionTransactions,
+      useFactory: (repository: AuctionActivityRepositoryPort): GetMyAuctionTransactions =>
+        new GetMyAuctionTransactions(repository),
+      inject: [AUCTION_ACTIVITY_REPOSITORY],
+    },
+
+    GetMyAuctionViewStatistics,
 
     {
       provide: ClaimPendingProduct,
