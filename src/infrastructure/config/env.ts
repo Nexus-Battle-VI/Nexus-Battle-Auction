@@ -143,6 +143,15 @@ export interface AppConfig {
   readonly auctionCancellationReconcilerPollIntervalMs: number
   readonly auctionCancellationReconcilerBatchSize: number
   readonly auctionCancellationReconcilerLeaseMs: number
+
+  /**
+   * HU-90, CA-05. Sondeo de sanciones AUCTION_TERMS_VIOLATION contra Account
+   * para cancelar automaticamente las subastas del vendedor sancionado.
+   * Deshabilitado por defecto.
+   */
+  readonly auctionTermsViolationSchedulerEnabled: boolean
+  readonly auctionTermsViolationPollIntervalMs: number
+  readonly auctionTermsViolationBatchSize: number
 }
 
 type RawEnv = Readonly<Record<string, string | undefined>>
@@ -597,6 +606,45 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     }
   }
 
+  const auctionTermsViolationSchedulerEnabled = readBoolean(
+    env,
+    'AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED',
+    false,
+  )
+  const auctionTermsViolationPollIntervalMs = readInteger(
+    env,
+    'AUCTION_TERMS_VIOLATION_POLL_INTERVAL_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  )
+  const auctionTermsViolationBatchSize = readInteger(
+    env,
+    'AUCTION_TERMS_VIOLATION_BATCH_SIZE',
+    50,
+    1,
+    500,
+  )
+  if (auctionTermsViolationSchedulerEnabled) {
+    if (persistenceDriver !== PersistenceDriver.Postgres) {
+      throw new ConfigurationError(
+        'PERSISTENCE_DRIVER debe ser "postgres" cuando AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED=true.',
+      )
+    }
+    // Account decide si hay sancion; Wallet e Inventory reciben los releases
+    // de reservas y de inventario que la cancelacion dispara en el momento.
+    if (
+      accountBaseUrl === '' ||
+      walletBaseUrl === '' ||
+      inventoryBaseUrl === '' ||
+      internalServiceAuthSecret === ''
+    ) {
+      throw new ConfigurationError(
+        'ACCOUNT_BASE_URL, WALLET_BASE_URL, INVENTORY_BASE_URL e INTERNAL_SERVICE_AUTH_SECRET son obligatorios cuando AUCTION_TERMS_VIOLATION_SCHEDULER_ENABLED=true.',
+      )
+    }
+  }
+
   return {
     nodeEnv,
 
@@ -689,5 +737,9 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     auctionCancellationReconcilerPollIntervalMs,
     auctionCancellationReconcilerBatchSize,
     auctionCancellationReconcilerLeaseMs,
+
+    auctionTermsViolationSchedulerEnabled,
+    auctionTermsViolationPollIntervalMs,
+    auctionTermsViolationBatchSize,
   }
 }

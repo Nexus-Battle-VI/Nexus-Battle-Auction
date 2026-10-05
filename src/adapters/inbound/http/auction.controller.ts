@@ -853,9 +853,9 @@ export class AuctionController {
   }
 
   /**
-   * HU-90, `7.7.10`. Cancelacion manual del vendedor propietario. Solo
-   * cubre la cancelacion ya implementada (ACTIVE, sin pujas, mas de 6h
-   * para el cierre); CA-05 (cancelacion automatica) queda fuera de este PR.
+   * HU-90, `7.7.10`. Cancelacion manual del vendedor propietario (ACTIVE,
+   * sin pujas, mas de 6h para el cierre). La cancelacion automatica por
+   * sancion (CA-05) no tiene endpoint: la ejecuta el sondeo interno.
    */
   @Post(':auctionId/cancel')
   @HttpCode(HttpStatus.OK)

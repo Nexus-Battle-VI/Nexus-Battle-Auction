@@ -34,7 +34,11 @@ import type {
   SellerPublicProfile,
   SellerPublicProfilePort,
 } from '../../../application/ports/SellerPublicProfilePort'
-import type { SellerSanctionPort } from '../../../application/ports/SellerSanctionPort'
+import type {
+  ActiveSanctionStatus,
+  SellerActiveSanctionsPort,
+  SellerSanctionPort,
+} from '../../../application/ports/SellerSanctionPort'
 import type {
   BuyNowCreditTransfer,
   BuyNowCreditTransferCommand,
@@ -106,9 +110,14 @@ export class UnavailablePublicationFee implements PublicationFeePort {
   }
 }
 
-export class UnavailableSellerSanctions implements SellerSanctionPort {
+export class UnavailableSellerSanctions implements SellerSanctionPort, SellerActiveSanctionsPort {
   hasActiveSanctions(sellerId: string): Promise<boolean> {
     void sellerId
+    return Promise.reject(new ExternalDependencyUnavailableError('account'))
+  }
+
+  getActiveSanctions(subject: string): Promise<ActiveSanctionStatus> {
+    void subject
     return Promise.reject(new ExternalDependencyUnavailableError('account'))
   }
 }

@@ -59,7 +59,8 @@ const reasonOf = (error: unknown): string =>
  * `RETRYABLE`/`PENDING` tras un fallo o un crash (ver `resolvePendingEffects`
  * abajo); el camino sincrono de este caso de uso sigue siendo el que resuelve
  * con baja latencia en el happy path, el reconciler es solo respaldo durable.
- * CA-05 (cancelacion automatica) sigue fuera de este PR.
+ * La cancelacion automatica (CA-05) es otro caso de uso, con otras reglas:
+ * `CancelAuctionAutomatically`.
  */
 export class CancelAuction {
   constructor(
@@ -157,7 +158,11 @@ export class CancelAuction {
   private async resolveWalletRefund(cancellation: AuctionCancellationSnapshot): Promise<void> {
     if (
       cancellation.walletRefundStatus === AuctionCancellationEffectStatus.Confirmed ||
-      cancellation.walletRefundStatus === AuctionCancellationEffectStatus.TerminalError
+      cancellation.walletRefundStatus === AuctionCancellationEffectStatus.TerminalError ||
+      // Solo una cancelacion automatica (CA-05) queda sin refund, y sus
+      // efectos los resuelve `CancelAuctionAutomatically`, no este caso de uso.
+      cancellation.walletRefundStatus === AuctionCancellationEffectStatus.NotRequired ||
+      cancellation.walletRefundOperationId === null
     )
       return
     if (cancellation.feeChargeId === null) {

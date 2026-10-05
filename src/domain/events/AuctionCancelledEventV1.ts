@@ -4,15 +4,31 @@ export const AUCTION_CANCELLED_EVENT_PRODUCER = 'auction' as const
 export const AUCTION_CANCELLED_EVENT_MAX_BYTES = 65_536
 
 /**
- * HU-90. Solo cancelacion MANUAL en este incremento: no hay `reason`/`cause`
- * en el payload porque todavia no existe una causa automatica aprobada
- * (CA-05, fuera de alcance). Anadir ese campo cuando exista es aditivo.
+ * HU-90. Por que se cancelo una subasta. `MANUAL`: el vendedor propietario.
+ * `TERMS_VIOLATION`: cancelacion automatica por una sancion activa con
+ * reasonCode AUCTION_TERMS_VIOLATION (CA-05).
+ */
+export const AuctionCancellationOrigin = {
+  Manual: 'MANUAL',
+  TermsViolation: 'TERMS_VIOLATION',
+} as const
+
+export type AuctionCancellationOrigin =
+  (typeof AuctionCancellationOrigin)[keyof typeof AuctionCancellationOrigin]
+
+/**
+ * HU-90. `origin`/`triggerReferenceId` se anadieron con CA-05 de forma
+ * aditiva: un consumidor que solo lea los cuatro campos originales sigue
+ * funcionando. `triggerReferenceId` es el id de la sancion que disparo una
+ * cancelacion automatica; `null` en una manual.
  */
 export interface AuctionCancelledEventDataV1 {
   readonly auctionId: string
   readonly sellerId: string
   readonly productId: string
   readonly cancelledAt: string
+  readonly origin: AuctionCancellationOrigin
+  readonly triggerReferenceId: string | null
 }
 
 export interface AuctionCancelledEventV1 {
@@ -55,6 +71,8 @@ export const createAuctionCancelledEventV1 = (input: {
   readonly sellerId: string
   readonly productId: string
   readonly cancelledAt: Date
+  readonly origin: AuctionCancellationOrigin
+  readonly triggerReferenceId: string | null
 }): AuctionCancelledEventV1 => {
   const cancelledAt = input.cancelledAt.toISOString()
   const event: AuctionCancelledEventV1 = {
@@ -70,6 +88,8 @@ export const createAuctionCancelledEventV1 = (input: {
       sellerId: input.sellerId,
       productId: input.productId,
       cancelledAt,
+      origin: input.origin,
+      triggerReferenceId: input.triggerReferenceId,
     },
   }
   serializeAuctionCancelledEventV1(event)

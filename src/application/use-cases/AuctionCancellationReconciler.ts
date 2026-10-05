@@ -1,5 +1,8 @@
 import type { AuctionCancellationRepositoryPort } from '../ports/AuctionCancellationRepositoryPort'
-import { AuctionCancellationEffectStatus } from '../ports/AuctionCancellationRepositoryPort'
+import {
+  AuctionCancellationEffectStatus,
+  applicableCancellationEffectStatuses,
+} from '../ports/AuctionCancellationRepositoryPort'
 import type { ClockPort } from '../ports/ClockPort'
 import type { CancelAuction } from './CancelAuction'
 
@@ -39,6 +42,11 @@ const isSettled = (status: AuctionCancellationEffectStatus): boolean =>
  * operationIds: un reintento del reconciler usa exactamente
  * `walletRefundOperationId`/`inventoryReleaseOperationId`, nunca un UUID
  * nuevo (ver reporte final seccion O/P).
+ *
+ * CA-05: tambien reconcilia las cancelaciones automaticas (release de
+ * inventario y de cada reserva de puja). Quien resuelve cada una lo decide
+ * `AuctionCancellationEffectsResolver` segun su origen; este worker solo
+ * reclama, delega y clasifica el resultado.
  */
 export class AuctionCancellationReconciler {
   constructor(
@@ -101,11 +109,13 @@ export class AuctionCancellationReconciler {
       const refreshed = await this.cancellations.getByAuctionId(auctionId)
       if (refreshed === null) return
 
-      if (isSettled(refreshed.walletRefundStatus) && isSettled(refreshed.inventoryReleaseStatus)) {
-        const bothConfirmed =
-          refreshed.walletRefundStatus === AuctionCancellationEffectStatus.Confirmed &&
-          refreshed.inventoryReleaseStatus === AuctionCancellationEffectStatus.Confirmed
-        if (bothConfirmed) {
+      // Wallet (si aplica), Inventory y, en una automatica, cada release de reserva.
+      const statuses = applicableCancellationEffectStatuses(refreshed)
+      if (statuses.every(isSettled)) {
+        const allConfirmed = statuses.every(
+          (status) => status === AuctionCancellationEffectStatus.Confirmed,
+        )
+        if (allConfirmed) {
           result.confirmed += 1
           this.logger.info('auction_cancellation_reconciler_confirmed', {
             workerId: this.options.workerId,

@@ -29,6 +29,7 @@ import * as persistOfficialAuctionPublication from '../../adapters/outbound/pers
 import * as createAuctionCancellation from '../../adapters/outbound/persistence/migrations/017-create-auction-cancellation'
 import * as addAuctionCancellationReconcilerLease from '../../adapters/outbound/persistence/migrations/018-add-auction-cancellation-reconciler-lease'
 import * as addAuctionMetricsIndexes from '../../adapters/outbound/persistence/migrations/019-add-auction-metrics-indexes'
+import * as addAutomaticAuctionCancellation from '../../adapters/outbound/persistence/migrations/020-add-automatic-auction-cancellation'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
@@ -113,6 +114,7 @@ export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '017-create-auction-cancellation': createAuctionCancellation,
   '018-add-auction-cancellation-reconciler-lease': addAuctionCancellationReconcilerLease,
   '019-add-auction-metrics-indexes': addAuctionMetricsIndexes,
+  '020-add-automatic-auction-cancellation': addAutomaticAuctionCancellation,
 }
 
 export interface MigrationOutcome {

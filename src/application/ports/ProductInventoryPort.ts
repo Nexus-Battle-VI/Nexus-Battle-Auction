@@ -93,7 +93,9 @@ export const inventoryClaimOperationId = (auctionId: string): string =>
   `auction:${auctionId}:inventory:claim`
 
 /**
- * HU-90. Namespace propio (`cancellation`, no `inventory:release`): esa
+ * HU-90. Lo comparten la cancelacion manual y la automatica (CA-05): una
+ * subasta se cancela una sola vez, asi que la clave es unica por subasta.
+ * Namespace propio (`cancellation`, no `inventory:release`): esa
  * operationId ya es la de `inventoryReleaseOperationId` para `AUCTION_WITHOUT_BIDS`
  * en settlement, y ambos flujos son mutuamente excluyentes pero conviene que
  * cada uno tenga su propia clave determinista sin ambiguedad.

@@ -311,6 +311,28 @@ export interface CancelAuctionResult {
   readonly replayed: boolean
 }
 
+/**
+ * HU-90, CA-05. Cancelacion automatica por sancion AUCTION_TERMS_VIOLATION.
+ * Vendedor, producto y commitment de inventario NO viajan en el comando: el
+ * repositorio los lee de la propia fila bajo el lock, igual que las reservas
+ * de puja a liberar.
+ */
+export interface CancelAuctionAutomaticallyCommand {
+  readonly operationId: string
+  readonly auctionId: string
+  /** Id de la sancion de Account que disparo la cancelacion. */
+  readonly triggerReferenceId: string
+  readonly cancelledAt: Date
+  readonly inventoryReleaseOperationId: string
+}
+
+/** Pagina de vendedores con subastas ACTIVE, por cursor de `sellerId`. */
+export interface ListActiveSellerIdsInput {
+  /** Exclusivo. `null` para la primera pagina. */
+  readonly afterSellerId: string | null
+  readonly limit: number
+}
+
 export interface RecordBuyNowFailureCommand {
   readonly operationId: string
   readonly auctionId: string
@@ -356,6 +378,30 @@ export interface AuctionRepositoryPort {
    * el estado cambio mientras se esperaba el lock.
    */
   cancelAuction(command: CancelAuctionCommand): Promise<CancelAuctionResult>
+
+  /**
+   * HU-90, CA-05. CAS `ACTIVE -> CANCELLED` de la cancelacion automatica,
+   * bajo el MISMO lock por subasta que `cancelAuction`, `persistBid` y
+   * `closeByBuyNow`. Solo revalida ACTIVE (ni pujas ni ventana de 6h). En la
+   * misma transaccion deja el seguimiento del release de inventario y de
+   * cada reserva de puja que pueda seguir activa, la auditoria y
+   * `auction.cancelled.v1` con origen TERMS_VIOLATION. No crea refund.
+   * Lanza `AuctionRuleViolation(AUCTION_NOT_ACTIVE)` si otra transicion
+   * terminal gano la carrera.
+   */
+  cancelAuctionAutomatically(
+    command: CancelAuctionAutomaticallyCommand,
+  ): Promise<CancelAuctionResult>
+
+  /**
+   * HU-90, CA-05. Vendedores DISTINTOS con al menos una subasta en creditos
+   * ACTIVE, ordenados por `sellerId`. Solo ids: el sondeo de sanciones hace
+   * una consulta a Account por vendedor, no por subasta.
+   */
+  listActiveSellerIds(input: ListActiveSellerIdsInput): Promise<readonly string[]>
+
+  /** HU-90, CA-05. Ids de las subastas en creditos ACTIVE de un vendedor. */
+  listActiveAuctionIdsBySeller(sellerId: string): Promise<readonly string[]>
 
   /** Subastas activas cuyo cierre cae en `(from, until]`. */
   findActiveClosingBetween(from: Date, until: Date): Promise<readonly AuctionSnapshot[]>

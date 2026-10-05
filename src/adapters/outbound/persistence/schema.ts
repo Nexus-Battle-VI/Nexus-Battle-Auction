@@ -60,20 +60,27 @@ export interface AuctionCancellationOperationTable {
 }
 
 /**
- * HU-90: progreso de los dos efectos externos de una cancelacion confirmada
+ * HU-90: progreso de los efectos externos de una cancelacion confirmada
  * (refund parcial en Wallet, release en Player-Inventory). Una fila por
  * subasta, igual que `auction_settlements`/`auction_inventory_settlement_intents`.
+ * Una automatica (CA-05, `origin = 'TERMS_VIOLATION'`) no tiene refund y
+ * sus releases de reservas viven en `auction_cancellation_reservation_releases`.
  */
 export interface AuctionCancellationTable {
   auction_id: string
   operation_id: string
+  /** Default `MANUAL` en la base: las inserciones manuales pueden omitirlo. */
+  origin: Generated<'MANUAL' | 'TERMS_VIOLATION'>
+  /** Id de la sancion que disparo una automatica; nulo en una manual. */
+  trigger_reference_id: string | null
   seller_id: string
   product_id: string
   inventory_commitment_id: string
   fee_charge_id: string | null
   refund_amount_credits: string | number
-  wallet_refund_operation_id: string
-  wallet_refund_status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR'
+  /** Nulo si y solo si `wallet_refund_status = 'NOT_REQUIRED'`. */
+  wallet_refund_operation_id: string | null
+  wallet_refund_status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR' | 'NOT_REQUIRED'
   wallet_refund_last_error: string | null
   inventory_release_operation_id: string
   inventory_release_status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR'
@@ -83,6 +90,17 @@ export interface AuctionCancellationTable {
   updated_at: Timestamp
   lease_owner: string | null
   lease_until: Timestamp | null
+}
+
+/** HU-90, CA-05: release en Wallet de una reserva de puja, una fila por reserva. */
+export interface AuctionCancellationReservationReleaseTable {
+  auction_id: string
+  reservation_id: string
+  operation_id: string
+  status: 'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR'
+  last_error: string | null
+  created_at: Timestamp
+  updated_at: Timestamp
 }
 
 export interface AuctionBidTable {
@@ -238,6 +256,7 @@ export interface Database {
   auction_settlement_work: AuctionSettlementWorkTable
   auction_cancellation_operations: AuctionCancellationOperationTable
   auction_cancellations: AuctionCancellationTable
+  auction_cancellation_reservation_releases: AuctionCancellationReservationReleaseTable
 }
 
 export interface AuctionSettlementWorkTable {
