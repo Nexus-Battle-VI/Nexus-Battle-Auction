@@ -119,7 +119,45 @@ export interface ProductRankingsAggregate {
   readonly mostSold: readonly ProductSoldCount[]
 }
 
+/** Ventas de jugador en creditos: acumulados exactos, sin promediar (el caso de uso redondea). */
+export interface CreditSalesStats {
+  readonly count: number
+  /** Suma de precios finales (enteros). Con `count = 0` vale 0. */
+  readonly sum: number
+  readonly min: number | null
+  readonly max: number | null
+}
+
+export type SaleChannel = 'AUCTION_CLOSE' | 'BUY_NOW'
+
+/** Precios de lista de las subastas oficiales de UNA moneda, en unidad minima. */
+export interface CurrencyListedPrices {
+  /** ISO 4217. Nunca se combina con otra moneda. */
+  readonly currency: string
+  readonly publishedCount: number
+  readonly minimumBid: {
+    readonly sum: number
+    readonly min: number
+    readonly max: number
+  }
+  /** Solo las publicaciones que definieron compra inmediata. */
+  readonly buyNow: { readonly count: number; readonly sum: number }
+}
+
+export interface AveragePricesAggregate {
+  readonly credits: {
+    /** Precio final de venta: `final_amount_credits` (cierre) o `price_credits` (compra inmediata). */
+    readonly sales: CreditSalesStats & { readonly median: number | null }
+    readonly byChannel: Readonly<Record<SaleChannel, CreditSalesStats>>
+    /** `minimum_bid_credits` de TODA publicacion de jugador del periodo (`published_at`). */
+    readonly listedMinimumBid: { readonly count: number; readonly sum: number }
+  }
+  /** Solo monedas con publicaciones, ordenadas por `currency` ASC (orden por bytes). */
+  readonly realMoney: readonly CurrencyListedPrices[]
+}
+
 export interface AuctionMetricsRepositoryPort {
+  getAveragePrices(period: MetricsPeriod): Promise<AveragePricesAggregate>
   getVolumeAndSuccess(period: MetricsPeriod, asOf: Date): Promise<VolumeAndSuccessAggregate>
   getProductRankings(period: MetricsPeriod, limit: number): Promise<ProductRankingsAggregate>
   getClosingTime(period: MetricsPeriod): Promise<ClosingTimeAggregate>

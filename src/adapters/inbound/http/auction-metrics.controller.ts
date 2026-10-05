@@ -11,6 +11,10 @@ import {
 
 import { AuctionMetricsQueryError } from '../../../application/errors/AuctionMetricsError'
 import {
+  GetAuctionAveragePrices,
+  type AveragePricesResponse,
+} from '../../../application/use-cases/GetAuctionAveragePrices'
+import {
   GetAuctionClosingTimeAndTrends,
   type ClosingTimeAndTrendsResponse,
 } from '../../../application/use-cases/GetAuctionClosingTimeAndTrends'
@@ -58,6 +62,7 @@ export class AuctionMetricsController {
     private readonly getVolumeAndSuccess: GetAuctionVolumeAndSuccess,
     private readonly getClosingTimeAndTrends: GetAuctionClosingTimeAndTrends,
     private readonly getProductRankings: GetAuctionProductRankings,
+    private readonly getAveragePrices: GetAuctionAveragePrices,
   ) {}
 
   /** HU-91.2 / CA-01 (contrato §4.1). */
@@ -90,6 +95,26 @@ export class AuctionMetricsController {
   async productRankings(@Query() query: ProductRankingsQueryDto): Promise<ProductRankingsResponse> {
     try {
       return await this.getProductRankings.execute(query)
+    } catch (error: unknown) {
+      throw toMetricsHttpException(error)
+    }
+  }
+
+  /** HU-91.4 / CA-03 (contrato §4.3). Creditos y dinero real SIEMPRE en ramas distintas. */
+  @Get('average-prices')
+  @ApiOperation({ summary: 'Precios promedio por moneda' })
+  @ApiOkResponse({
+    description:
+      'Precio final de venta en creditos y precio de lista por moneda en dinero real, sin mezclarlos (hu-91.v1 §4.3).',
+  })
+  @ApiBadRequestResponse({ description: 'INVALID_PERIOD o parametros fuera del contrato.' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no es ADMINISTRATOR ni SUPER_ADMINISTRATOR.' })
+  async averagePrices(
+    @Query() query: AuctionMetricsPeriodQueryDto,
+  ): Promise<AveragePricesResponse> {
+    try {
+      return await this.getAveragePrices.execute(query)
     } catch (error: unknown) {
       throw toMetricsHttpException(error)
     }

@@ -1,6 +1,9 @@
 import {
   type AuctionMetricsRepositoryPort,
+  type AveragePricesAggregate,
   type ClosingTimeAggregate,
+  type CreditSalesStats,
+  type CurrencyListedPrices,
   type CloseReason,
   type MetricsPeriod,
   type ProductAuctionedCount,
@@ -30,12 +33,24 @@ export interface MetricsAuctionFact {
   readonly cancelledAt?: Date
   readonly officialMark?: 'OFFICIAL' | 'PREMIUM'
   readonly buyNowCompletedAt?: Date
+  /** Precio final del cierre por subasta (`final_amount_credits`). */
+  readonly finalAmountCredits?: number
+  /** Precio de la compra inmediata (`auction_buy_now_operations.price_credits`). */
+  readonly buyNowPriceCredits?: number
+  /** `minimum_bid_credits` (subastas de jugador). */
+  readonly minimumBidCredits?: number
+  /** Subastas oficiales: moneda ISO 4217 y precios en unidad minima. */
+  readonly currency?: string
+  readonly minimumBidAmountMinor?: number
+  readonly buyNowAmountMinor?: number
   readonly settlementStatus?: string
   readonly claim?: { readonly status: 'PENDING' | 'CLAIMED' | 'EXPIRED'; readonly settledAt: Date }
 }
 
 interface ClosedRow {
   readonly productId: string
+  /** Precio final de venta; `undefined` si el hecho no lo trae (no es promediable). */
+  readonly price: number | undefined
   readonly reason: CloseReason
   readonly closedAt: Date
   readonly publishedAt: Date
@@ -85,6 +100,7 @@ export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositor
       if (fact.status === 'FINISHED' && within(fact.finishedAt, period)) {
         rows.push({
           productId: fact.productId ?? fact.id,
+          price: fact.finalAmountCredits,
           reason:
             fact.closingResultType === 'WITH_WINNER'
               ? 'EXPIRED_WITH_WINNER'
@@ -97,6 +113,7 @@ export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositor
       } else if (fact.status === 'SOLD' && within(fact.buyNowCompletedAt, period)) {
         rows.push({
           productId: fact.productId ?? fact.id,
+          price: fact.buyNowPriceCredits,
           reason: 'BUY_NOW',
           closedAt: fact.buyNowCompletedAt,
           publishedAt: fact.publishedAt,
@@ -199,6 +216,75 @@ export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositor
       .slice(0, limit)
 
     return Promise.resolve({ mostAuctioned, mostSold })
+  }
+
+  getAveragePrices(period: MetricsPeriod): Promise<AveragePricesAggregate> {
+    const statsOf = (prices: readonly number[]): CreditSalesStats => ({
+      count: prices.length,
+      sum: prices.reduce((total, price) => total + price, 0),
+      min: prices.length === 0 ? null : Math.min(...prices),
+      max: prices.length === 0 ? null : Math.max(...prices),
+    })
+    const salePrices = (reason?: CloseReason): number[] =>
+      this.closedRows(period).flatMap((row) =>
+        row.reason !== 'EXPIRED_WITHOUT_BIDS' &&
+        (reason === undefined || row.reason === reason) &&
+        row.price !== undefined
+          ? [row.price]
+          : [],
+      )
+
+    const all = salePrices()
+    const published = [...this.facts.values()].filter((fact) => within(fact.publishedAt, period))
+    const listed = published.flatMap((fact) =>
+      fact.priceKind === 'CREDITS' && fact.minimumBidCredits !== undefined
+        ? [fact.minimumBidCredits]
+        : [],
+    )
+
+    const byCurrency = new Map<string, CurrencyListedPrices>()
+    for (const fact of published) {
+      if (
+        fact.priceKind !== 'REAL_MONEY' ||
+        fact.currency === undefined ||
+        fact.minimumBidAmountMinor === undefined
+      )
+        continue
+      const bid = fact.minimumBidAmountMinor
+      const current = byCurrency.get(fact.currency)
+      const hasBuyNow = fact.buyNowAmountMinor !== undefined
+      byCurrency.set(fact.currency, {
+        currency: fact.currency,
+        publishedCount: (current?.publishedCount ?? 0) + 1,
+        minimumBid: {
+          sum: (current?.minimumBid.sum ?? 0) + bid,
+          min: Math.min(current?.minimumBid.min ?? bid, bid),
+          max: Math.max(current?.minimumBid.max ?? bid, bid),
+        },
+        buyNow: {
+          count: (current?.buyNow.count ?? 0) + (hasBuyNow ? 1 : 0),
+          sum: (current?.buyNow.sum ?? 0) + (fact.buyNowAmountMinor ?? 0),
+        },
+      })
+    }
+
+    return Promise.resolve({
+      credits: {
+        sales: { ...statsOf(all), median: percentileCont(all, 0.5) },
+        byChannel: {
+          AUCTION_CLOSE: statsOf(salePrices('EXPIRED_WITH_WINNER')),
+          BUY_NOW: statsOf(salePrices('BUY_NOW')),
+        },
+        listedMinimumBid: {
+          count: listed.length,
+          sum: listed.reduce((total, price) => total + price, 0),
+        },
+      },
+      // Orden por unidades de codigo, igual que `collate "C"` en PostgreSQL.
+      realMoney: [...byCurrency.values()].sort((left, right) =>
+        left.currency < right.currency ? -1 : left.currency > right.currency ? 1 : 0,
+      ),
+    })
   }
 
   getClosingTime(period: MetricsPeriod): Promise<ClosingTimeAggregate> {

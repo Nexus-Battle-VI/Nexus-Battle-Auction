@@ -3,6 +3,7 @@ import { sql, type Kysely, type RawBuilder, type Transaction } from 'kysely'
 import {
   CLOSE_REASONS,
   type AuctionMetricsRepositoryPort,
+  type AveragePricesAggregate,
   type ClosingTimeAggregate,
   type CloseReason,
   type MetricsPeriod,
@@ -30,6 +31,7 @@ const isCloseReason = (value: string): value is CloseReason =>
  */
 const closedCohort = (period: MetricsPeriod): RawBuilder<unknown> => sql`
   select a.id as auction_id, a.product_id, a.published_at, a.closes_at, a.finished_at as closed_at,
+         a.final_amount_credits::bigint as price,
          case a.closing_result_type
            when 'WITH_WINNER' then 'EXPIRED_WITH_WINNER'
            else 'EXPIRED_WITHOUT_BIDS'
@@ -38,7 +40,7 @@ const closedCohort = (period: MetricsPeriod): RawBuilder<unknown> => sql`
   where a.price_kind = 'CREDITS' and a.status = 'FINISHED'
     and a.finished_at >= ${period.from} and a.finished_at < ${period.to}
   union all
-  select a.id, a.product_id, a.published_at, a.closes_at, n.completed_at, 'BUY_NOW'
+  select a.id, a.product_id, a.published_at, a.closes_at, n.completed_at, n.price_credits::bigint, 'BUY_NOW'
   from auction_buy_now_operations n
   join auctions a on a.id = n.auction_id
   where a.price_kind = 'CREDITS' and a.status = 'SOLD'
@@ -214,6 +216,114 @@ export class PostgresAuctionMetricsRepository implements AuctionMetricsRepositor
           total: row.total,
           byAuctionClose: row.by_close,
           byBuyNow: row.by_buy_now,
+        })),
+      }
+    })
+  }
+
+  /**
+   * Precios promedio por moneda (contrato §3.4 y §4.3). Devuelve ACUMULADOS exactos
+   * (conteo, suma, minimo, maximo; mediana con `percentile_cont`) y el caso de uso
+   * redondea: asi el redondeo es identico en PostgreSQL y en memoria.
+   *
+   * - Creditos: la cohorte de CERRADAS por el mercado (`closedCohort`), solo con venta
+   *   (`EXPIRED_WITH_WINNER` o `BUY_NOW`) y precio presente: `final_amount_credits` en el
+   *   cierre y `price_credits` en la compra inmediata. Sin `JOIN` a `auction_bids`.
+   * - Lista de creditos: `minimum_bid_credits` de TODA publicacion de jugador del periodo.
+   * - Dinero real: solo precio de LISTA de las oficiales, agrupado por `currency`.
+   */
+  getAveragePrices(period: MetricsPeriod): Promise<AveragePricesAggregate> {
+    return this.readSnapshot(async (trx) => {
+      const byReason = await sql<{
+        reason: string
+        total: number
+        total_sum: number
+        min_price: number
+        max_price: number
+      }>`
+        with closed as (${closedCohort(period)})
+        select reason,
+               count(*)::int as total,
+               (sum(price))::float8 as total_sum,
+               (min(price))::float8 as min_price,
+               (max(price))::float8 as max_price
+        from closed
+        where reason in ('EXPIRED_WITH_WINNER', 'BUY_NOW') and price is not null
+        group by reason
+      `.execute(trx)
+
+      const median = await sql<{ median: number | null }>`
+        with closed as (${closedCohort(period)})
+        select (percentile_cont(0.5) within group (order by price))::float8 as median
+        from closed
+        where reason in ('EXPIRED_WITH_WINNER', 'BUY_NOW') and price is not null
+      `.execute(trx)
+
+      const listed = await sql<{ total: number; total_sum: number }>`
+        select count(minimum_bid_credits)::int as total,
+               (coalesce(sum(minimum_bid_credits), 0))::float8 as total_sum
+        from auctions
+        where price_kind = 'CREDITS'
+          and published_at >= ${period.from} and published_at < ${period.to}
+      `.execute(trx)
+
+      const money = await sql<{
+        currency: string
+        published: number
+        min_sum: number
+        min_min: number
+        min_max: number
+        buy_now_count: number
+        buy_now_sum: number
+      }>`
+        select currency,
+               count(*)::int as published,
+               (sum(minimum_bid_amount_minor))::float8 as min_sum,
+               (min(minimum_bid_amount_minor))::float8 as min_min,
+               (max(minimum_bid_amount_minor))::float8 as min_max,
+               count(buy_now_amount_minor)::int as buy_now_count,
+               (coalesce(sum(buy_now_amount_minor), 0))::float8 as buy_now_sum
+        from auctions
+        where price_kind = 'REAL_MONEY'
+          and published_at >= ${period.from} and published_at < ${period.to}
+        group by currency
+        order by currency collate "C" asc
+      `.execute(trx)
+
+      const channel = (reason: 'EXPIRED_WITH_WINNER' | 'BUY_NOW') => {
+        const row = byReason.rows.find((candidate) => candidate.reason === reason)
+        return {
+          count: row?.total ?? 0,
+          sum: row?.total_sum ?? 0,
+          min: row?.min_price ?? null,
+          max: row?.max_price ?? null,
+        }
+      }
+      const close = channel('EXPIRED_WITH_WINNER')
+      const buyNow = channel('BUY_NOW')
+      const mins = [close.min, buyNow.min].filter((value): value is number => value !== null)
+      const maxs = [close.max, buyNow.max].filter((value): value is number => value !== null)
+
+      return {
+        credits: {
+          sales: {
+            count: close.count + buyNow.count,
+            sum: close.sum + buyNow.sum,
+            min: mins.length === 0 ? null : Math.min(...mins),
+            max: maxs.length === 0 ? null : Math.max(...maxs),
+            median: median.rows[0]?.median ?? null,
+          },
+          byChannel: { AUCTION_CLOSE: close, BUY_NOW: buyNow },
+          listedMinimumBid: {
+            count: listed.rows[0]?.total ?? 0,
+            sum: listed.rows[0]?.total_sum ?? 0,
+          },
+        },
+        realMoney: money.rows.map((row) => ({
+          currency: row.currency,
+          publishedCount: row.published,
+          minimumBid: { sum: row.min_sum, min: row.min_min, max: row.min_max },
+          buyNow: { count: row.buy_now_count, sum: row.buy_now_sum },
         })),
       }
     })
