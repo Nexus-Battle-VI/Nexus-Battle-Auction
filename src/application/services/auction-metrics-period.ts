@@ -128,6 +128,22 @@ export const bucketStartsFor = (period: MetricsPeriod, granularity: TrendGranula
   return starts
 }
 
+const DEFAULT_LIMIT = 10
+const MAX_LIMIT = 50
+
+/** `limit` del contrato: entero 1..50, defecto 10. Cualquier otra cosa es `INVALID_PARAMETER`. */
+export const resolveLimit = (raw: string | undefined): number => {
+  if (raw === undefined) return DEFAULT_LIMIT
+  const limit = /^\d{1,3}$/.test(raw) ? Number(raw) : Number.NaN
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
+    throw new AuctionMetricsQueryError(
+      'INVALID_PARAMETER',
+      `limit debe ser un entero entre 1 y ${String(MAX_LIMIT)}.`,
+    )
+  }
+  return limit
+}
+
 export const periodEnvelope = (
   period: MetricsPeriod,
   asOf: Date,

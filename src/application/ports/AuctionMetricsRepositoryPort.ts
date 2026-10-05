@@ -96,8 +96,32 @@ export interface TrendPoint {
   readonly officialPublished: number
 }
 
+/** Publicaciones de un producto en el periodo (contrato §3.4, «mas subastados»). */
+export interface ProductAuctionedCount {
+  readonly productId: string
+  /** Una fila de `auctions` = una publicacion; republicar el mismo producto cuenta de nuevo. */
+  readonly total: number
+  readonly playerCredits: number
+  readonly officialRealMoney: number
+}
+
+/** Ventas de jugador de un producto cerradas en el periodo (contrato §3.4, «mas vendidos»). */
+export interface ProductSoldCount {
+  readonly productId: string
+  readonly total: number
+  readonly byAuctionClose: number
+  readonly byBuyNow: number
+}
+
+/** Rankings ya ordenados (`total DESC, productId ASC`) y recortados a `limit`. */
+export interface ProductRankingsAggregate {
+  readonly mostAuctioned: readonly ProductAuctionedCount[]
+  readonly mostSold: readonly ProductSoldCount[]
+}
+
 export interface AuctionMetricsRepositoryPort {
   getVolumeAndSuccess(period: MetricsPeriod, asOf: Date): Promise<VolumeAndSuccessAggregate>
+  getProductRankings(period: MetricsPeriod, limit: number): Promise<ProductRankingsAggregate>
   getClosingTime(period: MetricsPeriod): Promise<ClosingTimeAggregate>
   getTrendPoints(
     period: MetricsPeriod,

@@ -3,6 +3,10 @@ import {
   ExternalDependencyUnavailableError,
 } from '../../../application/errors/ExternalDependencyError'
 import type {
+  CatalogProductDetails,
+  CatalogProductDetailsPort,
+} from '../../../application/ports/CatalogProductDetailsPort'
+import type {
   CatalogProductLookupPort,
   CatalogProductSuggestion,
 } from '../../../application/ports/CatalogProductLookupPort'
@@ -76,6 +80,39 @@ const suggestionItems = (value: unknown): readonly SuggestionItemPayload[] | nul
   return parsed
 }
 
+/**
+ * Parser estricto para HU-91.3: exige TODOS los campos que el contrato
+ * `hu-91.v1` §4.2 expone (`productId`, `sku`, `name`, `type`, `imageUrl`).
+ * Si Catalog dejara de devolver alguno, es una ruptura de contrato y no se
+ * rellena en silencio: el llamador la trata como enriquecimiento no disponible.
+ */
+const detailItems = (value: unknown): readonly CatalogProductDetails[] | null => {
+  if (typeof value !== 'object' || value === null) return null
+  const items = (value as Readonly<Record<string, unknown>>).items
+  if (!Array.isArray(items)) return null
+  const parsed: CatalogProductDetails[] = []
+  for (const item of items) {
+    if (typeof item !== 'object' || item === null) return null
+    const fields = item as Readonly<Record<string, unknown>>
+    if (
+      typeof fields.productId !== 'string' ||
+      typeof fields.sku !== 'string' ||
+      typeof fields.name !== 'string' ||
+      typeof fields.type !== 'string' ||
+      typeof fields.imageUrl !== 'string'
+    )
+      return null
+    parsed.push({
+      productId: fields.productId,
+      sku: fields.sku,
+      name: fields.name,
+      type: fields.type,
+      imageUrl: fields.imageUrl,
+    })
+  }
+  return parsed
+}
+
 const chunksOf = <T>(values: readonly T[], size: number): T[][] => {
   const chunks: T[][] = []
   for (let start = 0; start < values.length; start += size) {
@@ -90,7 +127,9 @@ const chunksOf = <T>(values: readonly T[], size: number): T[][] => {
  * endpoint es publico. Una llamada por cada bloque de hasta 500 referencias;
  * sin reintentos: un fallo hace que la busqueda no pueda resolverse.
  */
-export class CatalogProductLookupClient implements CatalogProductLookupPort {
+export class CatalogProductLookupClient
+  implements CatalogProductLookupPort, CatalogProductDetailsPort
+{
   private readonly fetchImpl: typeof fetch
 
   constructor(private readonly options: CatalogProductLookupClientOptions) {
@@ -127,6 +166,26 @@ export class CatalogProductLookupClient implements CatalogProductLookupPort {
     return matched.flat().sort((left, right) => left.name.localeCompare(right.name))
   }
 
+  /**
+   * HU-91.3: resuelve productos por referencia SIN filtro de nombre. Una llamada
+   * por cada bloque de hasta 500 referencias; las inexistentes se omiten. Un
+   * `items` ininteligible o con campos faltantes es `ExternalContractError`.
+   */
+  async findProducts(references: readonly string[]): Promise<readonly CatalogProductDetails[]> {
+    const unique = [...new Set(references)]
+    const resolved = await Promise.all(
+      chunksOf(unique, CATALOG_LOOKUP_MAX_REFERENCES).map(async (chunk) => {
+        const items = detailItems(await this.fetchLookupBody(chunk, undefined))
+        if (items === null) {
+          throw new ExternalContractError('catalog', 'Catalog devolvio un lookup ininteligible.')
+        }
+        const requested = new Set(chunk)
+        return items.filter((item) => requested.has(item.productId) || requested.has(item.sku))
+      }),
+    )
+    return resolved.flat()
+  }
+
   /** Devuelve las referencias del bloque cuyo producto (por id o SKU) volvio de Catalog. */
   private async lookupChunk(chunk: readonly string[], nameQuery: string): Promise<string[]> {
     const body = await this.fetchLookupBody(chunk, nameQuery)
@@ -157,7 +216,10 @@ export class CatalogProductLookupClient implements CatalogProductLookupPort {
   }
 
   /** POST al lookup publico de Catalog; traduce fallos de red, HTTP y JSON a dependencia no disponible. */
-  private async fetchLookupBody(chunk: readonly string[], nameQuery: string): Promise<unknown> {
+  private async fetchLookupBody(
+    chunk: readonly string[],
+    nameQuery: string | undefined,
+  ): Promise<unknown> {
     const controller = new AbortController()
     const timer = setTimeout(() => {
       controller.abort()
@@ -169,7 +231,11 @@ export class CatalogProductLookupClient implements CatalogProductLookupPort {
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ references: chunk, query: nameQuery }),
+          body: JSON.stringify(
+            nameQuery === undefined
+              ? { references: chunk }
+              : { references: chunk, query: nameQuery },
+          ),
           signal: controller.signal,
         },
       )

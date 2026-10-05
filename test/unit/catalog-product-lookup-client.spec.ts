@@ -241,3 +241,127 @@ describe('CatalogProductLookupClient.findSuggestions', () => {
     )
   })
 })
+
+describe('CatalogProductLookupClient.findProducts (HU-91.3)', () => {
+  const item = (productId: string, extra: Record<string, unknown> = {}) => ({
+    productId,
+    sku: `sku-${productId}`,
+    name: `Nombre ${productId}`,
+    type: 'ARMA',
+    imageUrl: `https://img/${productId}.png`,
+    ...extra,
+  })
+
+  it('hace POST al lookup publico SIN query y devuelve solo los 5 campos del contrato', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(
+        response(200, {
+          items: [
+            item('id-1', { description: 'x', creditsPrice: 5, premium: true, brand: 'ACME' }),
+          ],
+        }),
+      ),
+    )
+
+    const found = await client(fetchImpl).findProducts(['id-1', 'missing'])
+
+    expect(found).toEqual([item('id-1')])
+    const [url, request] = fetchImpl.mock.calls[0]!
+    expect(url).toBe('http://catalog:3003/api/v1/catalog/products/lookup')
+    expect(request).toMatchObject({ method: 'POST' })
+    expect(request?.body).toBe(JSON.stringify({ references: ['id-1', 'missing'] }))
+  })
+
+  it('omite las referencias inexistentes sin fallar (el lookup no las devuelve)', async () => {
+    const fetchImpl = mockFetch(() => Promise.resolve(response(200, { items: [] })))
+
+    await expect(client(fetchImpl).findProducts(['nope'])).resolves.toEqual([])
+  })
+
+  it('elimina referencias duplicadas y acepta el alias sku', async () => {
+    const fetchImpl = mockFetch(() => Promise.resolve(response(200, { items: [item('uuid-1')] })))
+
+    const found = await client(fetchImpl).findProducts(['sku-uuid-1', 'sku-uuid-1', 'uuid-1'])
+
+    expect(found).toEqual([item('uuid-1')])
+    expect(requestBody(fetchImpl, 0)).toEqual({ references: ['sku-uuid-1', 'uuid-1'] })
+  })
+
+  it('no devuelve productos que no se pidieron aunque Catalog los incluya', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(response(200, { items: [item('pedido'), item('ajeno')] })),
+    )
+
+    const found = await client(fetchImpl).findProducts(['pedido'])
+
+    expect(found.map((product) => product.productId)).toEqual(['pedido'])
+  })
+
+  it('trocea en bloques de 500 referencias y concatena los resultados', async () => {
+    const references = Array.from(
+      { length: CATALOG_LOOKUP_MAX_REFERENCES + 1 },
+      (_, i) => `id-${String(i)}`,
+    )
+    const fetchImpl = mockFetch(() => Promise.resolve(response(200, { items: [] })))
+    fetchImpl
+      .mockResolvedValueOnce(response(200, { items: [item('id-0')] }))
+      .mockResolvedValueOnce(response(200, { items: [item('id-500')] }))
+
+    const found = await client(fetchImpl).findProducts(references)
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect((requestBody(fetchImpl, 0) as { references: string[] }).references).toHaveLength(500)
+    expect((requestBody(fetchImpl, 1) as { references: string[] }).references).toEqual(['id-500'])
+    expect(found.map((product) => product.productId).sort()).toEqual(['id-0', 'id-500'])
+  })
+
+  it.each([
+    ['sin imageUrl', { ...item('id-1'), imageUrl: undefined }],
+    ['sin name', { ...item('id-1'), name: undefined }],
+    ['sin type', { ...item('id-1'), type: undefined }],
+    ['sin sku', { ...item('id-1'), sku: undefined }],
+    ['con name no textual', { ...item('id-1'), name: 42 }],
+  ])('un item %s es una ruptura de contrato (ExternalContractError)', async (_name, broken) => {
+    const fetchImpl = mockFetch(() => Promise.resolve(response(200, { items: [broken] })))
+
+    await expect(client(fetchImpl).findProducts(['id-1'])).rejects.toBeInstanceOf(
+      ExternalContractError,
+    )
+  })
+
+  it.each([
+    ['sin items', {}],
+    ['items no es lista', { items: 'x' }],
+    ['null', null],
+  ])('un cuerpo %s es ExternalContractError', async (_name, body) => {
+    const fetchImpl = mockFetch(() => Promise.resolve(response(200, body)))
+
+    await expect(client(fetchImpl).findProducts(['id-1'])).rejects.toBeInstanceOf(
+      ExternalContractError,
+    )
+  })
+
+  it('HTTP no OK, fallo de red o JSON invalido -> ExternalDependencyUnavailableError', async () => {
+    await expect(
+      client(mockFetch(() => Promise.resolve(response(503, {})))).findProducts(['id-1']),
+    ).rejects.toBeInstanceOf(ExternalDependencyUnavailableError)
+    await expect(
+      client(mockFetch(() => Promise.reject(new TypeError('fetch failed')))).findProducts(['id-1']),
+    ).rejects.toBeInstanceOf(ExternalDependencyUnavailableError)
+    await expect(
+      client(
+        mockFetch(() => Promise.resolve(new Response('no es json', { status: 200 }))),
+      ).findProducts(['id-1']),
+    ).rejects.toBeInstanceOf(ExternalDependencyUnavailableError)
+  })
+
+  it('findReferencesMatchingName no cambia: sigue enviando query', async () => {
+    const fetchImpl = mockFetch(() =>
+      Promise.resolve(response(200, { items: [{ productId: 'id-1', sku: 'sword' }] })),
+    )
+
+    await client(fetchImpl).findReferencesMatchingName(['id-1'], 'espada')
+
+    expect(requestBody(fetchImpl, 0)).toEqual({ references: ['id-1'], query: 'espada' })
+  })
+})

@@ -6,6 +6,7 @@ import {
   type ClosingTimeAggregate,
   type CloseReason,
   type MetricsPeriod,
+  type ProductRankingsAggregate,
   type TrendGranularity,
   type TrendPoint,
   type VolumeAndSuccessAggregate,
@@ -28,7 +29,7 @@ const isCloseReason = (value: string): value is CloseReason =>
  *   (UNIQUE por subasta: el `JOIN` es 1:1 y no multiplica filas).
  */
 const closedCohort = (period: MetricsPeriod): RawBuilder<unknown> => sql`
-  select a.id as auction_id, a.published_at, a.closes_at, a.finished_at as closed_at,
+  select a.id as auction_id, a.product_id, a.published_at, a.closes_at, a.finished_at as closed_at,
          case a.closing_result_type
            when 'WITH_WINNER' then 'EXPIRED_WITH_WINNER'
            else 'EXPIRED_WITHOUT_BIDS'
@@ -37,7 +38,7 @@ const closedCohort = (period: MetricsPeriod): RawBuilder<unknown> => sql`
   where a.price_kind = 'CREDITS' and a.status = 'FINISHED'
     and a.finished_at >= ${period.from} and a.finished_at < ${period.to}
   union all
-  select a.id, a.published_at, a.closes_at, n.completed_at, 'BUY_NOW'
+  select a.id, a.product_id, a.published_at, a.closes_at, n.completed_at, 'BUY_NOW'
   from auction_buy_now_operations n
   join auctions a on a.id = n.auction_id
   where a.price_kind = 'CREDITS' and a.status = 'SOLD'
@@ -148,6 +149,72 @@ export class PostgresAuctionMetricsRepository implements AuctionMetricsRepositor
           published: official.rows.reduce((sum, row) => sum + row.total, 0),
           byMark: { OFFICIAL: markCount('OFFICIAL'), PREMIUM: markCount('PREMIUM') },
         },
+      }
+    })
+  }
+
+  /**
+   * Rankings por `product_id` (contrato §3.4). Se agrega SOLO sobre `auctions` (y,
+   * 1:1 por `UNIQUE(auction_id)`, `auction_buy_now_operations` para las ventas):
+   * sin `JOIN` contra `auction_bids`, que multiplicaria cada subasta por su numero
+   * de pujas. Una fila de `auctions` es una publicacion, de modo que republicar el
+   * mismo producto suma una publicacion mas y un reintento idempotente ninguna.
+   * Orden determinista: `total DESC, product_id ASC` con collation `C` (orden por
+   * bytes, igual que el adaptador en memoria; la collation de la base no interviene).
+   */
+  getProductRankings(period: MetricsPeriod, limit: number): Promise<ProductRankingsAggregate> {
+    return this.readSnapshot(async (trx) => {
+      // «Mas subastados»: toda publicacion del periodo, tambien las canceladas
+      // (se publicaron). Jugador y oficial por separado.
+      const auctioned = await sql<{
+        product_id: string
+        total: number
+        player: number
+        official: number
+      }>`
+        select product_id,
+               count(*)::int as total,
+               (count(*) filter (where price_kind = 'CREDITS'))::int as player,
+               (count(*) filter (where price_kind = 'REAL_MONEY'))::int as official
+        from auctions
+        where published_at >= ${period.from} and published_at < ${period.to}
+        group by product_id
+        order by total desc, product_id collate "C" asc
+        limit ${limit}
+      `.execute(trx)
+
+      // «Mas vendidos»: solo jugador (creditos) con venta cerrada en el periodo.
+      const sold = await sql<{
+        product_id: string
+        total: number
+        by_close: number
+        by_buy_now: number
+      }>`
+        with closed as (${closedCohort(period)})
+        select product_id,
+               count(*)::int as total,
+               (count(*) filter (where reason = 'EXPIRED_WITH_WINNER'))::int as by_close,
+               (count(*) filter (where reason = 'BUY_NOW'))::int as by_buy_now
+        from closed
+        where reason in ('EXPIRED_WITH_WINNER', 'BUY_NOW')
+        group by product_id
+        order by total desc, product_id collate "C" asc
+        limit ${limit}
+      `.execute(trx)
+
+      return {
+        mostAuctioned: auctioned.rows.map((row) => ({
+          productId: row.product_id,
+          total: row.total,
+          playerCredits: row.player,
+          officialRealMoney: row.official,
+        })),
+        mostSold: sold.rows.map((row) => ({
+          productId: row.product_id,
+          total: row.total,
+          byAuctionClose: row.by_close,
+          byBuyNow: row.by_buy_now,
+        })),
       }
     })
   }
