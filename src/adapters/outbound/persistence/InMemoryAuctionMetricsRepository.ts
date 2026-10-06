@@ -1,4 +1,7 @@
 import {
+  COUNT_BIDS_ON_CANCELLED_AUCTIONS,
+  type ActiveUserEntry,
+  type AuctionMetricsAdapterOptions,
   type AuctionMetricsRepositoryPort,
   type AveragePricesAggregate,
   type ClosingTimeAggregate,
@@ -11,6 +14,7 @@ import {
   type ProductSoldCount,
   type TrendGranularity,
   type TrendPoint,
+  type UsersAndCommissionsAggregate,
   type VolumeAndSuccessAggregate,
 } from '../../../application/ports/AuctionMetricsRepositoryPort'
 import { bucketStartOf } from '../../../application/services/auction-metrics-period'
@@ -44,6 +48,21 @@ export interface MetricsAuctionFact {
   readonly minimumBidAmountMinor?: number
   readonly buyNowAmountMinor?: number
   readonly settlementStatus?: string
+  /** Vendedor (`auctions.seller_id`); sin el, la publicacion no genera actividad de vendedor. */
+  readonly sellerId?: string
+  /** Pujas persistidas (`auction_bids`); varias del mismo usuario son filas distintas. */
+  readonly bids?: readonly { readonly bidderId: string; readonly placedAt: Date }[]
+  /** Comprador de la compra inmediata (`auction_buy_now_operations.buyer_id`). */
+  readonly buyerId?: string
+  /** `duration_hours` y `publication_fee_credits` de una publicacion de jugador. */
+  readonly durationHours?: number
+  readonly publicationFeeCredits?: number
+  /** Fila de `auction_cancellations` (junto con `cancelledAt`). */
+  readonly cancellation?: {
+    readonly refundAmountCredits: number
+    readonly walletRefundStatus:
+      'PENDING' | 'CONFIRMED' | 'RETRYABLE' | 'TERMINAL_ERROR' | 'NOT_REQUIRED'
+  }
   readonly claim?: { readonly status: 'PENDING' | 'CLAIMED' | 'EXPIRED'; readonly settledAt: Date }
 }
 
@@ -88,6 +107,12 @@ const seconds = (from: Date, to: Date): number => (to.getTime() - from.getTime()
  */
 export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositoryPort {
   private readonly facts = new Map<string, MetricsAuctionFact>()
+  private readonly countBidsOnCancelledAuctions: boolean
+
+  constructor(options: AuctionMetricsAdapterOptions = {}) {
+    this.countBidsOnCancelledAuctions =
+      options.countBidsOnCancelledAuctions ?? COUNT_BIDS_ON_CANCELLED_AUCTIONS
+  }
 
   seed(...facts: readonly MetricsAuctionFact[]): void {
     for (const fact of facts) this.facts.set(fact.id, fact)
@@ -216,6 +241,111 @@ export class InMemoryAuctionMetricsRepository implements AuctionMetricsRepositor
       .slice(0, limit)
 
     return Promise.resolve({ mostAuctioned, mostSold })
+  }
+
+  getUsersAndCommissions(
+    period: MetricsPeriod,
+    limit: number,
+  ): Promise<UsersAndCommissionsAggregate> {
+    interface Activity {
+      readonly seller: Set<string>
+      readonly bidder: Set<string>
+      readonly buyer: Set<string>
+    }
+    // Una entrada por usuario con las subastas distintas de cada rol: `Set` = DISTINCT.
+    const users = new Map<string, Activity>()
+    const activityOf = (playerId: string): Activity => {
+      let activity = users.get(playerId)
+      if (activity === undefined) {
+        activity = { seller: new Set(), bidder: new Set(), buyer: new Set() }
+        users.set(playerId, activity)
+      }
+      return activity
+    }
+
+    const credits = [...this.facts.values()].filter((fact) => fact.priceKind === 'CREDITS')
+    for (const fact of credits) {
+      if (fact.sellerId !== undefined && within(fact.publishedAt, period)) {
+        activityOf(fact.sellerId).seller.add(fact.id)
+      }
+      // Regla abierta: pujas en subastas CANCELLED (ver `COUNT_BIDS_ON_CANCELLED_AUCTIONS`).
+      const bidsCount = this.countBidsOnCancelledAuctions || fact.status !== 'CANCELLED'
+      for (const bid of fact.bids ?? []) {
+        if (bidsCount && within(bid.placedAt, period)) activityOf(bid.bidderId).bidder.add(fact.id)
+      }
+      if (fact.buyerId !== undefined && within(fact.buyNowCompletedAt, period)) {
+        activityOf(fact.buyerId).buyer.add(fact.id)
+      }
+    }
+
+    const entries: ActiveUserEntry[] = [...users.entries()].map(([playerId, activity]) => ({
+      playerId,
+      activeAuctions: new Set([...activity.seller, ...activity.bidder, ...activity.buyer]).size,
+      asSeller: activity.seller.size,
+      asBidder: activity.bidder.size,
+      asBuyer: activity.buyer.size,
+    }))
+    const withRole = (role: 'seller' | 'bidder' | 'buyer'): number =>
+      [...users.values()].filter((activity) => activity[role].size > 0).length
+
+    // Orden por unidades de codigo, igual que `collate "C"` en PostgreSQL.
+    const top = entries
+      .sort(
+        (left, right) =>
+          right.activeAuctions - left.activeAuctions ||
+          (left.playerId < right.playerId ? -1 : left.playerId > right.playerId ? 1 : 0),
+      )
+      .slice(0, limit)
+
+    const fees = new Map<number, { auctions: number; feeCredits: number }>()
+    for (const fact of credits) {
+      if (
+        fact.durationHours === undefined ||
+        fact.publicationFeeCredits === undefined ||
+        !within(fact.publishedAt, period)
+      )
+        continue
+      const current = fees.get(fact.durationHours) ?? { auctions: 0, feeCredits: 0 }
+      fees.set(fact.durationHours, {
+        auctions: current.auctions + 1,
+        feeCredits: current.feeCredits + fact.publicationFeeCredits,
+      })
+    }
+
+    const refundOf = (statuses: readonly string[]) => {
+      const matching = credits.filter(
+        (fact) =>
+          fact.cancellation !== undefined &&
+          within(fact.cancelledAt, period) &&
+          statuses.includes(fact.cancellation.walletRefundStatus),
+      )
+      return {
+        count: matching.length,
+        hundredths: matching.reduce(
+          (sum, fact) => sum + Math.round((fact.cancellation?.refundAmountCredits ?? 0) * 100),
+          0,
+        ),
+      }
+    }
+
+    return Promise.resolve({
+      activeUsers: {
+        totalActiveUsers: users.size,
+        byRole: {
+          sellers: withRole('seller'),
+          bidders: withRole('bidder'),
+          buyers: withRole('buyer'),
+        },
+        top,
+      },
+      commissions: {
+        byDuration: [...fees.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(([durationHours, row]) => ({ durationHours, ...row })),
+        refunded: refundOf(['CONFIRMED']),
+        pending: refundOf(['PENDING', 'RETRYABLE']),
+      },
+    })
   }
 
   getAveragePrices(period: MetricsPeriod): Promise<AveragePricesAggregate> {

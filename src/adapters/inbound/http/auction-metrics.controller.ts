@@ -23,6 +23,10 @@ import {
   type ProductRankingsResponse,
 } from '../../../application/use-cases/GetAuctionProductRankings'
 import {
+  GetAuctionUsersAndCommissions,
+  type UsersAndCommissionsResponse,
+} from '../../../application/use-cases/GetAuctionUsersAndCommissions'
+import {
   GetAuctionVolumeAndSuccess,
   type VolumeAndSuccessResponse,
 } from '../../../application/use-cases/GetAuctionVolumeAndSuccess'
@@ -32,6 +36,7 @@ import {
   AuctionMetricsPeriodQueryDto,
   ClosingTimeAndTrendsQueryDto,
   ProductRankingsQueryDto,
+  UsersAndCommissionsQueryDto,
 } from './auction-metrics.dto'
 
 const toMetricsHttpException = (error: unknown): Error => {
@@ -63,6 +68,7 @@ export class AuctionMetricsController {
     private readonly getClosingTimeAndTrends: GetAuctionClosingTimeAndTrends,
     private readonly getProductRankings: GetAuctionProductRankings,
     private readonly getAveragePrices: GetAuctionAveragePrices,
+    private readonly getUsersAndCommissions: GetAuctionUsersAndCommissions,
   ) {}
 
   /** HU-91.2 / CA-01 (contrato §4.1). */
@@ -115,6 +121,29 @@ export class AuctionMetricsController {
   ): Promise<AveragePricesResponse> {
     try {
       return await this.getAveragePrices.execute(query)
+    } catch (error: unknown) {
+      throw toMetricsHttpException(error)
+    }
+  }
+
+  /**
+   * HU-91.5 / CA-04 (contrato §4.4). `playerId` es el `sub` opaco, solo para ADMINISTRATOR
+   * (decision D-2); la comision es solo la tarifa de publicacion, calculada desde Auction.
+   */
+  @Get('users-and-commissions')
+  @ApiOperation({ summary: 'Usuarios activos y comisiones de publicacion' })
+  @ApiOkResponse({
+    description:
+      'Usuarios activos (subastas distintas) y comision de publicacion bruta, reembolsada y neta (hu-91.v1 §4.4).',
+  })
+  @ApiBadRequestResponse({ description: 'INVALID_PERIOD o INVALID_PARAMETER (limit 1-50).' })
+  @ApiUnauthorizedResponse({ description: 'Access token ausente o invalido.' })
+  @ApiForbiddenResponse({ description: 'La identidad no es ADMINISTRATOR ni SUPER_ADMINISTRATOR.' })
+  async usersAndCommissions(
+    @Query() query: UsersAndCommissionsQueryDto,
+  ): Promise<UsersAndCommissionsResponse> {
+    try {
+      return await this.getUsersAndCommissions.execute(query)
     } catch (error: unknown) {
       throw toMetricsHttpException(error)
     }
