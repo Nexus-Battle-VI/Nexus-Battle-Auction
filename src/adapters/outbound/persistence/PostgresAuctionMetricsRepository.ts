@@ -2,6 +2,8 @@ import { sql, type Kysely, type RawBuilder, type Transaction } from 'kysely'
 
 import {
   CLOSE_REASONS,
+  COUNT_BIDS_ON_CANCELLED_AUCTIONS,
+  type AuctionMetricsAdapterOptions,
   type AuctionMetricsRepositoryPort,
   type AveragePricesAggregate,
   type ClosingTimeAggregate,
@@ -10,6 +12,7 @@ import {
   type ProductRankingsAggregate,
   type TrendGranularity,
   type TrendPoint,
+  type UsersAndCommissionsAggregate,
   type VolumeAndSuccessAggregate,
 } from '../../../application/ports/AuctionMetricsRepositoryPort'
 import type { Database } from './schema'
@@ -66,7 +69,15 @@ const bucketEpoch = (column: string, granularity: TrendGranularity): RawBuilder<
  * metricas historicas no cambian por efectos secundarios de una consulta»).
  */
 export class PostgresAuctionMetricsRepository implements AuctionMetricsRepositoryPort {
-  constructor(private readonly db: Kysely<Database>) {}
+  private readonly countBidsOnCancelledAuctions: boolean
+
+  constructor(
+    private readonly db: Kysely<Database>,
+    options: AuctionMetricsAdapterOptions = {},
+  ) {
+    this.countBidsOnCancelledAuctions =
+      options.countBidsOnCancelledAuctions ?? COUNT_BIDS_ON_CANCELLED_AUCTIONS
+  }
 
   private readSnapshot<T>(run: (trx: Tx) => Promise<T>): Promise<T> {
     return this.db
@@ -232,6 +243,149 @@ export class PostgresAuctionMetricsRepository implements AuctionMetricsRepositor
    * - Lista de creditos: `minimum_bid_credits` de TODA publicacion de jugador del periodo.
    * - Dinero real: solo precio de LISTA de las oficiales, agrupado por `currency`.
    */
+  /**
+   * Acciones de mercado de subastas de JUGADOR en el periodo (contrato §3.2): publicar
+   * (`auctions.published_at`), pujar (`auction_bids.placed_at`) y comprar de inmediato
+   * (`auction_buy_now_operations.completed_at`). Es una union de TRES lecturas, nunca un
+   * `JOIN` entre ellas, y cada consulta cuenta `DISTINCT` usuario/subasta: ni varias pujas
+   * del mismo usuario en una subasta, ni un reintento idempotente, suman actividad.
+   *
+   * El unico predicado sobre el ESTADO de la subasta es el de pujas en canceladas
+   * (`COUNT_BIDS_ON_CANCELLED_AUCTIONS`): por defecto cuentan (definicion literal).
+   */
+  private marketActions(period: MetricsPeriod): RawBuilder<unknown> {
+    const bidsOnCancelled = this.countBidsOnCancelledAuctions
+      ? sql``
+      : sql`and not exists (
+          select 1 from auctions c where c.id = b.auction_id and c.status = 'CANCELLED'
+        )`
+    return sql`
+      select a.seller_id as player_id, a.id as auction_id, 'SELLER' as role
+      from auctions a
+      where a.price_kind = 'CREDITS'
+        and a.published_at >= ${period.from} and a.published_at < ${period.to}
+      union all
+      select b.bidder_id, b.auction_id, 'BIDDER'
+      from auction_bids b
+      where b.placed_at >= ${period.from} and b.placed_at < ${period.to}
+        ${bidsOnCancelled}
+      union all
+      select n.buyer_id, n.auction_id, 'BUYER'
+      from auction_buy_now_operations n
+      where n.completed_at >= ${period.from} and n.completed_at < ${period.to}
+    `
+  }
+
+  /**
+   * Usuarios activos y comision de publicacion (contrato §3.2, §3.4 y §4.4).
+   *
+   * Comisiones, todo desde tablas de Auction:
+   * - BRUTO: `publication_fee_credits` de las publicaciones de jugador del periodo
+   *   (`published_at`), por duracion. Una oficial cobra 0 y no es de jugador.
+   * - REEMBOLSADO / PENDIENTE: `auction_cancellations.refund_amount_credits` de las
+   *   cancelaciones del periodo (`cancelled_at`), segun `wallet_refund_status`:
+   *   `CONFIRMED` suma a reembolsado; `PENDING` y `RETRYABLE`, a pendiente. Una
+   *   cancelacion automatica (`NOT_REQUIRED`, reembolso 0) y un reembolso fallido
+   *   (`TERMINAL_ERROR`) no son ninguno de los dos: la comision sigue cobrada.
+   * Los importes de reembolso salen en centesimas enteras (los reembolsos son 0.5 o 1.5).
+   */
+  getUsersAndCommissions(
+    period: MetricsPeriod,
+    limit: number,
+  ): Promise<UsersAndCommissionsAggregate> {
+    return this.readSnapshot(async (trx) => {
+      const totals = await sql<{
+        total: number
+        sellers: number
+        bidders: number
+        buyers: number
+      }>`
+        with acts as (${this.marketActions(period)})
+        select count(distinct player_id)::int as total,
+               (count(distinct player_id) filter (where role = 'SELLER'))::int as sellers,
+               (count(distinct player_id) filter (where role = 'BIDDER'))::int as bidders,
+               (count(distinct player_id) filter (where role = 'BUYER'))::int as buyers
+        from acts
+      `.execute(trx)
+
+      const top = await sql<{
+        player_id: string
+        active_auctions: number
+        as_seller: number
+        as_bidder: number
+        as_buyer: number
+      }>`
+        with acts as (${this.marketActions(period)})
+        select player_id,
+               count(distinct auction_id)::int as active_auctions,
+               (count(distinct auction_id) filter (where role = 'SELLER'))::int as as_seller,
+               (count(distinct auction_id) filter (where role = 'BIDDER'))::int as as_bidder,
+               (count(distinct auction_id) filter (where role = 'BUYER'))::int as as_buyer
+        from acts
+        group by player_id
+        order by active_auctions desc, player_id collate "C" asc
+        limit ${limit}
+      `.execute(trx)
+
+      const fees = await sql<{ duration_hours: number; auctions: number; fee_credits: number }>`
+        select duration_hours,
+               count(*)::int as auctions,
+               (coalesce(sum(publication_fee_credits), 0))::float8 as fee_credits
+        from auctions
+        where price_kind = 'CREDITS'
+          and published_at >= ${period.from} and published_at < ${period.to}
+        group by duration_hours
+        order by duration_hours asc
+      `.execute(trx)
+
+      const refunds = await sql<{ status: string; total: number; hundredths: number }>`
+        select wallet_refund_status as status,
+               count(*)::int as total,
+               (coalesce(sum(round(refund_amount_credits * 100)), 0))::float8 as hundredths
+        from auction_cancellations
+        where cancelled_at >= ${period.from} and cancelled_at < ${period.to}
+          and wallet_refund_status in ('CONFIRMED', 'PENDING', 'RETRYABLE')
+        group by wallet_refund_status
+      `.execute(trx)
+
+      const refundOf = (statuses: readonly string[]) => {
+        const rows = refunds.rows.filter((row) => statuses.includes(row.status))
+        return {
+          count: rows.reduce((sum, row) => sum + row.total, 0),
+          hundredths: rows.reduce((sum, row) => sum + row.hundredths, 0),
+        }
+      }
+      const total = totals.rows[0]
+
+      return {
+        activeUsers: {
+          totalActiveUsers: total?.total ?? 0,
+          byRole: {
+            sellers: total?.sellers ?? 0,
+            bidders: total?.bidders ?? 0,
+            buyers: total?.buyers ?? 0,
+          },
+          top: top.rows.map((row) => ({
+            playerId: row.player_id,
+            activeAuctions: row.active_auctions,
+            asSeller: row.as_seller,
+            asBidder: row.as_bidder,
+            asBuyer: row.as_buyer,
+          })),
+        },
+        commissions: {
+          byDuration: fees.rows.map((row) => ({
+            durationHours: row.duration_hours,
+            auctions: row.auctions,
+            feeCredits: row.fee_credits,
+          })),
+          refunded: refundOf(['CONFIRMED']),
+          pending: refundOf(['PENDING', 'RETRYABLE']),
+        },
+      }
+    })
+  }
+
   getAveragePrices(period: MetricsPeriod): Promise<AveragePricesAggregate> {
     return this.readSnapshot(async (trx) => {
       const byReason = await sql<{
