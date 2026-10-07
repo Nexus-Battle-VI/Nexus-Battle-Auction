@@ -8,7 +8,7 @@
 ## 1. Principio
 
 El backend es la fuente de verdad. El canal realtime transporta **señales de invalidación**, no estado
-autoritativo: dice *qué subasta cambió y en qué revisión*, y el cliente recupera el estado con las
+autoritativo: dice _qué subasta cambió y en qué revisión_, y el cliente recupera el estado con las
 consultas HTTP existentes (`GET /v1/auctions`, `GET /v1/auctions/:auctionId`). Consecuencias:
 
 - Un evento perdido, tardío o duplicado no puede dejar un valor imposible: la siguiente lectura HTTP manda (CA-06).
@@ -29,9 +29,9 @@ Se **reutiliza ADR-020** en lugar de abrir un segundo mecanismo realtime en la p
 
 **Cambio respecto al primer borrador:** se había recomendado SSE. Se descarta porque ADR-020 ya aceptó WebSocket, resolvió la autenticación (el problema de `EventSource` sin cabecera `Authorization`) y descartó expresamente SSE; mantener dos transportes en la plataforma costaría más que lo que SSE ahorra.
 
-**Qué se reutiliza y qué no de ADR-020:** el transporte, el ticket y el latido (25 s). No se reutiliza la parte de *comandos*: aquí el canal es de **solo lectura**; pujar, comprar y cancelar siguen siendo HTTP transaccional. El cliente puede enviar únicamente `auth`, `subscribe` y `unsubscribe`.
+**Qué se reutiliza y qué no de ADR-020:** el transporte, el ticket y el latido (25 s). No se reutiliza la parte de _comandos_: aquí el canal es de **solo lectura**; pujar, comprar y cancelar siguen siendo HTTP transaccional. El cliente puede enviar únicamente `auth`, `subscribe` y `unsubscribe`.
 
-**Obligación formal:** ADR-020 pide un ADR que extienda el esquema a Auction. Hay que redactarlo en `Nexus-Battle-Infrastructure` (ver §8, seguimiento S-1). Este contrato es independiente del transporte, así que no se bloquea por ello.
+**Obligación formal:** ADR-020 pide un ADR que extienda el esquema a Auction. Está redactado como ADR-024 (`Proposed`) en [Nexus-Battle-Infrastructure#208](https://github.com/Nexus-Battle-VI/Nexus-Battle-Infrastructure/pull/208) (ver §8, seguimiento S-1). Este contrato es independiente del transporte, así que no se bloquea por ello.
 
 ## 3. Mensaje
 
@@ -40,12 +40,13 @@ Un solo tipo de mensaje de aplicación, con envoltura mínima:
 ```ts
 interface AuctionRealtimeSignalV1 {
   readonly signalVersion: 1
-  readonly signalId: string          // `auction:{auctionId}:r{revision}` — idempotente y deduplicable
+  readonly signalId: string // `auction:{auctionId}:r{revision}` — idempotente y deduplicable
   readonly auctionId: string
-  readonly revision: number          // entero creciente por subasta (ver D-3)
+  readonly revision: number // entero creciente por subasta (ver D-3)
   readonly reason: 'BID_ACCEPTED' | 'BOUGHT_NOW' | 'SETTLED' | 'CANCELLED' | 'PUBLISHED'
-  readonly occurredAt: string        // ISO-8601, informativo; NUNCA se usa para ordenar
-  readonly summary?: {               // opcional: pista para pintar antes del refetch
+  readonly occurredAt: string // ISO-8601, informativo; NUNCA se usa para ordenar
+  readonly summary?: {
+    // opcional: pista para pintar antes del refetch
     readonly status: 'ACTIVE' | 'FINISHED' | 'SOLD' | 'CANCELLED'
     readonly currentBidCredits: number | null
     readonly bidCount: number
@@ -63,23 +64,23 @@ Reglas:
 
 ### Mapeo desde lo que ya existe
 
-| `reason` | Origen en Auction | Estado |
-|---|---|---|
-| `PUBLISHED` | `AuctionPublishedEventV1` | existe |
-| `BID_ACCEPTED` | `AuctionBidAcceptedEventV1` (tras completar créditos) | existe; no trae `bidCount` |
-| `SETTLED` | `AuctionSettledEventV1` | existe |
-| `CANCELLED` | `AuctionCancelledEventV1` | existe |
-| `BOUGHT_NOW` | — | **no existe**: hay endpoint `buy-now` pero no evento de dominio (TASK-34.2) |
+| `reason`       | Origen en Auction                                     | Estado                                                                      |
+| -------------- | ----------------------------------------------------- | --------------------------------------------------------------------------- |
+| `PUBLISHED`    | `AuctionPublishedEventV1`                             | existe                                                                      |
+| `BID_ACCEPTED` | `AuctionBidAcceptedEventV1` (tras completar créditos) | existe; no trae `bidCount`                                                  |
+| `SETTLED`      | `AuctionSettledEventV1`                               | existe                                                                      |
+| `CANCELLED`    | `AuctionCancelledEventV1`                             | existe                                                                      |
+| `BOUGHT_NOW`   | —                                                     | **no existe**: hay endpoint `buy-now` pero no evento de dominio (TASK-34.2) |
 
 La señal se emite **después del commit** de la transacción que cambia la subasta, nunca antes.
 El mecanismo de emisión (outbox o hook post-commit) queda para TASK-34.2.
 
 ## 4. Canales y suscripción
 
-| Canal | Quién se suscribe | Recibe |
-|---|---|---|
-| `auctions/{auctionId}` | Detalle de una subasta, panel de puja | señales de esa subasta |
-| `auctions` (agregado) | Marketplace | señales de cualquier subasta, solo con `reason`, `auctionId`, `revision` (sin `summary`) |
+| Canal                  | Quién se suscribe                     | Recibe                                                                                   |
+| ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `auctions/{auctionId}` | Detalle de una subasta, panel de puja | señales de esa subasta                                                                   |
+| `auctions` (agregado)  | Marketplace                           | señales de cualquier subasta, solo con `reason`, `auctionId`, `revision` (sin `summary`) |
 
 - El cliente se suscribe con `{"type":"subscribe","channel":"auctions/{auctionId}"}` o `"auctions"`, y se baja con `unsubscribe`. Máximo 20 suscripciones por conexión.
 - Roles: los mismos que ya exigen las lecturas HTTP (`Player`, `GameMaster`). Quien no pueda hacer `GET :auctionId` no puede suscribirse a su canal.
@@ -88,7 +89,7 @@ El mecanismo de emisión (outbox o hook post-commit) queda para TASK-34.2.
 
 ## 5. Reconexión (CA-03)
 
-1. El cliente detecta la caída (cierre del stream o ausencia de *heartbeat*).
+1. El cliente detecta la caída (cierre del stream o ausencia de _heartbeat_).
 2. Reconecta con backoff exponencial con jitter, tope sugerido 30 s, y repite el flujo de ticket (cada conexión necesita uno nuevo).
 3. Al reabrir, **invalida todas las consultas de subasta actualmente observadas** (no todo el marketplace guardado).
 4. Mientras está desconectado, la UI no presenta el valor como «en vivo»: debe indicarlo (estado de conexión visible).
@@ -109,14 +110,14 @@ Un interruptor de configuración del servidor (`AUCTION_REALTIME_ENABLED`, por d
 
 Resueltas por recomendación, tras revisar `Nexus-Battle-Infrastructure` (`origin/develop`):
 
-| Id | Decisión | Resolución | Fundamento |
-|---|---|---|---|
-| D-1 | Transporte | **WebSocket** (`@nestjs/platform-ws`), no SSE | ADR-020 aceptado; un solo mecanismo en la plataforma |
-| D-2 | Autenticación | **Ticket de un solo uso** (30 s) + mensaje `auth` | ADR-020; JWT nunca en la URL |
-| D-3 | Origen de `revision` | Columna **`revision bigint`** en la subasta, incrementada en la misma transacción que cualquier cambio observable | Se difunde **después** de persistir (patrón de ADR-020). Derivarla de `bidCount` no cubre cancelación ni compra inmediata. **Requiere migración 021** |
-| D-4 | Timeouts de proxy | **Sin trabajo de infraestructura** | La entrada es Caddy en la propia EC2, sin ALB ni API Gateway (ADR-007, ADR-010). El `Caddyfile` no define timeouts de lectura ni de transporte que corten conexiones largas, y el latido de 25 s cubre cualquier intermediario. Verificar en TASK-34.5 con una conexión de más de 60 s |
-| D-5 | Réplicas y *fan-out* | **Difusión en memoria del proceso**, una sola réplica | `compose/nodes/app.yml` no declara réplicas ni escalado: `auction` es un único contenedor (`mem_limit: 160m`) en el nodo `app` (ADR-011, topología T2). Mismo coste que acepta ADR-020 para Combat |
-| D-6 | Panel personal (HU-89) | Fuera de este contrato | Se evalúa en TASK-34.4 |
+| Id  | Decisión               | Resolución                                                                                                        | Fundamento                                                                                                                                                                                                                                                                             |
+| --- | ---------------------- | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D-1 | Transporte             | **WebSocket** (`@nestjs/platform-ws`), no SSE                                                                     | ADR-020 aceptado; un solo mecanismo en la plataforma                                                                                                                                                                                                                                   |
+| D-2 | Autenticación          | **Ticket de un solo uso** (30 s) + mensaje `auth`                                                                 | ADR-020; JWT nunca en la URL                                                                                                                                                                                                                                                           |
+| D-3 | Origen de `revision`   | Columna **`revision bigint`** en la subasta, incrementada en la misma transacción que cualquier cambio observable | Se difunde **después** de persistir (patrón de ADR-020). Derivarla de `bidCount` no cubre cancelación ni compra inmediata. **Requiere migración 021**                                                                                                                                  |
+| D-4 | Timeouts de proxy      | **Sin trabajo de infraestructura**                                                                                | La entrada es Caddy en la propia EC2, sin ALB ni API Gateway (ADR-007, ADR-010). El `Caddyfile` no define timeouts de lectura ni de transporte que corten conexiones largas, y el latido de 25 s cubre cualquier intermediario. Verificar en TASK-34.5 con una conexión de más de 60 s |
+| D-5 | Réplicas y _fan-out_   | **Difusión en memoria del proceso**, una sola réplica                                                             | `compose/nodes/app.yml` no declara réplicas ni escalado: `auction` es un único contenedor (`mem_limit: 160m`) en el nodo `app` (ADR-011, topología T2). Mismo coste que acepta ADR-020 para Combat                                                                                     |
+| D-6 | Panel personal (HU-89) | Fuera de este contrato                                                                                            | Se evalúa en TASK-34.4                                                                                                                                                                                                                                                                 |
 
 ### Consecuencias asumidas
 
@@ -126,20 +127,58 @@ Resueltas por recomendación, tras revisar `Nexus-Battle-Infrastructure` (`origi
 
 ### Seguimiento
 
-| Id | Acción | Dónde |
-|---|---|---|
-| S-1 | Redactar el ADR que extiende ADR-020 a Auction (WebSocket de solo lectura, señales de invalidación, una réplica) | `Nexus-Battle-Infrastructure/docs/adr/` |
-| S-2 | Migración 021: `revision bigint not null default 0` en la tabla de subastas | TASK-34.2 |
-| S-3 | Evento de dominio para compra inmediata (`BOUGHT_NOW`) | TASK-34.2 |
-| S-4 | Documentar `/api/v1/auctions/realtime` en `docs/contracts` de Infrastructure | TASK-34.2 |
+| Id  | Acción                                                                                                                                                   | Dónde                                   |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| S-1 | ✅ Redactado (ADR-024, pendiente de aceptación): el ADR que extiende ADR-020 a Auction (WebSocket de solo lectura, señales de invalidación, una réplica) | `Nexus-Battle-Infrastructure/docs/adr/` |
+| S-2 | Migración 021: `revision bigint not null default 0` en la tabla de subastas                                                                              | TASK-34.2                               |
+| S-3 | Evento de dominio para compra inmediata (`BOUGHT_NOW`)                                                                                                   | TASK-34.2                               |
+| S-4 | Documentar `/api/v1/auctions/realtime` en `docs/contracts` de Infrastructure                                                                             | TASK-34.2                               |
 
 ## 9. Trazabilidad con los criterios de aceptación
 
-| CA | Dónde se cubre |
-|---|---|
-| CA-01 puja entre sesiones | §3 `BID_ACCEPTED` + §4 canal por subasta |
-| CA-02 aislamiento | §3 regla 1, §4 |
-| CA-03 reconexión | §5 |
-| CA-04 cambio de estado | §3 `reason` terminales, §6 |
-| CA-05 caché consistente | §4 (invalidar, no parchear) |
-| CA-06 autoridad del backend | §1, §3 reglas 2 y 3 |
+| CA                          | Dónde se cubre                           |
+| --------------------------- | ---------------------------------------- |
+| CA-01 puja entre sesiones   | §3 `BID_ACCEPTED` + §4 canal por subasta |
+| CA-02 aislamiento           | §3 regla 1, §4                           |
+| CA-03 reconexión            | §5                                       |
+| CA-04 cambio de estado      | §3 `reason` terminales, §6               |
+| CA-05 caché consistente     | §4 (invalidar, no parchear)              |
+| CA-06 autoridad del backend | §1, §3 reglas 2 y 3                      |
+
+## 10. Diagrama de publicación, suscripción y reconexión
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Sesión A (Web)
+    participant B as Sesión B (Web)
+    participant C as Caddy
+    participant S as Auction
+    participant D as PostgreSQL
+
+    Note over A,S: Conexión (cada una necesita su ticket)
+    B->>C: POST /api/v1/auctions/realtime/tickets (Bearer JWT)
+    C->>S: reenvía
+    S-->>B: ticket opaco (un uso, 30 s)
+    B->>S: WebSocket abierto, mensaje auth con ticket
+    B->>S: subscribe auctions/{id}
+    A->>S: (mismo flujo) subscribe auctions/{id}
+
+    Note over A,D: Puja confirmada (comando HTTP transaccional)
+    A->>S: POST /v1/auctions/{id}/bids
+    S->>D: transacción: puja + revision = revision + 1
+    D-->>S: commit
+    S-->>A: 201 (respuesta HTTP)
+    S-->>B: señal BID_ACCEPTED (auctionId, revision)
+    S-->>A: señal BID_ACCEPTED (auctionId, revision)
+    B->>S: GET /v1/auctions/{id}
+    S-->>B: estado autoritativo (prevalece sobre summary)
+
+    Note over B,S: Reconexión
+    S--xB: conexión caída (red, reinicio o despliegue)
+    B->>B: backoff exponencial con jitter
+    B->>S: nuevo ticket y auth
+    B->>S: subscribe de lo observado
+    B->>S: GET de las consultas observadas (refetch)
+    S-->>B: estado autoritativo vigente
+```
