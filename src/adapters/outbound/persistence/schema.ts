@@ -48,6 +48,11 @@ export interface AuctionTable {
   final_amount_credits: string | number | null
   /** HU-90: no nulo si y solo si `status = 'CANCELLED'`. */
   cancelled_at: Date | null
+  /**
+   * EN-034: lo mantienen los triggers de la migracion 021, nunca el codigo. bigint llega como
+   * texto desde `pg`; no se inserta ni se actualiza desde la aplicacion.
+   */
+  revision: ColumnType<string, never, never>
   created_at: GeneratedTimestamp
 }
 
