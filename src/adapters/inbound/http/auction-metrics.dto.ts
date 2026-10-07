@@ -27,6 +27,32 @@ export class AuctionMetricsPeriodQueryDto {
   to?: string
 }
 
+export class UsersAndCommissionsQueryDto extends AuctionMetricsPeriodQueryDto {
+  @ApiPropertyOptional({
+    default: 10,
+    minimum: 1,
+    maximum: 50,
+    description: 'Cantidad de usuarios del ranking (1-50). Se valida en el caso de uso.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(8)
+  limit?: string
+}
+
+export class ProductRankingsQueryDto extends AuctionMetricsPeriodQueryDto {
+  @ApiPropertyOptional({
+    default: 10,
+    minimum: 1,
+    maximum: 50,
+    description: 'Cantidad de productos por ranking (1-50). Se valida en el caso de uso.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(8)
+  limit?: string
+}
+
 export class ClosingTimeAndTrendsQueryDto extends AuctionMetricsPeriodQueryDto {
   @ApiPropertyOptional({
     enum: ['DAY', 'WEEK', 'MONTH'],

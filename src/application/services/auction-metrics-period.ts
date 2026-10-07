@@ -128,6 +128,22 @@ export const bucketStartsFor = (period: MetricsPeriod, granularity: TrendGranula
   return starts
 }
 
+const DEFAULT_LIMIT = 10
+const MAX_LIMIT = 50
+
+/** `limit` del contrato: entero 1..50, defecto 10. Cualquier otra cosa es `INVALID_PARAMETER`. */
+export const resolveLimit = (raw: string | undefined): number => {
+  if (raw === undefined) return DEFAULT_LIMIT
+  const limit = /^\d{1,3}$/.test(raw) ? Number(raw) : Number.NaN
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
+    throw new AuctionMetricsQueryError(
+      'INVALID_PARAMETER',
+      `limit debe ser un entero entre 1 y ${String(MAX_LIMIT)}.`,
+    )
+  }
+  return limit
+}
+
 export const periodEnvelope = (
   period: MetricsPeriod,
   asOf: Date,
@@ -154,6 +170,21 @@ export const periodEnvelope = (
 /** Segundos enteros (half-up); `null` se conserva. */
 export const roundSeconds = (value: number | null): number | null =>
   value === null ? null : Math.round(value)
+
+/**
+ * `sum / count` redondeado HALF-UP a `decimals` decimales, con aritmetica entera
+ * exacta (`BigInt`): `Math.round(x * 100) / 100` falla en casos como 1.005 (da
+ * 1 en vez de 1.01) porque 1.005 no es representable en binario. `null` sin muestra
+ * (nunca 0: un promedio de nada no es cero). Solo para `sum >= 0` y `count > 0`.
+ */
+export const averageHalfUp = (sum: number, count: number, decimals: number): number | null => {
+  if (count === 0) return null
+  const factor = 10n ** BigInt(decimals)
+  const numerator = BigInt(Math.round(sum)) * factor
+  const denominator = BigInt(count)
+  const rounded = (2n * numerator + denominator) / (2n * denominator)
+  return Number(rounded) / Number(factor)
+}
 
 /** Razon `numerador / denominador`, o `null` si no hay denominador (nunca 0). */
 export const ratioOrNull = (numerator: number, denominator: number): number | null =>
