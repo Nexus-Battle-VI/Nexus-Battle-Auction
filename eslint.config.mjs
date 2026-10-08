@@ -11,7 +11,8 @@ import prettier from 'eslint-config-prettier'
  * de forma directa. Vease ADR-002 en Nexus-Battle-Infrastructure.
  */
 export default defineConfig([
-  globalIgnores(['dist/**', 'coverage/**', 'node_modules/**']),
+  // scripts/: utilidades manuales de verificacion (JavaScript sin tipos), fuera del proyecto TS.
+  globalIgnores(['dist/**', 'coverage/**', 'node_modules/**', 'scripts/**']),
 
   js.configs.recommended,
   tseslint.configs.strictTypeChecked,
