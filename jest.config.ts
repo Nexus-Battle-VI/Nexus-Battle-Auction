@@ -37,6 +37,7 @@ const config: Config = {
     '!src/adapters/outbound/persistence/Postgres*.ts',
     '!src/adapters/outbound/persistence/schema.ts',
     '!src/adapters/outbound/persistence/migrations/**',
+    '!src/adapters/outbound/realtime/PostgresAuctionRealtimeListener.ts',
     '!src/infrastructure/persistence/**',
   ],
   coverageDirectory: 'coverage',

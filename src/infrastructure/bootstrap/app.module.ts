@@ -11,7 +11,7 @@ import { PostgresAuctionConfirmationOutboxRepository } from '../../adapters/outb
 import { HttpAuctionConfirmationEventPublisher } from '../../adapters/outbound/http/HttpAuctionConfirmationEventPublisher'
 import { AuctionConfirmationDispatchScheduler } from '../scheduling/AuctionConfirmationDispatchScheduler'
 
-import { Module, type CanActivate } from '@nestjs/common'
+import { Module, type CanActivate, type Provider } from '@nestjs/common'
 import { APP_GUARD, Reflector } from '@nestjs/core'
 import type { Kysely } from 'kysely'
 
@@ -86,6 +86,28 @@ import { PostgresBidCreditOperationReader } from '../../adapters/outbound/persis
 import { PostgresEarlyClosureNotificationRepository } from '../../adapters/outbound/persistence/PostgresEarlyClosureNotificationRepository'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 import { SystemClock } from '../../adapters/outbound/system/SystemClock'
+import { CryptoRealtimeTicketCodec } from '../../adapters/outbound/system/CryptoRealtimeTicketCodec'
+import { InMemoryRealtimeTicketStore } from '../../adapters/outbound/realtime/InMemoryRealtimeTicketStore'
+import { PostgresAuctionRealtimeListener } from '../../adapters/outbound/realtime/PostgresAuctionRealtimeListener'
+import { RealtimeTicketController } from '../../adapters/inbound/http/realtime-ticket.controller'
+import { AuctionRealtimeGateway } from '../../adapters/inbound/ws/AuctionRealtimeGateway'
+import {
+  AUCTION_REALTIME_HUB,
+  CONSUME_REALTIME_TICKET,
+  ISSUE_REALTIME_TICKET,
+  REALTIME_GATEWAY_LOGGER,
+} from '../../adapters/inbound/ws/realtime.tokens'
+import {
+  REALTIME_TICKET_CODEC,
+  REALTIME_TICKET_STORE,
+  type RealtimeTicketCodecPort,
+  type RealtimeTicketStorePort,
+} from '../../application/ports/RealtimeTicketPort'
+import { AuctionRealtimeHub } from '../../application/services/AuctionRealtimeHub'
+import {
+  ConsumeRealtimeTicket,
+  IssueRealtimeTicket,
+} from '../../application/use-cases/RealtimeTickets'
 import { UuidGenerator } from '../../adapters/outbound/system/UuidGenerator'
 import {
   AUCTION_REPOSITORY,
@@ -235,7 +257,13 @@ import { EarlyClosureNotificationService } from '../../application/services/Earl
 import { BuyNowPendingClaimRegistrationService } from '../../application/services/BuyNowPendingClaimRegistrationService'
 import { RetryBuyNowPendingClaims } from '../../application/use-cases/RetryBuyNowPendingClaims'
 import { TransactionProcessingService } from '../../application/services/TransactionProcessingService'
-import { AuthMode, loadConfig, PersistenceDriver, type AppConfig } from '../config/env'
+import {
+  AuthMode,
+  isAuctionRealtimeEnabled,
+  loadConfig,
+  PersistenceDriver,
+  type AppConfig,
+} from '../config/env'
 import type { ReadinessCheck, VersionReport } from '../health/health'
 import { describeError } from '../observability/describe-error'
 import { createLogger, type Logger } from '../observability/logger'
@@ -319,17 +347,81 @@ export const createWatchlistEventPublisher = (
         now: () => clock.now(),
       })
 
+/**
+ * EN-034 (ADR-024). El WebSocket de senales y su endpoint de tickets se registran SOLO con
+ * `AUCTION_REALTIME_ENABLED=true`: apagado, no hay punto de entrada ni conexion de escucha, y
+ * Web cae a sondeo HTTP. `@Module` es estatico, de modo que la decision se toma al cargar el
+ * modulo con la misma lectura que valida `loadConfig`.
+ */
+const auctionRealtimeEnabled = isAuctionRealtimeEnabled(process.env)
+
+const auctionRealtimeProviders: Provider[] = auctionRealtimeEnabled
+  ? [
+      { provide: REALTIME_TICKET_CODEC, useFactory: () => new CryptoRealtimeTicketCodec() },
+      { provide: REALTIME_TICKET_STORE, useFactory: () => new InMemoryRealtimeTicketStore() },
+      {
+        provide: ISSUE_REALTIME_TICKET,
+        useFactory: (
+          codec: RealtimeTicketCodecPort,
+          store: RealtimeTicketStorePort,
+          clock: ClockPort,
+        ) => new IssueRealtimeTicket(codec, store, clock),
+        inject: [REALTIME_TICKET_CODEC, REALTIME_TICKET_STORE, CLOCK],
+      },
+      {
+        provide: CONSUME_REALTIME_TICKET,
+        useFactory: (
+          codec: RealtimeTicketCodecPort,
+          store: RealtimeTicketStorePort,
+          clock: ClockPort,
+        ) => new ConsumeRealtimeTicket(codec, store, clock),
+        inject: [REALTIME_TICKET_CODEC, REALTIME_TICKET_STORE, CLOCK],
+      },
+      { provide: AUCTION_REALTIME_HUB, useFactory: () => new AuctionRealtimeHub() },
+      { provide: REALTIME_GATEWAY_LOGGER, useExisting: LOGGER },
+      AuctionRealtimeGateway,
+      {
+        provide: PostgresAuctionRealtimeListener,
+        useFactory: (
+          config: AppConfig,
+          hub: AuctionRealtimeHub,
+          logger: Logger,
+        ): PostgresAuctionRealtimeListener => {
+          if (config.databaseUrl === null) {
+            throw new Error('AUCTION_REALTIME_ENABLED requiere DATABASE_URL.')
+          }
+          return new PostgresAuctionRealtimeListener(
+            { connectionString: config.databaseUrl },
+            {
+              onSignal: (signal) => {
+                hub.publish(signal)
+              },
+              onResync: () => {
+                hub.resyncAll()
+              },
+            },
+            logger,
+          )
+        },
+        inject: [APP_CONFIG, AUCTION_REALTIME_HUB, LOGGER],
+      },
+    ]
+  : []
+
 @Module({
   // La ruta estatica /watchlist debe registrarse antes de /:auctionId.
   controllers: [
     HealthController,
     WatchlistController,
+    // Ruta estatica `realtime/tickets`: antes de las rutas con `:auctionId`.
+    ...(auctionRealtimeEnabled ? [RealtimeTicketController] : []),
     AuctionController,
     AuctionMetricsController,
     OfficialAuctionController,
   ],
 
   providers: [
+    ...auctionRealtimeProviders,
     {
       provide: AUCTION_CONFIRMATION_OUTBOX_REPOSITORY,
       useFactory: (

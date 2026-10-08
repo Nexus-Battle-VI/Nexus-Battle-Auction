@@ -1140,7 +1140,10 @@ describe('Cancelacion automatica contra PostgreSQL real (HU-90, CA-05)', () => {
 
         const after = await migrateToLatest(upgradeDb, MIGRATIONS)
         expect(after.error).toBeUndefined()
-        expect(after.applied).toEqual(['020-add-automatic-auction-cancellation'])
+        expect(after.applied).toEqual([
+          '020-add-automatic-auction-cancellation',
+          '021-add-auction-realtime-revision',
+        ])
 
         const preserved = await sql<{ origin: string; trigger_reference_id: string | null }>`
           select origin, trigger_reference_id from auction_cancellations

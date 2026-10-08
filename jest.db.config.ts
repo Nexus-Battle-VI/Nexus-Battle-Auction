@@ -32,6 +32,10 @@ const config: Config = {
     // HU-67.4 mide el DDL de puja automatica, ejercitado con up/down contra PostgreSQL.
     'src/adapters/outbound/persistence/migrations/006-create-auction-auto-bids.ts',
     'src/adapters/outbound/persistence/migrations/011-create-auction-settlement-work.ts',
+    // EN-034: triggers y revision, ejercitados con up/down contra PostgreSQL.
+    'src/adapters/outbound/persistence/migrations/021-add-auction-realtime-revision.ts',
+    // EN-034: oyente de LISTEN, que solo tiene sentido contra un motor real.
+    'src/adapters/outbound/realtime/PostgresAuctionRealtimeListener.ts',
     'src/infrastructure/persistence/**/*.ts',
     '!src/infrastructure/persistence/migrate.ts',
   ],
