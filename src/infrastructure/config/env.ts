@@ -80,6 +80,13 @@ export interface AppConfig {
   readonly notificationsBaseUrl: string | null
 
   readonly notificationsTimeoutMs: number
+  /**
+   * EN-034 (ADR-024). Activa el WebSocket de senales de Subasta y su endpoint de tickets. Apagado
+   * por defecto: con el interruptor apagado no se registra ningun punto de entrada ni se abre
+   * ninguna conexion de escucha, y el cliente cae a sondeo HTTP. Requiere PostgreSQL, porque las
+   * senales nacen de los triggers de la migracion 021.
+   */
+  readonly auctionRealtimeEnabled: boolean
   readonly auctionConfirmationDispatchEnabled: boolean
   readonly auctionConfirmationDispatchBatchSize: number
   readonly auctionConfirmationDispatchPollIntervalMs: number
@@ -230,6 +237,14 @@ const readBoolean = (env: RawEnv, key: string, fallback: boolean): boolean => {
  *
  * Falla de inmediato ante una configuracion invalida.
  */
+/**
+ * `AUCTION_REALTIME_ENABLED` leido de forma aislada. El decorador `@Module` es estatico y decide
+ * al cargar el modulo si registra el WebSocket y su endpoint de tickets, antes de que exista el
+ * contenedor de DI; `loadConfig` valida el mismo valor con las mismas reglas.
+ */
+export const isAuctionRealtimeEnabled = (env: RawEnv): boolean =>
+  readBoolean(env, 'AUCTION_REALTIME_ENABLED', false)
+
 export const loadConfig = (env: RawEnv): AppConfig => {
   const nodeEnv = readEnum(
     env,
@@ -289,6 +304,13 @@ export const loadConfig = (env: RawEnv): AppConfig => {
   const notificationsBaseUrl = readString(env, 'NOTIFICATIONS_BASE_URL', '')
 
   const notificationsTimeoutMs = readInteger(env, 'NOTIFICATIONS_TIMEOUT_MS', 3_000, 1, 60_000)
+
+  const auctionRealtimeEnabled = isAuctionRealtimeEnabled(env)
+  if (auctionRealtimeEnabled && persistenceDriver !== PersistenceDriver.Postgres) {
+    throw new ConfigurationError(
+      'PERSISTENCE_DRIVER debe ser postgres cuando AUCTION_REALTIME_ENABLED=true: las senales nacen de los triggers de PostgreSQL.',
+    )
+  }
 
   const auctionConfirmationDispatchEnabled = readBoolean(
     env,
@@ -682,6 +704,7 @@ export const loadConfig = (env: RawEnv): AppConfig => {
     notificationsBaseUrl: notificationsBaseUrl === '' ? null : notificationsBaseUrl,
 
     notificationsTimeoutMs,
+    auctionRealtimeEnabled,
     auctionConfirmationDispatchEnabled,
     auctionConfirmationDispatchBatchSize,
     auctionConfirmationDispatchPollIntervalMs,

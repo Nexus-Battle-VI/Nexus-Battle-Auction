@@ -1,6 +1,7 @@
 import 'reflect-metadata'
 
 import { NestFactory } from '@nestjs/core'
+import { WsAdapter } from '@nestjs/platform-ws'
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger'
 
 import { createValidationPipe } from './adapters/inbound/http/validation.pipe'
@@ -25,6 +26,11 @@ const bootstrap = async (): Promise<void> => {
 
   app.enableShutdownHooks()
 
+  // EN-034 (ADR-024): WebSocket nativo (`ws`), nunca Socket.IO. Solo con la funcion activada.
+  if (config.auctionRealtimeEnabled) {
+    app.useWebSocketAdapter(new WsAdapter(app))
+  }
+
   if (config.swaggerEnabled) {
     const document = SwaggerModule.createDocument(
       app,
@@ -48,6 +54,7 @@ const bootstrap = async (): Promise<void> => {
     persistenceDriver: config.persistenceDriver,
     authMode: config.authMode,
     swagger: config.swaggerEnabled,
+    realtime: config.auctionRealtimeEnabled,
   })
 }
 
