@@ -30,6 +30,7 @@ import * as createAuctionCancellation from '../../adapters/outbound/persistence/
 import * as addAuctionCancellationReconcilerLease from '../../adapters/outbound/persistence/migrations/018-add-auction-cancellation-reconciler-lease'
 import * as addAuctionMetricsIndexes from '../../adapters/outbound/persistence/migrations/019-add-auction-metrics-indexes'
 import * as addAutomaticAuctionCancellation from '../../adapters/outbound/persistence/migrations/020-add-automatic-auction-cancellation'
+import * as addAuctionRealtimeRevision from '../../adapters/outbound/persistence/migrations/021-add-auction-realtime-revision'
 import type { Database } from '../../adapters/outbound/persistence/schema'
 
 export interface DatabaseOptions {
@@ -115,6 +116,8 @@ export const MIGRATIONS: Readonly<Record<string, Migration>> = {
   '018-add-auction-cancellation-reconciler-lease': addAuctionCancellationReconcilerLease,
   '019-add-auction-metrics-indexes': addAuctionMetricsIndexes,
   '020-add-automatic-auction-cancellation': addAutomaticAuctionCancellation,
+  // EN-034: revision por subasta y aviso al confirmar (pg_notify).
+  '021-add-auction-realtime-revision': addAuctionRealtimeRevision,
 }
 
 export interface MigrationOutcome {

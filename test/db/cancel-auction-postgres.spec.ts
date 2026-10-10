@@ -336,6 +336,7 @@ describe('Cancelacion manual contra PostgreSQL real (HU-90)', () => {
         '018-add-auction-cancellation-reconciler-lease',
         '019-add-auction-metrics-indexes',
         '020-add-automatic-auction-cancellation',
+        '021-add-auction-realtime-revision',
       ])
 
       const preserved = await sql<{
