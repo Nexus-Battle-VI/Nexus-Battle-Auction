@@ -17,6 +17,7 @@ import type { Kysely } from 'kysely'
 
 import { AuctionController } from '../../adapters/inbound/http/auction.controller'
 import { AuctionMetricsController } from '../../adapters/inbound/http/auction-metrics.controller'
+import { AuctionMetricsSummaryController } from '../../adapters/inbound/http/auction-metrics-summary.controller'
 import { OfficialAuctionController } from '../../adapters/inbound/http/official-auction.controller'
 import { AnonymousIdentityGuard } from '../../adapters/inbound/http/auth/anonymous.guard'
 import { InternalServiceGuard } from '../../adapters/inbound/http/auth/internal-service.guard'
@@ -226,6 +227,7 @@ import { GetPendingClaims } from '../../application/use-cases/GetPendingClaims'
 import { GetAuctionAveragePrices } from '../../application/use-cases/GetAuctionAveragePrices'
 import { GetAuctionClosingTimeAndTrends } from '../../application/use-cases/GetAuctionClosingTimeAndTrends'
 import { GetAuctionProductRankings } from '../../application/use-cases/GetAuctionProductRankings'
+import { GetAuctionMetricsSummary } from '../../application/use-cases/GetAuctionMetricsSummary'
 import { GetAuctionUsersAndCommissions } from '../../application/use-cases/GetAuctionUsersAndCommissions'
 import { GetAuctionVolumeAndSuccess } from '../../application/use-cases/GetAuctionVolumeAndSuccess'
 import { GetMyAuctionActivity } from '../../application/use-cases/GetMyAuctionActivity'
@@ -417,6 +419,7 @@ const auctionRealtimeProviders: Provider[] = auctionRealtimeEnabled
     ...(auctionRealtimeEnabled ? [RealtimeTicketController] : []),
     AuctionController,
     AuctionMetricsController,
+    AuctionMetricsSummaryController,
     OfficialAuctionController,
   ],
 
@@ -815,6 +818,32 @@ const auctionRealtimeProviders: Provider[] = auctionRealtimeEnabled
           logger,
         }),
       inject: [APP_CONFIG, LOGGER],
+    },
+
+    {
+      // HU-91.6: consolidado; cada seccion fallida se registra sin filtrar el detalle al cliente.
+      provide: GetAuctionMetricsSummary,
+      useFactory: (
+        volume: GetAuctionVolumeAndSuccess,
+        closing: GetAuctionClosingTimeAndTrends,
+        rankings: GetAuctionProductRankings,
+        prices: GetAuctionAveragePrices,
+        users: GetAuctionUsersAndCommissions,
+        clock: ClockPort,
+        logger: Logger,
+      ): GetAuctionMetricsSummary =>
+        new GetAuctionMetricsSummary(volume, closing, rankings, prices, users, clock, (section) => {
+          logger.warn('Seccion de metricas degradada', { section })
+        }),
+      inject: [
+        GetAuctionVolumeAndSuccess,
+        GetAuctionClosingTimeAndTrends,
+        GetAuctionProductRankings,
+        GetAuctionAveragePrices,
+        GetAuctionUsersAndCommissions,
+        CLOCK,
+        LOGGER,
+      ],
     },
 
     {
