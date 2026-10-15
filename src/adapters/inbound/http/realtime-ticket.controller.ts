@@ -21,9 +21,13 @@ class RealtimeTicketResponse {
  *
  * Un navegador no puede fijar `Authorization` al abrir un WebSocket y poner el JWT en la URL lo
  * dejaria en los registros del proxy. Aqui se verifica el testimonio como en cualquier ruta
- * (guard global), se exige el mismo rol que las lecturas de Subasta y se devuelve un ticket
- * opaco, ligado al `sub`, de un solo uso y con caducidad de 30 segundos. No acepta cuerpo:
- * nadie puede pedir un ticket para otro jugador.
+ * (guard global), se exige `Player` o `GameMaster` -los roles del listado de Marketplace- y se
+ * devuelve un ticket opaco, ligado al `sub`, de un solo uso y con caducidad de 30 segundos. No
+ * acepta cuerpo: nadie puede pedir un ticket para otro jugador.
+ *
+ * OJO: el detalle (`GET /v1/auctions/:auctionId`) es solo `Player`, asi que un Maestro de Juego
+ * puede suscribirse al canal de una subasta sin poder leer su detalle. No filtra datos (las senales
+ * no llevan datos personales); es una decision registrada en Management#584.
  *
  * Solo se registra cuando `AUCTION_REALTIME_ENABLED=true`.
  */
