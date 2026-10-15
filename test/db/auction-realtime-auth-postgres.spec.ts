@@ -29,7 +29,7 @@ type RoleName = 'PLAYER' | 'MODERATOR' | 'ADMINISTRATOR' | 'SUPER_ADMINISTRATOR'
 const identity = (subject: string, roles: readonly RoleName[]): VerifiedIdentity => ({
   subject,
   email: null,
-  roles: new Set(roles) as VerifiedIdentity['roles'],
+  roles: new Set(roles),
 })
 
 /** Testimonios que entiende el verificador simulado. Cualquier otro es invalido. */
